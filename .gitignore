@@ -1,0 +1,60 @@
+# 06_Stock private broker inputs
+70_Imports/raw/*
+!70_Imports/raw/.gitkeep
+
+# 06_Stock generated import outputs
+70_Imports/processed/*
+!70_Imports/processed/.gitkeep
+
+# Generated SQLite/database artifacts
+70_Imports/**/*.db
+70_Imports/**/*.sqlite
+70_Imports/**/*.sqlite3
+
+# Python local artifacts
+70_Imports/scripts/__pycache__/
+70_Imports/scripts/tests/__pycache__/
+70_Imports/scripts/.pytest_cache/
+
+# Personal investment data
+70_Imports/raw/
+70_Imports/processed/
+70_Imports/exports/
+70_Imports/logs/
+20_Companies/
+30_Trades/
+31_Cashflows/
+50_Journal/
+60_Library/
+90_Attachments/
+
+# Git / repo safety
+.git/
+.github/
+
+# Obsidian local settings
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/cache/
+.obsidian/plugins/*/data.json
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+pytest-cache-files-*/
+.tmp_pytest/
+
+# OS / local placeholder artifacts
+.DS_Store
+Thumbs.db
+desktop.ini
+UEQVWK.DOCX
+
+# Personal export files
+*.csv
+*.db
+*.xlsx
+*.xls
