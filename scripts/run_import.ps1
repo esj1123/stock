@@ -77,6 +77,13 @@ foreach ($Arg in $RemainingArgs) {
   }
 }
 
-$MainArgs = if ($HasAction) { $RemainingArgs } else { @("all") + $RemainingArgs }
+[string[]]$MainArgs = @()
+if ($HasAction) {
+  $MainArgs = @($RemainingArgs)
+}
+else {
+  $MainArgs = @("all") + @($RemainingArgs)
+}
 
 & $VenvPython $MainPy @MainArgs
+exit $LASTEXITCODE
