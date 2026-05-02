@@ -34,15 +34,25 @@ $ReqFile = Join-Path $RootDir "70_Imports\scripts\requirements.txt"
 $MainPy = Join-Path $RootDir "70_Imports\scripts\main.py"
 
 $Python = $null
-foreach ($Candidate in @("python", "py")) {
-  if (-not (Get-Command $Candidate -ErrorAction SilentlyContinue)) {
+foreach ($Candidate in @("py", "python")) {
+  $Command = Get-Command $Candidate -ErrorAction SilentlyContinue | Select-Object -First 1
+  if (-not $Command) {
     continue
   }
 
-  & $Candidate --version *> $null
-  if ($LASTEXITCODE -eq 0) {
-    $Python = $Candidate
-    break
+  if ($Command.Source -and ($Command.Source -like "*\WindowsApps\python.exe")) {
+    continue
+  }
+
+  try {
+    & $Candidate --version *> $null
+    if ($LASTEXITCODE -eq 0) {
+      $Python = $Candidate
+      break
+    }
+  }
+  catch {
+    continue
   }
 }
 
