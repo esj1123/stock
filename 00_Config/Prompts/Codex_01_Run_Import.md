@@ -17,7 +17,7 @@
    - 00_Config/QuickStart.md
    - 70_Imports/raw/
    - 70_Imports/scripts/requirements.txt
-   - 70_Imports/scripts/namoo_excel_import.py
+   - 70_Imports/scripts/main.py
 3) 70_Imports/raw/에 .xlsx 파일이 1개 이상 있는지 확인하세요.
    - 0개면 "임포트할 파일이 없음"으로 종료하고, 사용자가 넣어야 할 위치를 안내하세요.
 
@@ -27,14 +27,14 @@
 - 가능한 경우, 먼저 --dry-run으로 점검하고, 그 다음 실제 실행하세요.
 
 [실행 절차]
-A) (권장) dry-run:
-   python 70_Imports/scripts/namoo_excel_import.py --dry-run
-
-B) 의존성 설치(필요 시):
+A) 의존성 설치(필요 시):
    pip install -r 70_Imports/scripts/requirements.txt
 
+B) (권장) dry-run:
+   python 70_Imports/scripts/main.py import --vault-root . --raw-dir 70_Imports/raw --dry-run
+
 C) 실제 실행(회사 폴더 자동 생성 포함):
-   python 70_Imports/scripts/namoo_excel_import.py --create-companies
+   python 70_Imports/scripts/main.py all --vault-root . --raw-dir 70_Imports/raw --create-companies
 
 [사후 점검]
 1) 아래 파일/폴더를 확인해 결과를 요약하세요.
@@ -51,4 +51,3 @@ C) 실제 실행(회사 폴더 자동 생성 포함):
 
 작업을 실행하고, 위 형식대로 결과만 보고하세요.
 ```
-

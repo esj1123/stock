@@ -17,7 +17,11 @@
 
 [1) Import 실행]
 - 70_Imports/raw/에 .xlsx가 있는지 확인 (없으면 종료)
-- --dry-run → requirements 설치 → --create-companies 순으로 실행
+- requirements 설치 → `main.py import --dry-run` → `main.py all --create-companies` 순으로 실행
+- 명령은 Vault 루트 기준으로 실행:
+  - `pip install -r 70_Imports/scripts/requirements.txt`
+  - `python 70_Imports/scripts/main.py import --vault-root . --raw-dir 70_Imports/raw --dry-run`
+  - `python 70_Imports/scripts/main.py all --vault-root . --raw-dir 70_Imports/raw --create-companies`
 
 [2) Import 요약 노트]
 - 70_Imports/logs/Import_Summary_YYYY-MM-DD.md 생성(없으면 폴더 생성)
@@ -40,4 +44,3 @@
   2) 70_Imports/review/
   3) 50_Journal/Month_End_YYYY-MM.md 경로
 ```
-

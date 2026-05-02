@@ -25,7 +25,7 @@
 - 70_Imports/processed/
 - 70_Imports/review/
 - 70_Imports/scripts/requirements.txt
-- 70_Imports/scripts/namoo_excel_import.py
+- 70_Imports/scripts/main.py
 - 99_Templates/Month_End_Snapshot.md
 
 [보고 형식]
@@ -33,4 +33,3 @@
 2) 누락 목록(경로)
 3) 누락이 있으면, QuickStart 흐름을 깨지 않게 “어떤 폴더/파일이 필요”한지 제안(하지만 생성/수정은 하지 말 것)
 ```
-

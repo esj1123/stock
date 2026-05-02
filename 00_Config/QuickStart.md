@@ -231,10 +231,10 @@ PC 웹보다 HTS가 더 편한 분은 이 방법이 안정적입니다.
 옵션 B: Vault 루트(터미널)에서 실행:
 - [ ] 의존성 설치
   - `pip install -r 70_Imports/scripts/requirements.txt`
-- [ ] 실행
-  - `python 70_Imports/scripts/namoo_excel_import.py --create-companies`
 - [ ] (테스트) 파일 생성 없이 점검
-  - `python 70_Imports/scripts/namoo_excel_import.py --dry-run`
+  - `python 70_Imports/scripts/main.py import --vault-root . --raw-dir 70_Imports/raw --dry-run`
+- [ ] 실행
+  - `python 70_Imports/scripts/main.py all --vault-root . --raw-dir 70_Imports/raw --create-companies`
 
 > Codex로 “명령만 말해서” 실행하고 싶으면
 > - `00_Config/Prompts/` (프롬프트 카드)
@@ -319,7 +319,7 @@ PC 웹보다 HTS가 더 편한 분은 이 방법이 안정적입니다.
 
 ### 6.1) 분류 실패(UNCLASSIFIED)가 많다
 - [ ] 엑셀의 “열 제목(헤더)”이 어떤지 확인
-- [ ] `70_Imports/scripts/namoo_excel_import.py`의 `COLUMN_SYNONYMS` / 키워드 규칙 보완
+- [ ] `70_Imports/scripts/README.md`와 import pipeline 규칙 튜닝 대상으로 기록
 
 ### 6.2) 종목코드(0패딩) / 티커가 깨진다
 - [ ] 엑셀에서 종목코드가 숫자로 인식되어 앞자리 0이 사라졌는지 확인

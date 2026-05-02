@@ -37,9 +37,8 @@
   4) (가능하면) COLUMN_SYNONYMS에 추가하면 좋을 열 이름 후보(추정 금지, 실제 파일에 있는 헤더만)
 
 [주의]
-- 코드 파일(70_Imports/scripts/namoo_excel_import.py) 수정 금지.
+- 코드 파일(70_Imports/scripts/*.py) 수정 금지.
 - raw 엑셀 수정 금지.
 
 끝나면, 생성한 triage 노트 경로를 마지막 줄에 알려주세요.
 ```
-

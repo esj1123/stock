@@ -14,9 +14,9 @@
 - 70_Imports/raw/에 .xlsx가 1개 이상인지 확인. 없으면 종료.
 
 [실행]
-1) python 70_Imports/scripts/namoo_excel_import.py --dry-run
-2) pip install -r 70_Imports/scripts/requirements.txt
-3) python 70_Imports/scripts/namoo_excel_import.py --create-companies
+1) pip install -r 70_Imports/scripts/requirements.txt
+2) python 70_Imports/scripts/main.py import --vault-root . --raw-dir 70_Imports/raw --dry-run
+3) python 70_Imports/scripts/main.py all --vault-root . --raw-dir 70_Imports/raw --create-companies
 
 [요약 노트 생성]
 - 아래 경로에 폴더가 없으면 생성하세요: 70_Imports/logs/
@@ -41,4 +41,3 @@
 
 끝나면, 생성한 요약 노트 경로를 마지막 줄에 알려주세요.
 ```
-

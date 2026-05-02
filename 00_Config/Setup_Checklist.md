@@ -76,10 +76,10 @@
 
 ### 방법 2) 터미널에서 실행
 - [ ] 테스트(파일 생성 없이):
-  - [ ] `python 70_Imports/scripts/namoo_excel_import.py --dry-run`
+  - [ ] `python 70_Imports/scripts/main.py import --vault-root . --raw-dir 70_Imports/raw --dry-run`
 
 - [ ] 실제 실행:
-  - [ ] `python 70_Imports/scripts/namoo_excel_import.py --create-companies`
+  - [ ] `python 70_Imports/scripts/main.py all --vault-root . --raw-dir 70_Imports/raw --create-companies`
 
 생성/갱신되는 산출물(정상 체크):
 - [ ] `70_Imports/processed/namoo_ledger.csv` 생성됨
@@ -94,7 +94,7 @@
 - [ ] `10_Dashboard/Import_Review.md`를 열었을 때 표가 보이는가?
 - [ ] `70_Imports/review/`에 UNCLASSIFIED 노트가 많이 쌓였는가?
   - [ ] 엑셀 헤더(열 제목) 차이일 가능성이 높음
-  - [ ] `70_Imports/scripts/namoo_excel_import.py`의 `COLUMN_SYNONYMS` / 키워드 규칙 튜닝 대상으로 기록
+  - [ ] `70_Imports/scripts/README.md`와 import pipeline 규칙 튜닝 대상으로 기록
 
 ---
 

@@ -25,7 +25,7 @@
 ## Codex에게 “반드시 참조”시키는 파일
 
 - `00_Config/QuickStart.md`
-- `70_Imports/scripts/namoo_excel_import.py`
+- `70_Imports/scripts/main.py`
 - `70_Imports/scripts/requirements.txt`
 
 ---
@@ -35,4 +35,3 @@
 - `70_Imports/raw/`의 원본 엑셀은 **절대 수정/이동/삭제하지 않기**  
 - 코드 변경(임포터 수정 등)은 **반드시 diff 제안**을 먼저 만들고, 내 승인 후 적용  
 - 외부 웹 검색/다운로드는 원칙적으로 하지 않기(필요 시 나에게 먼저 물어보기)
-

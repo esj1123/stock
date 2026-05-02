@@ -8,7 +8,7 @@
 ## 0) 전제
 
 - 이 Vault 루트에 `70_Imports/` 폴더가 있고, 아래 스크립트가 존재해야 합니다.
-  - `70_Imports/scripts/namoo_excel_import.py`
+  - `70_Imports/scripts/main.py`
   - `70_Imports/scripts/requirements.txt`
 - 나무에서 내려받은 `.xlsx` 파일은 `70_Imports/raw/`에 넣습니다.
 - **권장:** Vault를 Git 저장소로 운영 (`git init`)
@@ -28,7 +28,7 @@ Vault 루트에서:
   - `codex`
   - 프롬프트 예시:
     - “`70_Imports/raw/`에 있는 새 엑셀을 기준으로 import 실행해줘.
-       `python 70_Imports/scripts/namoo_excel_import.py --create-companies` 실행하고,
+       `python 70_Imports/scripts/main.py all --vault-root . --raw-dir 70_Imports/raw --create-companies` 실행하고,
        `10_Dashboard/Import_Review.md`에서 확인할 항목을 요약해줘.”
 
 ---
@@ -54,9 +54,9 @@ Vault 루트에서:
 - Windows: `scripts/run_import.ps1`
 
 동작:
-1) `70_Imports/.venv`가 없으면 생성
+1) `.venv`가 없으면 생성
 2) requirements 설치/업데이트
-3) import 실행
+3) `70_Imports/scripts/main.py` 실행
 
 ---
 
