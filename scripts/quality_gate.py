@@ -14,7 +14,7 @@ IMPORT_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "70_Imports" / "scrip
 if str(IMPORT_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(IMPORT_SCRIPTS_DIR))
 
-from nh_importer import canonical_overseas_position_key, is_overseas_position_row
+from nh_importer import canonical_overseas_position_key, is_overseas_cashflow_amount_only_helper_row, is_overseas_position_row
 from obsidian_writer import company_note_identity_key, parse_note_frontmatter
 
 
@@ -221,6 +221,20 @@ def cash_company_qa_findings(processed_dir: Path, holdings: list[dict[str, str]]
     return findings
 
 
+def skipped_rows_findings(processed_dir: Path, unclassified_rows: list[dict[str, str]]) -> list[str]:
+    findings = [
+        f"unclassified_rows row {idx} matches broker helper skip pattern"
+        for idx, row in enumerate(unclassified_rows, start=2)
+        if is_overseas_cashflow_amount_only_helper_row(row)
+    ]
+
+    skipped_rows = read_csv_rows(processed_dir / "skipped_rows.csv")
+    for idx, row in enumerate(skipped_rows, start=2):
+        if is_blank(row.get("skip_reason", "")):
+            findings.append(f"skipped_rows row {idx} has blank skip_reason")
+    return findings
+
+
 def company_note_duplicate_findings(vault_root: Path) -> list[str]:
     company_root = vault_root / "20_Companies"
     if not company_root.exists():
@@ -263,6 +277,7 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     source_index = read_csv_rows(processed_dir / "source_file_index.csv")
     transactions = read_csv_rows(processed_dir / "processed_transactions.csv")
     holdings = read_csv_rows(processed_dir / "processed_holdings.csv")
+    unclassified_rows = read_csv_rows(processed_dir / "unclassified_rows.csv")
     summary = summary_map(processed_dir)
 
     if not source_index:
@@ -320,6 +335,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "cash assets excluded from Company QA", "FAIL", "; ".join(cash_qa_findings[:5]))
     else:
         write_result(results, "cash assets excluded from Company QA", "PASS", "no cash ticker appears in Company thesis/sell-criteria QA.")
+
+    skip_findings = skipped_rows_findings(processed_dir, unclassified_rows)
+    if skip_findings:
+        write_result(results, "broker helper skipped rows contract", "FAIL", "; ".join(skip_findings[:5]))
+    else:
+        write_result(results, "broker helper skipped rows contract", "PASS", "amount-only broker helper rows are skipped with non-empty reasons.")
 
     company_note_duplicates = company_note_duplicate_findings(vault_root)
     if company_note_duplicates:

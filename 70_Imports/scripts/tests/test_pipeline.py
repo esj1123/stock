@@ -9,6 +9,8 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[3] / "scripts"))
 
 from nh_importer import (
+    COLUMN_ALIASES,
+    OVERSEAS_CASHFLOW_AMOUNT_ONLY_SKIP_REASON,
     canonical_overseas_position_key,
     extract_symbol_from_parentheses,
     import_raw_dir,
@@ -137,6 +139,85 @@ def test_quality_gate_currency_helper_flags_fx_rate():
     findings = invalid_currency_findings([{"ticker": "AAPL", "currency": "1473.10"}])
     assert findings
     assert "FX rate" in findings[0]
+
+
+def amount_only_cashflow_row(**overrides):
+    row = {
+        COLUMN_ALIASES["trade_amount"][0]: "100",
+        COLUMN_ALIASES["settlement_amount"][0]: "100",
+        COLUMN_ALIASES["currency"][0]: "USD",
+        COLUMN_ALIASES["exchange_rate"][0]: "1473.10",
+        COLUMN_ALIASES["quantity"][0]: "0",
+        COLUMN_ALIASES["price"][0]: "0",
+        COLUMN_ALIASES["fee"][0]: "0",
+        COLUMN_ALIASES["tax"][0]: "0",
+    }
+    row.update(overrides)
+    return row
+
+
+def import_single_overseas_cashflow_row(vault: Path, row: dict[str, str]) -> Path:
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([row]).to_excel(raw / "overseas_cashflow.xlsx", index=False)
+    import_raw_dir(vault)
+    return vault / "70_Imports" / "processed"
+
+
+def test_overseas_cashflow_amount_only_no_identity_row_is_skipped(tmp_path: Path):
+    processed = import_single_overseas_cashflow_row(tmp_path, amount_only_cashflow_row())
+
+    transactions = pd.read_csv(processed / "processed_transactions.csv")
+    unclassified = pd.read_csv(processed / "unclassified_rows.csv")
+    skipped = pd.read_csv(processed / "skipped_rows.csv")
+
+    assert transactions.empty
+    assert unclassified.empty
+    assert len(skipped) == 1
+    assert skipped["skip_reason"].iloc[0] == OVERSEAS_CASHFLOW_AMOUNT_ONLY_SKIP_REASON
+    assert skipped["currency"].iloc[0] == "USD"
+
+
+def test_amount_only_row_with_date_is_not_skipped(tmp_path: Path):
+    processed = import_single_overseas_cashflow_row(
+        tmp_path,
+        amount_only_cashflow_row(**{COLUMN_ALIASES["trade_date"][0]: "2026-04-29"}),
+    )
+
+    unclassified = pd.read_csv(processed / "unclassified_rows.csv")
+    skipped = pd.read_csv(processed / "skipped_rows.csv")
+
+    assert len(unclassified) == 1
+    assert skipped.empty
+
+
+def test_amount_only_row_with_memo_is_not_skipped(tmp_path: Path):
+    processed = import_single_overseas_cashflow_row(
+        tmp_path,
+        amount_only_cashflow_row(**{COLUMN_ALIASES["memo"][0]: "manual review"}),
+    )
+
+    unclassified = pd.read_csv(processed / "unclassified_rows.csv")
+    skipped = pd.read_csv(processed / "skipped_rows.csv")
+
+    assert len(unclassified) == 1
+    assert skipped.empty
+
+
+def test_amount_only_row_with_deposit_keyword_is_not_skipped(tmp_path: Path):
+    processed = import_single_overseas_cashflow_row(
+        tmp_path,
+        amount_only_cashflow_row(**{COLUMN_ALIASES["transaction_raw"][0]: "deposit"}),
+    )
+
+    transactions = pd.read_csv(processed / "processed_transactions.csv")
+    unclassified = pd.read_csv(processed / "unclassified_rows.csv")
+    skipped = pd.read_csv(processed / "skipped_rows.csv")
+
+    assert len(transactions) == 1
+    assert transactions["transaction_type"].iloc[0] == "deposit"
+    assert unclassified.empty
+    assert skipped.empty
 
 
 def test_cash_holdings_do_not_create_company_review_items(tmp_path: Path):

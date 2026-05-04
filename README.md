@@ -97,6 +97,7 @@ Known normalization rules:
 - Treat USD cash/예수금 as cash, not stock.
 - For cash rows, currency codes in ticker/security name override source-type defaults.
 - Exclude cash assets from Company note QA.
+- Skip overseas cashflow amount-only helper rows with no date, ticker, name, or memo; record the skip reason in `skipped_rows.csv`.
 
 ## Initial Holdings Template
 

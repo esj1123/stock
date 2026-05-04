@@ -84,6 +84,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     sources = read_csv(processed_dir / "source_file_index.csv")
     qa = read_csv(processed_dir / "qa_exceptions.csv")
     unclassified = read_csv(processed_dir / "unclassified_rows.csv")
+    skipped = read_csv(processed_dir / "skipped_rows.csv")
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
@@ -105,7 +106,12 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
         return "\n".join(["## 현금흐름", markdown_table(cash, ["trade_date", "transaction_type", "account_type", "settlement_amount", "currency"], 100), "\n## 배당/분배금", markdown_table(dividends, ["trade_date", "ticker", "security_name", "settlement_amount", "currency"], 100)])
     if name == "Import_Review.md":
         status_rows = summary[summary.get("metric", pd.Series(dtype=str)).isin(["raw_file_count", "transaction_history_file_count", "holdings_file_count", "balance_data_available", "total_portfolio_value_status", "total_portfolio_value_basis", "portfolio_summary_estimated", "data_quality_warning"])] if not summary.empty else summary
-        return "\n".join([warning, "## Data status", markdown_table(status_rows), "\n## Imported source files", markdown_table(sources), "\n## Unclassified transaction rows", markdown_table(unclassified, limit=50), "\n## Next actions\n- unclassified row가 있으면 컬럼 매핑 또는 거래유형 키워드를 보완하세요.\n- 잔고자료 미반영 경고가 있으면 종합잔고/ISA잔고/해외증권잔고 파일을 raw 폴더에 추가하세요.\n- sensitive warning이 있으면 generated Markdown에 노출되지 않았는지 확인하세요."]).strip()
+        skipped_view = skipped
+        if not skipped.empty and "row_count" in skipped.columns:
+            group_cols = [col for col in ["skip_reason", "source_file_type", "account_type", "currency", "fx_rate"] if col in skipped.columns]
+            if group_cols:
+                skipped_view = skipped.groupby(group_cols, dropna=False)["row_count"].sum().reset_index()
+        return "\n".join([warning, "## Data status", markdown_table(status_rows), "\n## Imported source files", markdown_table(sources), "\n## Skipped broker helper rows", markdown_table(skipped_view, ["skip_reason", "source_file_type", "account_type", "currency", "fx_rate", "row_count"], 50), "\n## Unclassified transaction rows", markdown_table(unclassified, limit=50), "\n## Next actions\n- unclassified row가 있으면 컬럼 매핑 또는 거래유형 키워드를 보완하세요.\n- 잔고자료 미반영 경고가 있으면 종합잔고/ISA잔고/해외증권잔고 파일을 raw 폴더에 추가하세요.\n- sensitive warning이 있으면 generated Markdown에 노출되지 않았는지 확인하세요."]).strip()
     if name == "Risk_Watchlist.md":
         return "\n".join([warning, markdown_table(risk, ["ticker", "security_name", "account_type", "risk_flags", "pnl_pct", "weight_pct", "suggested_action"], 100)]).strip()
     if name == "Review_Queue.md":

@@ -21,6 +21,13 @@ NORMALIZED_COLUMNS = [
 
 HISTORY_COLUMNS = NORMALIZED_COLUMNS + ["history_reason", "suggested_destination", "suggested_action"]
 
+SKIPPED_ROWS_COLUMNS = [
+    "source_file", "source_file_type", "account_type", "skip_reason",
+    "currency", "fx_rate", "amount_kind", "row_count",
+]
+
+OVERSEAS_CASHFLOW_AMOUNT_ONLY_SKIP_REASON = "OVERSEAS_CASHFLOW_AMOUNT_ONLY_NO_IDENTITY"
+
 TRANSACTION_TYPES = {
     "buy", "sell", "deposit", "withdrawal", "dividend", "interest", "exchange",
     "fee", "tax", "transfer", "split", "rights", "unknown",
@@ -266,6 +273,16 @@ def normalize_time(value: Any) -> str:
 
 def classify_transaction_type(text: Any) -> str:
     s = str(text or "").lower()
+    english_tokens = set(re.findall(r"[a-z]+", s))
+    for name, keys in [
+        ("deposit", ["deposit"]),
+        ("withdrawal", ["withdrawal", "withdraw"]),
+        ("exchange", ["exchange"]),
+        ("fee", ["fee"]),
+        ("tax", ["tax"]),
+    ]:
+        if any(k in english_tokens for k in keys):
+            return name
     rules = [
         ("buy", ["매수", "buy", "매입"]),
         ("sell", ["매도", "sell"]),
@@ -284,6 +301,76 @@ def classify_transaction_type(text: Any) -> str:
         if any(k.lower() in s for k in keys):
             return name
     return "unknown"
+
+
+def is_zero_or_blank_amount(value: Any, tolerance: float = 1e-9) -> bool:
+    if is_blank_text(value):
+        return True
+    return abs(parse_korean_number(value)) <= tolerance
+
+
+def is_overseas_cashflow_amount_only_helper_row(row: dict[str, Any] | pd.Series, tolerance: float = 1e-9) -> bool:
+    source_type = str(_row_value(row, "source_file_type") or "").strip().lower()
+    account_type = str(_row_value(row, "account_type") or "").strip().lower()
+    transaction_type = str(_row_value(row, "transaction_type") or "").strip().lower()
+    if source_type != "cashflow" or account_type != "overseas" or transaction_type != "unknown":
+        return False
+
+    for field in ["ticker", "security_name", "trade_date", "raw_memo"]:
+        if not is_blank_text(_row_value(row, field)):
+            return False
+
+    currency = currency_code_from_text(_row_value(row, "currency"))
+    if not currency:
+        return False
+
+    fx_rate = _row_value(row, "fx_rate")
+    if is_blank_text(fx_rate) and "overseas" not in f"{source_type} {account_type}":
+        return False
+
+    trade_amount = parse_korean_number(_row_value(row, "trade_amount"))
+    settlement_amount = parse_korean_number(_row_value(row, "settlement_amount"))
+    if trade_amount <= 0 or settlement_amount <= 0:
+        return False
+    if abs(trade_amount - settlement_amount) > tolerance:
+        return False
+
+    for field in ["quantity", "price", "fee", "tax"]:
+        if not is_zero_or_blank_amount(_row_value(row, field), tolerance=tolerance):
+            return False
+
+    keyword_text = " ".join(str(_row_value(row, field) or "") for field in ["ticker", "security_name", "raw_memo"])
+    if classify_transaction_type(keyword_text) != "unknown":
+        return False
+
+    return True
+
+
+def split_skipped_broker_helper_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty:
+        return df, pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS)
+    skip_mask = df.apply(is_overseas_cashflow_amount_only_helper_row, axis=1)
+    if not bool(skip_mask.any()):
+        return df, pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS)
+
+    skipped_records = []
+    for _, row in df[skip_mask].iterrows():
+        fx_rate = row.get("fx_rate", "")
+        skipped_records.append({
+            "source_file": row.get("source_file", ""),
+            "source_file_type": row.get("source_file_type", ""),
+            "account_type": row.get("account_type", ""),
+            "skip_reason": OVERSEAS_CASHFLOW_AMOUNT_ONLY_SKIP_REASON,
+            "currency": currency_code_from_text(row.get("currency", "")),
+            "fx_rate": "" if pd.isna(fx_rate) else fx_rate,
+            "amount_kind": "trade_amount_equals_settlement_amount",
+            "row_count": 1,
+        })
+
+    skipped = pd.DataFrame(skipped_records, columns=SKIPPED_ROWS_COLUMNS)
+    group_cols = [col for col in SKIPPED_ROWS_COLUMNS if col != "row_count"]
+    skipped = skipped.groupby(group_cols, dropna=False, as_index=False)["row_count"].sum()
+    return df[~skip_mask].copy(), skipped[SKIPPED_ROWS_COLUMNS]
 
 
 def is_leveraged_etf_name(name: Any, metadata: Any = "") -> bool:
@@ -465,16 +552,16 @@ def infer_source_file_type(path: Path, sheet_name: str, df: pd.DataFrame) -> str
         "종합거래내역", "거래내역 상세", "거래내역상세", "실거래일자", "거래유형",
         "상세내용", "거래시간", "정산금액", "체결",
     ]
-    cashflow_signals = ["입출금내역", "입출금", "예수금", "출금가능금액"]
+    cashflow_signals = ["입출금내역", "입출금", "예수금", "출금가능금액", "cashflow", "cash flow", "cash_flow"]
     overseas_balance_signals = ["해외증권잔고조회", "해외증권잔고", "외화평가금액", "해외잔고"]
     holdings_signals = [
         "종합잔고", "잔고조회", "계좌잔고", "보유잔고", "보유현황",
         "평가금액", "평가손익", "평가손익률", "평균단가", "현재가",
     ]
-    if any(k.lower() in lower for k in transaction_signals):
-        return "transaction_history"
     if any(k.lower() in lower for k in cashflow_signals):
         return "cashflow"
+    if any(k.lower() in lower for k in transaction_signals):
+        return "transaction_history"
     if any(k.lower() in lower for k in overseas_balance_signals):
         return "overseas_balance"
     if any(k.lower() in lower for k in holdings_signals):
@@ -614,6 +701,7 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
         "qa_exceptions.csv": pd.DataFrame(columns=["exception_id", "severity", "file", "issue", "suggested_fix"]),
         "source_file_index.csv": pd.DataFrame(columns=["source_file", "source_file_type", "account_type", "raw_path_hash", "size_bytes", "modified_at", "imported_at", "sensitive_data_found"]),
         "unclassified_rows.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
+        "skipped_rows.csv": pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS),
         "raw_rows_audit.csv": pd.DataFrame(columns=["import_id", "source_file", "sheet", "row_number", "raw_json"]),
     }
 
@@ -725,6 +813,8 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
     if not combined.empty:
         combined = combined.drop_duplicates(subset=["import_id"], keep="last").reset_index(drop=True)
     summary.duplicate_rows_removed = before - len(combined)
+    combined, skipped_rows = split_skipped_broker_helper_rows(combined)
+    outputs["skipped_rows.csv"] = skipped_rows
     summary.unclassified_rows = int((combined.get("transaction_type", pd.Series(dtype=str)) == "unknown").sum()) if not combined.empty else 0
     summary.unknown_columns = len(unknown_columns)
 
