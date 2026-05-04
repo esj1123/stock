@@ -16,6 +16,7 @@ from nh_importer import (
     infer_source_file_type,
     is_leveraged_etf_name,
     load_workbook_tables,
+    normalize_cash_currency,
     normalize_currency_and_fx_rate,
     normalize_dataframe,
     normalize_date,
@@ -142,6 +143,7 @@ def test_cash_holdings_do_not_create_company_review_items(tmp_path: Path):
     # Wrapper venv paths are not integration-tested here because that would create host venvs.
     assert infer_asset_type("USD", "USD") == "cash"
     assert infer_asset_type("외화예수금", "") == "cash"
+    assert normalize_cash_currency("USD", "USD", "KRW") == "USD"
 
     vault = tmp_path
     processed = vault / "70_Imports" / "processed"
@@ -177,7 +179,7 @@ def test_cash_holdings_do_not_create_company_review_items(tmp_path: Path):
     company = vault / "20_Companies" / "USD"
     company.mkdir(parents=True)
     (company / "Company.md").write_text(
-        "---\ntype: company\nticker: USD\nmarket: US\nasset_type: cash\n---\n# USD\n",
+        "---\ntype: company\nticker: USD\nmarket: US\n---\n# USD\n",
         encoding="utf-8",
     )
     (vault / "10_Dashboard").mkdir()

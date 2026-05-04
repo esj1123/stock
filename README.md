@@ -94,6 +94,7 @@ Known normalization rules:
 - Overseas duplicate detection uses canonical keys based on parenthesized symbol, known ISIN alias, or normalized name.
 - Store `currency` and `fx_rate` separately; `currency` must contain a currency code only.
 - Treat USD cash/예수금 as cash, not stock.
+- For cash rows, currency codes in ticker/security name override source-type defaults.
 - Exclude cash assets from Company note QA.
 
 ## Initial Holdings Template

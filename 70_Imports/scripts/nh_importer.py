@@ -398,6 +398,15 @@ def is_cash_asset_name(name: str = "", ticker: str = "") -> bool:
     return name_code in VALID_CURRENCY_CODES
 
 
+def normalize_cash_currency(name: str = "", ticker: str = "", currency: Any = "") -> str:
+    current = currency_code_from_text(currency)
+    if not is_cash_asset_name(name, ticker):
+        return current
+    ticker_currency = currency_code_from_text(ticker)
+    name_currency = currency_code_from_text(name)
+    return ticker_currency or name_currency or current
+
+
 def infer_asset_type(name: str, ticker: str = "") -> str:
     s = f"{name or ''} {ticker or ''}".lower()
     if is_cash_asset_name(name, ticker):
@@ -541,6 +550,9 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         raw_currency = raw.get(cols["currency"]) if cols.get("currency") is not None else ""
         raw_fx_rate = raw.get(cols["exchange_rate"]) if cols.get("exchange_rate") is not None else ""
         currency, fx_rate = normalize_currency_and_fx_rate(raw_currency, raw_fx_rate, source_type)
+        asset_type = infer_asset_type(name, ticker)
+        if asset_type == "cash":
+            currency = normalize_cash_currency(name, ticker, currency)
         fx_rate_for_stable = "" if pd.isna(fx_rate) else fx_rate
 
         if not any([date, ticker, name, raw_type, trade_amount, settlement_amount, evaluation_amount_value, balance_quantity_value]):
@@ -562,7 +574,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "source_file_type": source_type,
             "account_type": account_type,
             "market": infer_market(ticker, name, source_type),
-            "asset_type": infer_asset_type(name, ticker),
+            "asset_type": asset_type,
             "ticker": ticker,
             "security_name": redact_sensitive(name),
             "trade_date": date,
