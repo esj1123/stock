@@ -7,11 +7,11 @@ from typing import Any
 
 import pandas as pd
 
-from nh_importer import NORMALIZED_COLUMNS, is_leveraged_etf_name
+from nh_importer import NORMALIZED_COLUMNS, is_leveraged_etf_name, remove_overlapping_overseas_holdings
 
 HISTORY_COLUMNS = [
     "import_id", "source_file", "source_file_type", "account_type", "market", "asset_type",
-    "ticker", "security_name", "trade_date", "currency", "balance_quantity", "evaluation_amount",
+    "ticker", "security_name", "trade_date", "currency", "fx_rate", "balance_quantity", "evaluation_amount",
     "unrealized_pnl", "pnl_pct", "weight_pct", "history_reason", "suggested_destination", "suggested_action",
 ]
 
@@ -272,6 +272,7 @@ def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.D
         return summary, pd.DataFrame(columns=NORMALIZED_COLUMNS), pd.DataFrame(columns=RISK_COLUMNS), pd.DataFrame(columns=REVIEW_COLUMNS), pd.DataFrame(columns=HISTORY_COLUMNS)
     holdings["ticker"] = holdings.get("ticker", "").astype(str)
     holdings = holdings[~holdings["ticker"].str.lower().isin(["", "nan", "none"])].copy()
+    holdings = remove_overlapping_overseas_holdings(holdings)
     if holdings.empty:
         summary = portfolio_summary_rows(
             total_value="",
@@ -318,6 +319,9 @@ def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.D
     review_rows = []
     for _, r in current_holdings.iterrows():
         ticker = str(r.get("ticker", ""))
+        asset_type = str(r.get("asset_type", "") or "").strip().lower()
+        if asset_type == "cash":
+            continue
         text = note_text(vault_root, ticker)
         meta = parse_frontmatter(text)
         flags = []

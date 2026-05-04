@@ -52,9 +52,11 @@ def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = 
         meta = parse_frontmatter(text)
         rel = str(path.relative_to(vault_root))
         typ = meta.get("type") or meta.get("doc_type")
+        asset_type = str(meta.get("asset_type", "") or "").strip().lower()
+        is_cash_note = asset_type == "cash"
         if "type" not in meta:
             add(rows, "INV-EX-01", "blocking", rel, "필수 YAML type이 없습니다.", "frontmatter에 type: company를 추가하세요.")
-        if typ in {"company", "holding_stock", "holding_etf"}:
+        if typ in {"company", "holding_stock", "holding_etf"} and not is_cash_note:
             if not meta.get("ticker") or not meta.get("market"):
                 add(rows, "INV-EX-02", "blocking", rel, "ticker 또는 market이 비어 있습니다.", "ticker와 market을 채우세요.")
             if not has_filled_section(text, ["투자 논리", "Thesis", "매수 이유"]):
@@ -85,6 +87,9 @@ def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = 
     if not holdings.empty:
         for _, r in holdings.iterrows():
             ticker = str(r.get("ticker", ""))
+            asset_type = str(r.get("asset_type", "") or "").strip().lower()
+            if asset_type == "cash":
+                continue
             pnl = pd.to_numeric(pd.Series([r.get("pnl_pct", 0)]), errors="coerce").fillna(0).iloc[0]
             if pnl <= -10:
                 add(rows, "INV-EX-04", "blocking", f"processed_holdings.csv:{ticker}", "pnl_pct <= -10이며 최근 리뷰 확인이 필요합니다.", "Risk Event 또는 Review Report를 작성하세요.")

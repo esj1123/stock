@@ -15,7 +15,7 @@ import pandas as pd
 NORMALIZED_COLUMNS = [
     "import_id", "source_file", "source_file_type", "account_type", "market", "asset_type",
     "ticker", "security_name", "trade_date", "trade_time", "transaction_type",
-    "quantity", "price", "trade_amount", "settlement_amount", "fee", "tax", "currency",
+    "quantity", "price", "trade_amount", "settlement_amount", "fee", "tax", "currency", "fx_rate",
     "balance_quantity", "evaluation_amount", "unrealized_pnl", "pnl_pct", "raw_memo",
 ]
 
@@ -25,6 +25,21 @@ TRANSACTION_TYPES = {
     "buy", "sell", "deposit", "withdrawal", "dividend", "interest", "exchange",
     "fee", "tax", "transfer", "split", "rights", "unknown",
 }
+
+VALID_CURRENCY_CODES = {
+    "KRW", "USD", "JPY", "CNY", "HKD", "EUR", "GBP", "CAD", "AUD", "CHF", "SGD", "TWD",
+}
+
+CASH_ASSET_KEYWORDS = [
+    "예수금", "현금", "외화예수금", "원화예수금", "cash", "cash balance", "deposit",
+    "withdrawable", "출금가능금액",
+]
+
+LEVERAGED_ETF_KEYWORDS = [
+    "2x", "3x", "2배", "3배", "-2배", "레버리지", "leveraged", "daily 2x", "daily 3x",
+    "bull", "bear", "ultra", "graniteshares", "그래닛셰어즈", "direxion", "디렉시온",
+    "proshares", "t-rex", "t rex", "티렉스", "tradr", "defiance", "디파이언스",
+]
 
 COLUMN_ALIASES = {
     "trade_date": ["실거래일자", "거래일자", "거래일", "일자", "매매일", "체결일", "정산일"],
@@ -98,6 +113,70 @@ def parse_korean_percent(value: Any) -> float:
     return parse_korean_number(value)
 
 
+def is_blank_text(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    return str(value).strip().lower() in {"", "nan", "none", "na", "n/a", "<na>", "-", "--"}
+
+
+def parse_optional_korean_number(value: Any) -> float | None:
+    if is_blank_text(value):
+        return None
+    return parse_korean_number(value)
+
+
+def fx_rate_from_text(value: Any) -> float | None:
+    if is_blank_text(value):
+        return None
+    text = str(value).strip().replace(",", "")
+    cleaned = re.sub(r"[^0-9.]", "", text)
+    if not cleaned or not re.fullmatch(r"\d+(?:\.\d+)?", cleaned):
+        return None
+    try:
+        return float(cleaned)
+    except ValueError:
+        return None
+
+
+def currency_code_from_text(value: Any) -> str:
+    if is_blank_text(value):
+        return ""
+    text = str(value).strip().upper()
+    if fx_rate_from_text(text) is not None and not re.search(r"[A-Z가-힣]", text):
+        return ""
+    for raw, code in [
+        ("달러", "USD"), ("USD", "USD"), ("$", "USD"),
+        ("원화", "KRW"), ("KRW", "KRW"),
+        ("엔", "JPY"), ("JPY", "JPY"),
+        ("위안", "CNY"), ("CNY", "CNY"),
+        ("홍콩", "HKD"), ("HKD", "HKD"),
+        ("유로", "EUR"), ("EUR", "EUR"),
+    ]:
+        if raw in text:
+            return code
+    match = re.search(r"\b[A-Z]{3}\b", text)
+    if match:
+        return match.group(0)
+    return text if re.fullmatch(r"[A-Z]{3}", text) else ""
+
+
+def normalize_currency_and_fx_rate(raw_currency: Any, raw_fx_rate: Any = "", source_type: str = "") -> tuple[str, Any]:
+    default_currency = "USD" if "overseas" in str(source_type).lower() else "KRW"
+    fx_rate = fx_rate_from_text(raw_fx_rate)
+    currency = currency_code_from_text(raw_currency)
+    currency_fx_rate = fx_rate_from_text(raw_currency)
+    if not currency:
+        if fx_rate is None and currency_fx_rate is not None:
+            fx_rate = currency_fx_rate
+        currency = default_currency
+    return currency, (fx_rate if fx_rate is not None else pd.NA)
+
+
 def normalize_date(value: Any) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
@@ -154,11 +233,7 @@ def classify_transaction_type(text: Any) -> str:
 
 def is_leveraged_etf_name(name: Any, metadata: Any = "") -> bool:
     s = f"{name or ''} {metadata or ''}".lower()
-    keywords = [
-        "2x", "3x", "레버리지", "leveraged", "daily 2x", "daily 3x", "bull", "bear",
-        "ultra", "graniteshares", "direxion", "proshares", "t-rex", "tradr",
-    ]
-    return any(k in s for k in keywords)
+    return any(k in s for k in LEVERAGED_ETF_KEYWORDS)
 
 
 def safe_source_name(path: Path) -> str:
@@ -257,12 +332,23 @@ def infer_market(ticker: str, name: str = "", file_type: str = "") -> str:
     return ""
 
 
+def is_cash_asset_name(name: str = "", ticker: str = "") -> bool:
+    s = f"{name or ''} {ticker or ''}".lower()
+    if any(keyword.lower() in s for keyword in CASH_ASSET_KEYWORDS):
+        return True
+    ticker_code = str(ticker or "").strip().upper()
+    name_code = re.sub(r"[\s\-_]+", "", str(name or "").strip().upper())
+    if ticker_code in VALID_CURRENCY_CODES and (not name_code or name_code in VALID_CURRENCY_CODES):
+        return True
+    return name_code in VALID_CURRENCY_CODES
+
+
 def infer_asset_type(name: str, ticker: str = "") -> str:
     s = f"{name or ''} {ticker or ''}".lower()
+    if is_cash_asset_name(name, ticker):
+        return "cash"
     if "etf" in s or "etn" in s or is_leveraged_etf_name(s):
         return "etf"
-    if "예수금" in s or "cash" in s:
-        return "cash"
     return "stock"
 
 
@@ -355,7 +441,10 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         evaluation_amount = evaluation_amount_value if is_balance_source else pd.NA
         unrealized_pnl = unrealized_pnl_value if is_balance_source else pd.NA
         pnl_pct = pnl_pct_value if is_balance_source else pd.NA
-        currency = str(raw.get(cols["currency"]) if cols.get("currency") is not None else "").strip().upper() or ("USD" if "overseas" in source_type else "KRW")
+        raw_currency = raw.get(cols["currency"]) if cols.get("currency") is not None else ""
+        raw_fx_rate = raw.get(cols["exchange_rate"]) if cols.get("exchange_rate") is not None else ""
+        currency, fx_rate = normalize_currency_and_fx_rate(raw_currency, raw_fx_rate, source_type)
+        fx_rate_for_stable = "" if pd.isna(fx_rate) else fx_rate
 
         if not any([date, ticker, name, raw_type, trade_amount, settlement_amount, evaluation_amount_value, balance_quantity_value]):
             continue
@@ -367,7 +456,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "trade_amount": trade_amount, "settlement_amount": settlement_amount,
             "fee": parse_korean_number(raw.get(cols["fee"])) if cols.get("fee") is not None else 0.0,
             "tax": parse_korean_number(raw.get(cols["tax"])) if cols.get("tax") is not None else 0.0,
-            "currency": currency, "raw_memo": memo,
+            "currency": currency, "fx_rate": fx_rate_for_stable, "raw_memo": memo,
         }
         import_id = hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         row = {
@@ -389,6 +478,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "fee": stable["fee"],
             "tax": stable["tax"],
             "currency": currency,
+            "fx_rate": fx_rate,
             "balance_quantity": balance_quantity,
             "evaluation_amount": evaluation_amount,
             "unrealized_pnl": unrealized_pnl,
@@ -419,6 +509,21 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
     }
 
 
+def remove_overlapping_overseas_holdings(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "ticker" not in df.columns:
+        return df.copy()
+    work = df.copy()
+    ticker = work["ticker"].fillna("").astype(str).str.upper()
+    source_type = work["source_file_type"].fillna("").astype(str) if "source_file_type" in work.columns else pd.Series("", index=work.index)
+    market = work["market"].fillna("").astype(str).str.upper() if "market" in work.columns else pd.Series("", index=work.index)
+    is_overseas = source_type.eq("overseas_balance") | ((market != "") & (market != "KR")) | ~ticker.str.fullmatch(r"\d{6}")
+    overseas_balance_tickers = set(ticker[source_type.eq("overseas_balance") & is_overseas])
+    if not overseas_balance_tickers:
+        return work.reset_index(drop=True)
+    drop_mask = source_type.eq("holdings") & is_overseas & ticker.isin(overseas_balance_tickers)
+    return work[~drop_mask].reset_index(drop=True)
+
+
 def collapse_holding_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
         return pd.DataFrame(columns=NORMALIZED_COLUMNS)
@@ -427,6 +532,7 @@ def collapse_holding_rows(df: pd.DataFrame) -> pd.DataFrame:
     work = work[~work["ticker"].str.lower().isin(["", "nan", "none"])]
     if work.empty:
         return pd.DataFrame(columns=NORMALIZED_COLUMNS)
+    work = remove_overlapping_overseas_holdings(work)
     if "trade_date" in work:
         work["_sort_date"] = pd.to_datetime(work["trade_date"], errors="coerce")
         work = work.sort_values(["account_type", "ticker", "_sort_date"], na_position="first")
@@ -526,7 +632,10 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
     outputs["processed_cashflows.csv"] = tx_rows[tx_rows["transaction_type"].isin(["deposit", "withdrawal", "exchange", "transfer", "interest"])].copy() if not tx_rows.empty else outputs["processed_cashflows.csv"]
     outputs["processed_dividends.csv"] = tx_rows[tx_rows["transaction_type"].eq("dividend")].copy() if not tx_rows.empty else outputs["processed_dividends.csv"]
     outputs["unclassified_rows.csv"] = tx_rows[tx_rows["transaction_type"].eq("unknown")].copy() if not tx_rows.empty else outputs["unclassified_rows.csv"]
-    outputs["source_file_index.csv"] = pd.DataFrame(source_rows)
+    source_index_columns = list(outputs["source_file_index.csv"].columns)
+    if any("error" in row for row in source_rows):
+        source_index_columns.append("error")
+    outputs["source_file_index.csv"] = pd.DataFrame(source_rows, columns=source_index_columns)
     outputs["raw_rows_audit.csv"] = pd.concat(audit, ignore_index=True) if audit else outputs["raw_rows_audit.csv"]
 
     if unknown_columns:

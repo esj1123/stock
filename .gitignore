@@ -21,6 +21,14 @@
 70_Imports/processed/
 70_Imports/exports/
 70_Imports/logs/
+10_Dashboard/Portfolio.md
+10_Dashboard/Exposure.md
+10_Dashboard/Cashflows.md
+10_Dashboard/Import_Review.md
+10_Dashboard/Risk_Watchlist.md
+10_Dashboard/Review_Queue.md
+10_Dashboard/History_Queue.md
+10_Dashboard/QA_Exceptions.md
 20_Companies/
 30_Trades/
 31_Cashflows/
@@ -31,6 +39,14 @@
 # Git / repo safety
 .git/
 .github/
+
+# Codex/local agent artifacts and local environment files
+.codex/
+.codex-cache/
+.env
+.env.*
+*.patch
+*.diff
 
 # Obsidian local settings
 .obsidian/workspace.json
@@ -46,6 +62,7 @@ venv/
 .pytest_cache/
 pytest-cache-files-*/
 .tmp_pytest/
+.tmp_pytest*/
 
 # OS / local placeholder artifacts
 .DS_Store

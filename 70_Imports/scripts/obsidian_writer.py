@@ -192,6 +192,8 @@ def write_company_notes(vault_root: Path, processed_dir: Path, create_companies:
         return warnings
     holdings["ticker"] = holdings.get("ticker", "").astype(str)
     holdings = holdings[~holdings["ticker"].str.lower().isin(["", "nan", "none"])].drop_duplicates(subset=["account_type", "ticker"], keep="last")
+    if "asset_type" in holdings.columns:
+        holdings = holdings[holdings["asset_type"].fillna("").astype(str).str.lower() != "cash"]
     seen_warnings: set[str] = set()
     for _, row in holdings.iterrows():
         ticker = safe_component(row.get("ticker"))

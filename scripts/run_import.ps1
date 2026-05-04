@@ -4,8 +4,9 @@
   Runs the Stock vault import pipeline on Windows.
 
 .DESCRIPTION
-  Creates a repo-root .venv if needed, installs import requirements, and
-  delegates to the standard entrypoint: 70_Imports/scripts/main.py.
+  Creates a local virtual environment outside the repo/Vault by default,
+  installs import requirements, and delegates to the standard entrypoint:
+  70_Imports/scripts/main.py.
 
   If no action is provided, the script defaults to "all". Supported actions are
   import, report, qa, and all. Additional arguments are passed through to main.py.
@@ -29,7 +30,28 @@ $ErrorActionPreference = "Stop"
 $RootDir = Split-Path -Parent $PSScriptRoot
 Set-Location $RootDir
 
-$VenvDir = Join-Path $RootDir ".venv"
+# Keep the virtual environment outside the repository and outside Google Drive
+# synced Vaults by default so dependency files are never mixed with live data.
+$ConfiguredVenvDir = [Environment]::GetEnvironmentVariable("STOCK_VENV_DIR")
+if ([string]::IsNullOrWhiteSpace($ConfiguredVenvDir)) {
+  $LocalAppData = $env:LOCALAPPDATA
+  if ([string]::IsNullOrWhiteSpace($LocalAppData)) {
+    $LocalAppData = [Environment]::GetFolderPath("LocalApplicationData")
+  }
+  if ([string]::IsNullOrWhiteSpace($LocalAppData)) {
+    throw "LOCALAPPDATA is not available. Set STOCK_VENV_DIR to a local virtual environment path."
+  }
+  $VenvDir = Join-Path $LocalAppData "06_Stock\.venv"
+}
+else {
+  $VenvDir = $ConfiguredVenvDir
+}
+
+$VenvParent = Split-Path -Parent $VenvDir
+if ($VenvParent -and -not (Test-Path -LiteralPath $VenvParent)) {
+  New-Item -ItemType Directory -Path $VenvParent -Force | Out-Null
+}
+
 $ReqFile = Join-Path $RootDir "70_Imports\scripts\requirements.txt"
 $MainPy = Join-Path $RootDir "70_Imports\scripts\main.py"
 

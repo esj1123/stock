@@ -35,17 +35,18 @@ These paths are for local vault operation only. They may contain broker exports,
 
 ## Clean Setup Check
 
-From a clean clone:
+From a clean clone, keep the Python virtual environment outside the repository and outside any Google Drive synced vault:
 
 ```powershell
-python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r 70_Imports\scripts\requirements.txt
+$VenvDir = Join-Path $env:LOCALAPPDATA "06_Stock\.venv"
+python -m venv $VenvDir
+& "$VenvDir\Scripts\python.exe" -m pip install -r 70_Imports\scripts\requirements.txt
 cd 70_Imports\scripts
-..\..\.venv\Scripts\python.exe main.py --help
-..\..\.venv\Scripts\python.exe -m pytest
+& "$VenvDir\Scripts\python.exe" main.py --help
+& "$VenvDir\Scripts\python.exe" -m pytest
 ```
 
-On Windows, if `python` resolves to the Microsoft Store alias, use `py -m venv .venv` instead.
+On Windows, if `python` resolves to the Microsoft Store alias, use `py -m venv $VenvDir` instead.
 
 Expected result:
 
@@ -73,6 +74,26 @@ bash scripts/run_import.sh all --dry-run
 If no action is passed to a wrapper, it defaults to `all`. Supported actions are `import`, `report`, `qa`, and `all`.
 
 Do not commit local raw input files or generated outputs. The ignored local folders should be created by the operator only inside a private working vault.
+
+## Live Vault Modification Policy
+
+Modify and validate the GitHub baseline first. Do not start by editing the Google Drive live Vault.
+
+Required sequence before any actual live Vault write:
+
+1. Modify GitHub baseline.
+2. Add/update tests.
+3. Run pytest.
+4. Run `scripts/quality_gate.py`.
+5. Run live vault dry-run.
+6. Apply actual live vault write only after expected dry-run result.
+
+Known normalization rules:
+
+- Do not double-count overseas positions when both comprehensive holdings and `overseas_balance` files contain the same overseas position.
+- Store `currency` and `fx_rate` separately; `currency` must contain a currency code only.
+- Treat USD cash/예수금 as cash, not stock.
+- Exclude cash assets from Company note QA.
 
 ## Initial Holdings Template
 

@@ -46,7 +46,7 @@ Vault 루트에서:
 
 ---
 
-## 3) Import 스크립트(권장): venv 포함 실행
+## 3) Import 스크립트(권장): Vault 외부 venv 포함 실행
 
 이 패치에는 아래 실행 스크립트가 포함됩니다.
 
@@ -54,7 +54,7 @@ Vault 루트에서:
 - Windows: `scripts/run_import.ps1`
 
 동작:
-1) `.venv`가 없으면 생성
+1) `STOCK_VENV_DIR`가 있으면 해당 venv를 사용하고, 없으면 OS 로컬 app-data 경로에 venv 생성
 2) requirements 설치/업데이트
 3) `70_Imports/scripts/main.py` 실행
 
@@ -69,6 +69,16 @@ Vault 루트에서:
   외부 공유/업로드는 피하세요.
 
 ---
+
+## Live Vault Change Procedure
+
+- Never begin with live Google Drive writes. Update and validate the GitHub baseline first.
+- Before an actual live write, run the live vault command with `--dry-run` and confirm the expected files and warnings.
+- Preserve user-written Markdown outside `<!-- AUTO-GENERATED:START -->` and `<!-- AUTO-GENERATED:END -->`.
+- Never modify raw broker files under `70_Imports/raw/`.
+- Never write thesis, sell criteria, buy/sell recommendations, or investment opinions automatically. Missing thesis/sell criteria must go to QA/Review Queue only.
+- After execution, review `Import_Review`, `Review_Queue`, and `QA_Exceptions`.
+- Summarize exact files changed and safety checks run before closeout.
 
 ---
 
