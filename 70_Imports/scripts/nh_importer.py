@@ -41,6 +41,19 @@ LEVERAGED_ETF_KEYWORDS = [
     "proshares", "t-rex", "t rex", "티렉스", "tradr", "defiance", "디파이언스",
 ]
 
+# Static aliases for broker exports where comprehensive holdings use an ISIN-like
+# code but overseas balance rows use a display name with the trading symbol.
+KNOWN_OVERSEAS_ISIN_SYMBOL_ALIASES = {
+    "US88160R1014": "TSLA",
+    "US67066G1040": "NVDA",
+    "US02079K3059": "GOOGL",
+    "US36828A1016": "GEV",
+    "US46152A5368": "APPX",
+    "US38747R8271": "NVDL",
+    "US25461A8669": "MSFU",
+    "US78433H6751": "QQQI",
+}
+
 COLUMN_ALIASES = {
     "trade_date": ["실거래일자", "거래일자", "거래일", "일자", "매매일", "체결일", "정산일"],
     "trade_time": ["거래시간", "시간", "체결시간"],
@@ -82,6 +95,48 @@ class ImportSummary:
 
 def normalize_key(value: Any) -> str:
     return re.sub(r"[^0-9a-zA-Z가-힣]+", "", str(value or "")).lower()
+
+
+def extract_symbol_from_parentheses(value: Any) -> str:
+    if is_blank_text(value):
+        return ""
+    text = str(value)
+    for raw_candidate in re.findall(r"\(([^()]+)\)", text):
+        candidate = raw_candidate.strip().upper()
+        candidate = re.sub(r"^(NASDAQ|NYSE|AMEX|ARCA|US)\s*[:：]\s*", "", candidate)
+        if candidate not in VALID_CURRENCY_CODES and re.fullmatch(r"[A-Z]{1,6}[A-Z0-9.\-]{0,4}", candidate):
+            return candidate
+    return ""
+
+
+def extract_isin_like(value: Any) -> str:
+    if is_blank_text(value):
+        return ""
+    text = str(value).upper()
+    match = re.search(r"\b[A-Z]{2}[A-Z0-9]{9}\d\b", text)
+    return match.group(0) if match else ""
+
+
+def extract_us_symbol(value: Any) -> str:
+    if is_blank_text(value):
+        return ""
+    parenthesized = extract_symbol_from_parentheses(value)
+    if parenthesized:
+        return parenthesized
+    text = str(value).strip().upper()
+    isin = extract_isin_like(text)
+    if isin and isin in KNOWN_OVERSEAS_ISIN_SYMBOL_ALIASES:
+        return KNOWN_OVERSEAS_ISIN_SYMBOL_ALIASES[isin]
+    if text not in VALID_CURRENCY_CODES and re.fullmatch(r"[A-Z]{1,6}[A-Z0-9.\-]{0,4}", text):
+        return text
+    return ""
+
+
+def normalize_security_name_for_key(value: Any) -> str:
+    if is_blank_text(value):
+        return ""
+    text = re.sub(r"\([^()]*\)", "", str(value).upper())
+    return re.sub(r"[^0-9A-Z가-힣]+", "", text)
 
 
 def parse_korean_number(value: Any) -> float:
@@ -352,6 +407,48 @@ def infer_asset_type(name: str, ticker: str = "") -> str:
     return "stock"
 
 
+def _row_value(row: dict[str, Any] | pd.Series, key: str) -> Any:
+    if isinstance(row, pd.Series):
+        return row.get(key, "")
+    return row.get(key, "")
+
+
+def is_overseas_position_row(row: dict[str, Any] | pd.Series) -> bool:
+    source_type = str(_row_value(row, "source_file_type") or "")
+    market = str(_row_value(row, "market") or "").upper()
+    ticker = str(_row_value(row, "ticker") or "").strip().upper()
+    if source_type == "overseas_balance":
+        return True
+    if market and market != "KR":
+        return True
+    return bool(ticker) and not bool(re.fullmatch(r"\d{6}", ticker))
+
+
+def canonical_overseas_position_key(row: dict[str, Any] | pd.Series) -> str:
+    ticker = str(_row_value(row, "ticker") or "").strip()
+    security_name = str(_row_value(row, "security_name") or "").strip()
+    asset_type = str(_row_value(row, "asset_type") or "").strip().lower()
+    currency = currency_code_from_text(_row_value(row, "currency"))
+
+    if asset_type == "cash":
+        cash_key = currency or normalize_security_name_for_key(ticker) or normalize_security_name_for_key(security_name)
+        return f"CASH:{cash_key}" if cash_key else ""
+    if not is_overseas_position_row(row):
+        return ""
+
+    symbol = extract_us_symbol(ticker) or extract_us_symbol(security_name)
+    if symbol:
+        return f"US:{symbol}"
+
+    isin = extract_isin_like(ticker) or extract_isin_like(security_name)
+    if isin:
+        alias = KNOWN_OVERSEAS_ISIN_SYMBOL_ALIASES.get(isin)
+        return f"US:{alias}" if alias else f"ISIN:{isin}"
+
+    name_key = normalize_security_name_for_key(security_name or ticker)
+    return f"NAME:{name_key}" if len(name_key) >= 2 else ""
+
+
 def infer_source_file_type(path: Path, sheet_name: str, df: pd.DataFrame) -> str:
     text = " ".join([path.name, sheet_name] + [str(c) for c in df.columns])
     lower = text.lower()
@@ -513,14 +610,13 @@ def remove_overlapping_overseas_holdings(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty or "ticker" not in df.columns:
         return df.copy()
     work = df.copy()
-    ticker = work["ticker"].fillna("").astype(str).str.upper()
     source_type = work["source_file_type"].fillna("").astype(str) if "source_file_type" in work.columns else pd.Series("", index=work.index)
-    market = work["market"].fillna("").astype(str).str.upper() if "market" in work.columns else pd.Series("", index=work.index)
-    is_overseas = source_type.eq("overseas_balance") | ((market != "") & (market != "KR")) | ~ticker.str.fullmatch(r"\d{6}")
-    overseas_balance_tickers = set(ticker[source_type.eq("overseas_balance") & is_overseas])
-    if not overseas_balance_tickers:
+    canonical_keys = work.apply(canonical_overseas_position_key, axis=1)
+    is_overseas = work.apply(is_overseas_position_row, axis=1)
+    overseas_balance_keys = set(canonical_keys[source_type.eq("overseas_balance") & is_overseas & canonical_keys.ne("")])
+    if not overseas_balance_keys:
         return work.reset_index(drop=True)
-    drop_mask = source_type.eq("holdings") & is_overseas & ticker.isin(overseas_balance_tickers)
+    drop_mask = source_type.eq("holdings") & is_overseas & canonical_keys.isin(overseas_balance_keys)
     return work[~drop_mask].reset_index(drop=True)
 
 

@@ -10,6 +10,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+IMPORT_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "70_Imports" / "scripts"
+if str(IMPORT_SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(IMPORT_SCRIPTS_DIR))
+
+from nh_importer import canonical_overseas_position_key, is_overseas_position_row
+
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
@@ -165,22 +171,21 @@ def invalid_currency_findings(holdings: list[dict[str, str]]) -> list[str]:
 
 
 def is_overseas_holding_row(row: dict[str, str]) -> bool:
-    source_type = str(row.get("source_file_type", ""))
-    market = str(row.get("market", "")).upper()
-    ticker = str(row.get("ticker", "")).upper()
-    return source_type == "overseas_balance" or (market not in {"", "KR"}) or not bool(re.fullmatch(r"\d{6}", ticker))
+    return is_overseas_position_row(row)
 
 
 def duplicate_overseas_holding_findings(holdings: list[dict[str, str]]) -> list[str]:
-    by_ticker: dict[str, set[str]] = {}
+    by_key: dict[str, set[str]] = {}
     for row in holdings:
-        ticker = str(row.get("ticker", "")).strip().upper()
-        if is_blank(ticker) or not is_overseas_holding_row(row):
+        if not is_overseas_holding_row(row):
             continue
-        by_ticker.setdefault(ticker, set()).add(str(row.get("source_file_type", "")))
+        key = canonical_overseas_position_key(row)
+        if is_blank(key):
+            continue
+        by_key.setdefault(key, set()).add(str(row.get("source_file_type", "")))
     return [
-        f"{ticker} appears in both holdings and overseas_balance"
-        for ticker, source_types in sorted(by_ticker.items())
+        f"{key} appears in both holdings and overseas_balance"
+        for key, source_types in sorted(by_key.items())
         if {"holdings", "overseas_balance"}.issubset(source_types)
     ]
 

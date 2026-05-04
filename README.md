@@ -91,6 +91,7 @@ Required sequence before any actual live Vault write:
 Known normalization rules:
 
 - Do not double-count overseas positions when both comprehensive holdings and `overseas_balance` files contain the same overseas position.
+- Overseas duplicate detection uses canonical keys based on parenthesized symbol, known ISIN alias, or normalized name.
 - Store `currency` and `fx_rate` separately; `currency` must contain a currency code only.
 - Treat USD cash/예수금 as cash, not stock.
 - Exclude cash assets from Company note QA.
