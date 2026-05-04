@@ -92,6 +92,7 @@ Known normalization rules:
 
 - Do not double-count overseas positions when both comprehensive holdings and `overseas_balance` files contain the same overseas position.
 - Overseas duplicate detection uses canonical keys based on parenthesized symbol, known ISIN alias, or normalized name.
+- Company note creation reuses existing notes by canonical key to avoid recreating semantic duplicates.
 - Store `currency` and `fx_rate` separately; `currency` must contain a currency code only.
 - Treat USD cash/예수금 as cash, not stock.
 - For cash rows, currency codes in ticker/security name override source-type defaults.

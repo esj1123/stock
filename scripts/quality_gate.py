@@ -15,6 +15,7 @@ if str(IMPORT_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(IMPORT_SCRIPTS_DIR))
 
 from nh_importer import canonical_overseas_position_key, is_overseas_position_row
+from obsidian_writer import company_note_identity_key, parse_note_frontmatter
 
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
@@ -220,6 +221,34 @@ def cash_company_qa_findings(processed_dir: Path, holdings: list[dict[str, str]]
     return findings
 
 
+def company_note_duplicate_findings(vault_root: Path) -> list[str]:
+    company_root = vault_root / "20_Companies"
+    if not company_root.exists():
+        return []
+    by_key: dict[str, list[Path]] = {}
+    for path in sorted(company_root.glob("*/Company.md")):
+        try:
+            text = path.read_text(encoding="utf-8-sig")
+        except Exception:
+            continue
+        meta = parse_note_frontmatter(text)
+        row = {
+            "ticker": meta.get("ticker", "") or path.parent.name,
+            "security_name": meta.get("name", ""),
+            "market": meta.get("market", ""),
+            "asset_type": meta.get("asset_type", ""),
+        }
+        key = company_note_identity_key(row)
+        if not key:
+            continue
+        by_key.setdefault(key, []).append(path)
+    return [
+        f"{key} has {len(paths)} Company notes"
+        for key, paths in sorted(by_key.items())
+        if len(paths) > 1
+    ]
+
+
 def check_vault_local_venv(vault_root: Path, results: list[GateResult]) -> None:
     venv_path = vault_root / ".venv"
     if venv_path.exists():
@@ -291,6 +320,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "cash assets excluded from Company QA", "FAIL", "; ".join(cash_qa_findings[:5]))
     else:
         write_result(results, "cash assets excluded from Company QA", "PASS", "no cash ticker appears in Company thesis/sell-criteria QA.")
+
+    company_note_duplicates = company_note_duplicate_findings(vault_root)
+    if company_note_duplicates:
+        write_result(results, "Company note semantic duplicate guard", "FAIL", "; ".join(company_note_duplicates[:5]))
+    else:
+        write_result(results, "Company note semantic duplicate guard", "PASS", "no semantic duplicate Company notes found.")
 
     if holdings_file_count == 0:
         checks = {
