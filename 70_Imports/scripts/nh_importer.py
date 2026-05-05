@@ -71,9 +71,11 @@ LEVERAGED_ETF_KEYWORDS = [
 # Static aliases for broker exports where comprehensive holdings use an ISIN-like
 # code but overseas balance rows use a display name with the trading symbol.
 KNOWN_OVERSEAS_ISIN_SYMBOL_ALIASES = {
+    "US00760J1088": "AEHR",
     "US88160R1014": "TSLA",
     "US67066G1040": "NVDA",
     "US02079K3059": "GOOGL",
+    "KYG254571055": "CRDO",
     "US36828A1016": "GEV",
     "US46152A5368": "APPX",
     "US38747R8271": "NVDL",
@@ -798,6 +800,11 @@ def _numbers_missing_or_close(left: Any, right: Any, abs_tol: float, rel_tol: fl
     return _numbers_close(left_num, right_num, abs_tol, rel_tol)
 
 
+def _number_missing_or_zero(value: Any) -> bool:
+    parsed = _dedupe_number(value)
+    return parsed is None or abs(parsed) <= HOLDING_QUANTITY_TOLERANCE
+
+
 def _meaningful_amounts_close(left: Any, right: Any) -> bool:
     left_num = _dedupe_number(left)
     right_num = _dedupe_number(right)
@@ -814,6 +821,12 @@ def _accounts_compatible(left: str, right: str) -> bool:
     return left in GENERIC_ACCOUNT_TYPES or right in GENERIC_ACCOUNT_TYPES
 
 
+def _holding_name_key(row: dict[str, Any] | pd.Series) -> str:
+    return normalize_security_name_for_key(
+        _row_value(row, "security_name") or _row_value(row, "ticker")
+    )
+
+
 def _identity_compatible(left: dict[str, str], right: dict[str, str]) -> bool:
     if left["asset_type"] == "cash" or right["asset_type"] == "cash":
         return False
@@ -821,9 +834,37 @@ def _identity_compatible(left: dict[str, str], right: dict[str, str]) -> bool:
         return False
     if left["market"] and right["market"] and left["market"] != right["market"]:
         return False
-    if left["currency"] and right["currency"] and left["currency"] != right["currency"]:
+    if (
+        left["currency"]
+        and right["currency"]
+        and left["currency"] != right["currency"]
+        and {left["source_type"], right["source_type"]} != {"holdings", "overseas_balance"}
+    ):
         return False
     return _accounts_compatible(left["account_type"], right["account_type"])
+
+
+def _fallback_identity_compatible(
+    left: dict[str, Any] | pd.Series,
+    right: dict[str, Any] | pd.Series,
+    left_id: dict[str, str],
+    right_id: dict[str, str],
+) -> bool:
+    """Allow broker ISIN/display-name pairs to compare when strict keys differ."""
+    if left_id["asset_type"] == "cash" or right_id["asset_type"] == "cash":
+        return False
+    if {left_id["source_type"], right_id["source_type"]} != {"holdings", "overseas_balance"}:
+        return False
+    if not (is_overseas_position_row(left) and is_overseas_position_row(right)):
+        return False
+    if left_id["market"] and right_id["market"] and left_id["market"] != right_id["market"]:
+        return False
+    if not _accounts_compatible(left_id["account_type"], right_id["account_type"]):
+        return False
+
+    left_name = _holding_name_key(left)
+    right_name = _holding_name_key(right)
+    return bool(left_name and left_name == right_name and len(left_name) >= 2)
 
 
 def _holding_amounts_match(left: dict[str, Any] | pd.Series, right: dict[str, Any] | pd.Series) -> bool:
@@ -840,6 +881,28 @@ def _holding_amounts_match(left: dict[str, Any] | pd.Series, right: dict[str, An
         HOLDING_AMOUNT_REL_TOLERANCE,
     )
     if quantity_close and evaluation_close:
+        return True
+    if (
+        (_number_missing_or_zero(_row_value(left, "balance_quantity")) or _number_missing_or_zero(_row_value(right, "balance_quantity")))
+        and _numbers_close(
+            _row_value(left, "evaluation_amount"),
+            _row_value(right, "evaluation_amount"),
+            HOLDING_AMOUNT_ABS_TOLERANCE,
+            HOLDING_AMOUNT_REL_TOLERANCE,
+        )
+        and _numbers_missing_or_close(
+            _row_value(left, "unrealized_pnl"),
+            _row_value(right, "unrealized_pnl"),
+            HOLDING_AMOUNT_ABS_TOLERANCE,
+            HOLDING_AMOUNT_REL_TOLERANCE,
+        )
+        and _numbers_missing_or_close(
+            _row_value(left, "pnl_pct"),
+            _row_value(right, "pnl_pct"),
+            0.01,
+            HOLDING_AMOUNT_REL_TOLERANCE,
+        )
+    ):
         return True
 
     strict_evaluation_close = _numbers_close(
@@ -858,7 +921,8 @@ def _holding_amounts_match(left: dict[str, Any] | pd.Series, right: dict[str, An
 def _same_economic_holding(left: dict[str, Any] | pd.Series, right: dict[str, Any] | pd.Series) -> bool:
     left_id = normalize_holding_identity(left)
     right_id = normalize_holding_identity(right)
-    return _identity_compatible(left_id, right_id) and _holding_amounts_match(left, right)
+    identity_matches = _identity_compatible(left_id, right_id) or _fallback_identity_compatible(left, right, left_id, right_id)
+    return identity_matches and _holding_amounts_match(left, right)
 
 
 def dedupe_holdings(df: pd.DataFrame) -> pd.DataFrame:
@@ -889,6 +953,19 @@ def dedupe_holdings(df: pd.DataFrame) -> pd.DataFrame:
 
     drop_indices: set[int] = set()
     excluded_by_preferred: dict[int, list[int]] = {}
+
+    def record_excluded(preferred_idx: int, excluded_indices: list[int], group_key: str) -> None:
+        group_id = hashlib.sha256(str(group_key).encode("utf-8")).hexdigest()[:12]
+        excluded_value = sum(_dedupe_number(work.at[idx, "evaluation_amount"]) or 0.0 for idx in excluded_indices)
+        work.at[preferred_idx, "dedupe_group_id"] = group_id
+        work.at[preferred_idx, "dedupe_action"] = "retained_preferred"
+        work.at[preferred_idx, "dedupe_reason"] = "overseas_balance_retained_over_holdings_duplicate"
+        work.at[preferred_idx, "preferred_source"] = "overseas_balance"
+        work.at[preferred_idx, "dedupe_excluded_count"] = int(work.at[preferred_idx, "dedupe_excluded_count"]) + len(excluded_indices)
+        work.at[preferred_idx, "dedupe_excluded_evaluation_amount"] = (
+            float(work.at[preferred_idx, "dedupe_excluded_evaluation_amount"]) + excluded_value
+        )
+
     groups = work[work["_dedupe_key"].fillna("").astype(str).ne("")].groupby("_dedupe_key", dropna=False)
 
     for group_key, group in groups:
@@ -918,16 +995,34 @@ def dedupe_holdings(df: pd.DataFrame) -> pd.DataFrame:
         for preferred_idx, excluded_indices in excluded_by_preferred.items():
             if preferred_idx not in group.index or not excluded_indices:
                 continue
-            group_id = hashlib.sha256(str(group_key).encode("utf-8")).hexdigest()[:12]
-            excluded_value = sum(_dedupe_number(work.at[idx, "evaluation_amount"]) or 0.0 for idx in excluded_indices)
-            work.at[preferred_idx, "dedupe_group_id"] = group_id
-            work.at[preferred_idx, "dedupe_action"] = "retained_preferred"
-            work.at[preferred_idx, "dedupe_reason"] = "overseas_balance_retained_over_holdings_duplicate"
-            work.at[preferred_idx, "preferred_source"] = "overseas_balance"
-            work.at[preferred_idx, "dedupe_excluded_count"] = int(work.at[preferred_idx, "dedupe_excluded_count"]) + len(excluded_indices)
-            work.at[preferred_idx, "dedupe_excluded_evaluation_amount"] = (
-                float(work.at[preferred_idx, "dedupe_excluded_evaluation_amount"]) + excluded_value
-            )
+            record_excluded(preferred_idx, excluded_indices, str(group_key))
+
+    preferred_indices = sorted(
+        [
+            idx for idx in work.index
+            if idx not in drop_indices
+            and str(work.at[idx, "source_file_type"]).strip().lower() == "overseas_balance"
+        ],
+        key=lambda idx: (rank_holding_source(work.loc[idx]), idx),
+    )
+    candidate_indices = [
+        idx for idx in work.index
+        if idx not in drop_indices
+        and str(work.at[idx, "source_file_type"]).strip().lower() == "holdings"
+    ]
+    for candidate_idx in candidate_indices:
+        candidate = work.loc[candidate_idx]
+        for preferred_idx in preferred_indices:
+            preferred = work.loc[preferred_idx]
+            if _same_economic_holding(preferred, candidate):
+                drop_indices.add(candidate_idx)
+                fallback_key = "|".join([
+                    "overseas-fallback",
+                    str(work.at[preferred_idx, "_dedupe_key"] or normalize_holding_identity(preferred)["position_key"] or _holding_name_key(preferred)),
+                    str(work.at[candidate_idx, "_dedupe_key"] or normalize_holding_identity(candidate)["position_key"] or _holding_name_key(candidate)),
+                ])
+                record_excluded(preferred_idx, [candidate_idx], fallback_key)
+                break
 
     if not drop_indices and existing_has_dedupe:
         for col in HOLDING_DEDUPE_COLUMNS:

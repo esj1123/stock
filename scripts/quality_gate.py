@@ -17,7 +17,7 @@ if str(IMPORT_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(IMPORT_SCRIPTS_DIR))
 
 from nh_importer import canonical_overseas_position_key, dedupe_holdings, is_overseas_cashflow_amount_only_helper_row, is_overseas_position_row
-from obsidian_writer import company_note_identity_key, parse_note_frontmatter
+from obsidian_writer import company_note_identity_key, existing_company_note_index, parse_note_frontmatter, safe_component
 
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
@@ -261,10 +261,40 @@ def skipped_rows_findings(processed_dir: Path, unclassified_rows: list[dict[str,
     return findings
 
 
-def company_note_duplicate_findings(vault_root: Path) -> list[str]:
+def active_company_note_targets(vault_root: Path, processed_dir: Path | None = None) -> dict[str, set[str]]:
+    """Return active Company note paths keyed by normalized holding identity."""
+    processed_dir = processed_dir or vault_root / "70_Imports" / "processed"
+    holdings = read_csv_rows(processed_dir / "processed_holdings.csv")
+    if not holdings:
+        return {}
+    company_root = vault_root / "20_Companies"
+    note_index = existing_company_note_index(company_root)
+    targets: dict[str, set[str]] = {}
+    for row in holdings:
+        asset_type = str(row.get("asset_type", "") or "").strip().lower()
+        ticker = str(row.get("ticker", "") or "").strip()
+        if asset_type == "cash" or is_blank(ticker):
+            continue
+        identity = company_note_identity_key(row)
+        if not identity:
+            continue
+        expected_path = company_root / safe_component(ticker) / "Company.md"
+        path = expected_path
+        if not path.exists():
+            path = (
+                note_index.get(identity)
+                or note_index.get(f"TICKER:{ticker.upper()}")
+                or expected_path
+            )
+        targets.setdefault(identity, set()).add(str(path.relative_to(vault_root)))
+    return targets
+
+
+def company_note_duplicate_findings(vault_root: Path, processed_dir: Path | None = None) -> list[str]:
     company_root = vault_root / "20_Companies"
     if not company_root.exists():
         return []
+    active_targets = active_company_note_targets(vault_root, processed_dir)
     by_key: dict[str, list[Path]] = {}
     for path in sorted(company_root.glob("*/Company.md")):
         try:
@@ -280,6 +310,9 @@ def company_note_duplicate_findings(vault_root: Path) -> list[str]:
         }
         key = company_note_identity_key(row)
         if not key:
+            continue
+        rel = str(path.relative_to(vault_root))
+        if key in active_targets and rel not in active_targets[key]:
             continue
         by_key.setdefault(key, []).append(path)
     return [

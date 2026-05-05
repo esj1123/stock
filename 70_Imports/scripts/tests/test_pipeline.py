@@ -325,6 +325,35 @@ def test_quality_gate_flags_semantic_company_note_duplicates(tmp_path: Path):
     assert "US:TSLA" in findings[0]
 
 
+def test_quality_gate_ignores_stale_company_note_duplicate_when_current_target_exists(tmp_path: Path):
+    vault = tmp_path
+    processed = vault / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "ticker": "Aehr Test Systems (AEHR)",
+            "security_name": "Aehr Test Systems (AEHR)",
+            "account_type": "overseas",
+            "market": "US",
+            "asset_type": "stock",
+            "currency": "USD",
+            "source_file_type": "overseas_balance",
+        }
+    ]).to_csv(processed / "processed_holdings.csv", index=False)
+    for folder, ticker in [
+        ("US00760J1088", "US00760J1088"),
+        ("Aehr_Test_Systems_AEHR", "Aehr Test Systems (AEHR)"),
+    ]:
+        path = vault / "20_Companies" / folder
+        path.mkdir(parents=True)
+        (path / "Company.md").write_text(
+            f"---\ntype: company\nticker: \"{ticker}\"\nname: \"Aehr Test Systems\"\nmarket: US\nasset_type: stock\n---\n# A\n",
+            encoding="utf-8",
+        )
+
+    assert company_note_duplicate_findings(vault) == []
+
+
 def test_overseas_balance_preferred_over_comprehensive_holding_duplicate(tmp_path: Path):
     vault = tmp_path
     processed = vault / "70_Imports" / "processed"
@@ -431,6 +460,85 @@ def test_dedupe_holdings_retains_overseas_balance_for_same_overseas_position():
     assert float(deduped["dedupe_excluded_evaluation_amount"].iloc[0]) == pytest.approx(300.01)
 
 
+def test_dedupe_holdings_handles_comprehensive_isin_krw_zero_quantity_duplicate():
+    rows = pd.DataFrame([
+        {
+            "source_file": "source_comprehensive.xlsx",
+            "source_file_type": "holdings",
+            "account_type": "comprehensive",
+            "ticker": "US00760J1088",
+            "security_name": "\uc5d0\ud750\ub974 \ud14c\uc2a4\ud2b8 \uc2dc\uc2a4\ud15c\uc988",
+            "market": "US",
+            "asset_type": "stock",
+            "currency": "KRW",
+            "balance_quantity": 0.0,
+            "evaluation_amount": 391019.0,
+            "unrealized_pnl": 139207.0,
+            "pnl_pct": 55.28,
+        },
+        {
+            "source_file": "source_overseas.xlsx",
+            "source_file_type": "overseas_balance",
+            "account_type": "overseas",
+            "ticker": "\uc5d0\ud750\ub974 \ud14c\uc2a4\ud2b8 \uc2dc\uc2a4\ud15c\uc988 (AEHR)",
+            "security_name": "\uc5d0\ud750\ub974 \ud14c\uc2a4\ud2b8 \uc2dc\uc2a4\ud15c\uc988 (AEHR)",
+            "market": "US",
+            "asset_type": "stock",
+            "currency": "USD",
+            "balance_quantity": 3.0,
+            "evaluation_amount": 391019.0,
+            "unrealized_pnl": 139207.0,
+            "pnl_pct": 55.28,
+        },
+    ])
+
+    deduped = dedupe_holdings(rows)
+
+    assert len(deduped) == 1
+    assert deduped["source_file_type"].iloc[0] == "overseas_balance"
+    assert "AEHR" in deduped["ticker"].iloc[0]
+    assert deduped["dedupe_action"].iloc[0] == "retained_preferred"
+    assert int(deduped["dedupe_excluded_count"].iloc[0]) == 1
+    assert float(deduped["dedupe_excluded_evaluation_amount"].iloc[0]) == pytest.approx(391019.0)
+
+
+def test_dedupe_holdings_fallback_matches_name_when_isin_alias_unknown():
+    rows = pd.DataFrame([
+        {
+            "source_file_type": "holdings",
+            "account_type": "comprehensive",
+            "ticker": "US1234567890",
+            "security_name": "Example Robotics",
+            "market": "US",
+            "asset_type": "stock",
+            "currency": "KRW",
+            "balance_quantity": 0.0,
+            "evaluation_amount": 1000.0,
+            "unrealized_pnl": 100.0,
+            "pnl_pct": 11.11,
+        },
+        {
+            "source_file_type": "overseas_balance",
+            "account_type": "overseas",
+            "ticker": "Example Robotics (EXRB)",
+            "security_name": "Example Robotics (EXRB)",
+            "market": "US",
+            "asset_type": "stock",
+            "currency": "USD",
+            "balance_quantity": 10.0,
+            "evaluation_amount": 1000.0,
+            "unrealized_pnl": 100.0,
+            "pnl_pct": 11.11,
+        },
+    ])
+
+    deduped = dedupe_holdings(rows)
+
+    assert len(deduped) == 1
+    assert deduped["source_file_type"].iloc[0] == "overseas_balance"
+    assert "EXRB" in deduped["ticker"].iloc[0]
+
+
 def test_aehr_crdo_duplicates_do_not_double_count_portfolio_summary(tmp_path: Path):
     vault = tmp_path
     processed = vault / "70_Imports" / "processed"
@@ -440,10 +548,10 @@ def test_aehr_crdo_duplicates_do_not_double_count_portfolio_summary(tmp_path: Pa
         {"source_file": "source_overseas.xlsx", "source_file_type": "overseas_balance", "account_type": "overseas"},
     ]).to_csv(processed / "source_file_index.csv", index=False)
     pd.DataFrame([
-        {"ticker": "AEHR", "security_name": "Aehr Test Systems", "account_type": "comprehensive", "market": "US", "asset_type": "stock", "currency": "USD", "balance_quantity": 3, "evaluation_amount": 300, "unrealized_pnl": -30, "pnl_pct": -10, "source_file_type": "holdings"},
-        {"ticker": "AEHR", "security_name": "Aehr Test Systems", "account_type": "overseas", "market": "US", "asset_type": "stock", "currency": "USD", "balance_quantity": 3, "evaluation_amount": 300, "unrealized_pnl": -30, "pnl_pct": -10, "source_file_type": "overseas_balance"},
-        {"ticker": "CRDO", "security_name": "Credo Technology", "account_type": "comprehensive", "market": "US", "asset_type": "stock", "currency": "USD", "balance_quantity": 4, "evaluation_amount": 400, "unrealized_pnl": 40, "pnl_pct": 10, "source_file_type": "holdings"},
-        {"ticker": "CRDO", "security_name": "Credo Technology", "account_type": "overseas", "market": "US", "asset_type": "stock", "currency": "USD", "balance_quantity": 4, "evaluation_amount": 400, "unrealized_pnl": 40, "pnl_pct": 10, "source_file_type": "overseas_balance"},
+        {"ticker": "US00760J1088", "security_name": "Aehr Test Systems", "account_type": "comprehensive", "market": "US", "asset_type": "stock", "currency": "KRW", "balance_quantity": 0, "evaluation_amount": 300, "unrealized_pnl": -30, "pnl_pct": -10, "source_file_type": "holdings"},
+        {"ticker": "Aehr Test Systems (AEHR)", "security_name": "Aehr Test Systems (AEHR)", "account_type": "overseas", "market": "US", "asset_type": "stock", "currency": "USD", "balance_quantity": 3, "evaluation_amount": 300, "unrealized_pnl": -30, "pnl_pct": -10, "source_file_type": "overseas_balance"},
+        {"ticker": "KYG254571055", "security_name": "Credo Technology Group Holding", "account_type": "comprehensive", "market": "US", "asset_type": "stock", "currency": "KRW", "balance_quantity": 0, "evaluation_amount": 400, "unrealized_pnl": 40, "pnl_pct": 10, "source_file_type": "holdings"},
+        {"ticker": "Credo Technology Group Holding (CRDO)", "security_name": "Credo Technology Group Holding (CRDO)", "account_type": "overseas", "market": "US", "asset_type": "stock", "currency": "USD", "balance_quantity": 4, "evaluation_amount": 400, "unrealized_pnl": 40, "pnl_pct": 10, "source_file_type": "overseas_balance"},
     ]).to_csv(processed / "processed_holdings.csv", index=False)
     pd.DataFrame(columns=["ticker"]).to_csv(processed / "processed_transactions.csv", index=False)
 
@@ -451,7 +559,7 @@ def test_aehr_crdo_duplicates_do_not_double_count_portfolio_summary(tmp_path: Pa
     summary_map = dict(zip(summary["metric"], summary["value"]))
 
     assert len(holdings) == 2
-    assert set(holdings["ticker"]) == {"AEHR", "CRDO"}
+    assert set(holdings["ticker"]) == {"Aehr Test Systems (AEHR)", "Credo Technology Group Holding (CRDO)"}
     assert set(holdings["source_file_type"]) == {"overseas_balance"}
     assert float(summary_map["total_portfolio_value"]) == 700
     assert float(summary_map["total_cost"]) == 690
@@ -865,6 +973,45 @@ def test_generate_qa_exception_for_missing_sell_criteria(tmp_path: Path):
     (vault / "10_Dashboard" / "QA_Exceptions.md").write_text("# QA\n\n<!-- AUTO-GENERATED:START -->\nold\n<!-- AUTO-GENERATED:END -->\n", encoding="utf-8")
     qa = run_qa(vault)
     assert "INV-EX-08" in set(qa["exception_id"])
+
+
+def test_qa_skips_stale_duplicate_company_note_for_current_holding(tmp_path: Path):
+    vault = tmp_path
+    processed = vault / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "ticker": "Aehr Test Systems (AEHR)",
+            "security_name": "Aehr Test Systems (AEHR)",
+            "account_type": "overseas",
+            "market": "US",
+            "asset_type": "stock",
+            "currency": "USD",
+            "source_file_type": "overseas_balance",
+        }
+    ]).to_csv(processed / "processed_holdings.csv", index=False)
+    old = vault / "20_Companies" / "US00760J1088" / "Company.md"
+    current = vault / "20_Companies" / "Aehr_Test_Systems_AEHR" / "Company.md"
+    for path, ticker in [
+        (old, "US00760J1088"),
+        (current, "Aehr Test Systems (AEHR)"),
+    ]:
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            f"---\ntype: company\nticker: \"{ticker}\"\nname: \"Aehr Test Systems\"\nmarket: US\nasset_type: stock\n---\n# A\n",
+            encoding="utf-8",
+        )
+    (vault / "10_Dashboard").mkdir()
+    (vault / "10_Dashboard" / "QA_Exceptions.md").write_text(
+        "# QA\n\n<!-- AUTO-GENERATED:START -->\nold\n<!-- AUTO-GENERATED:END -->\n",
+        encoding="utf-8",
+    )
+
+    qa = run_qa(vault)
+    files = set(qa["file"])
+
+    assert str(old.relative_to(vault)) not in files
+    assert str(current.relative_to(vault)) in files
 
 
 def test_handle_xls_html_table_fallback(tmp_path: Path):
