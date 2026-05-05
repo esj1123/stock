@@ -465,6 +465,20 @@ def test_transaction_history_with_balance_columns_is_not_holdings(tmp_path: Path
     assert pd.isna(normalized["pnl_pct"].iloc[0])
 
 
+def test_transaction_history_precedence_over_cashflow_keywords():
+    df = pd.DataFrame([
+        {
+            "실거래일자": "2026-04-29",
+            "거래유형": "매수",
+            "상세내용": "synthetic transaction row",
+            "예수금": "100",
+            "출금가능금액": "100",
+        }
+    ])
+    path = Path("종합거래내역(상세)_sample.xls")
+    assert infer_source_file_type(path, "Sheet1", df) == "transaction_history"
+
+
 def test_import_transaction_history_does_not_create_holdings(tmp_path: Path):
     vault = tmp_path
     raw = vault / "70_Imports" / "raw"

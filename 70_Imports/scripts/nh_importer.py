@@ -552,12 +552,16 @@ def infer_source_file_type(path: Path, sheet_name: str, df: pd.DataFrame) -> str
         "종합거래내역", "거래내역 상세", "거래내역상세", "실거래일자", "거래유형",
         "상세내용", "거래시간", "정산금액", "체결",
     ]
+    strong_transaction_file_signals = ["종합거래내역", "거래내역 상세", "거래내역상세"]
+    strong_transaction_column_signals = ["실거래일자", "거래유형", "상세내용"]
     cashflow_signals = ["입출금내역", "입출금", "예수금", "출금가능금액", "cashflow", "cash flow", "cash_flow"]
     overseas_balance_signals = ["해외증권잔고조회", "해외증권잔고", "외화평가금액", "해외잔고"]
     holdings_signals = [
         "종합잔고", "잔고조회", "계좌잔고", "보유잔고", "보유현황",
         "평가금액", "평가손익", "평가손익률", "평균단가", "현재가",
     ]
+    if any(k.lower() in lower for k in strong_transaction_file_signals) or all(k.lower() in lower for k in strong_transaction_column_signals):
+        return "transaction_history"
     if any(k.lower() in lower for k in cashflow_signals):
         return "cashflow"
     if any(k.lower() in lower for k in transaction_signals):

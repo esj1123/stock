@@ -16,7 +16,7 @@
 ## Acceptance Trace
 | Trace ID | Category | Requirement | Evidence | Status | Last checked | Notes |
 | --- | --- | --- | --- | --- | --- | --- |
-| STK-AT-01 | data_contract | `종합거래내역 상세` 파일은 `transaction_history`로 분류한다. | `70_Imports/scripts/tests/test_pipeline.py::test_transaction_history_with_balance_columns_is_not_holdings` | PASS | 2026-04-29 | `잔고금액` 컬럼이 있어도 거래내역 신호를 우선한다. |
+| STK-AT-01 | data_contract | `종합거래내역 상세` 파일은 `transaction_history`로 분류한다. | `70_Imports/scripts/tests/test_pipeline.py::test_transaction_history_with_balance_columns_is_not_holdings`, `70_Imports/scripts/tests/test_pipeline.py::test_transaction_history_precedence_over_cashflow_keywords` | PASS | 2026-05-05 | `잔고금액`, `예수금`, `출금가능금액` 컬럼이 있어도 강한 거래내역 신호를 cashflow보다 우선한다. |
 | STK-AT-02 | data_contract | `transaction_history` 파일의 `잔고/잔고금액` 컬럼은 현재 보유잔고로 쓰지 않는다. | `scripts/quality_gate.py` processed integrity, `test_transaction_history_with_balance_columns_is_not_holdings` | PASS | 2026-04-29 | 거래내역 row의 balance/evaluation/pnl 필드는 blank로 유지한다. |
 | STK-AT-03 | data_contract | `holdings` 또는 `overseas_balance` 파일이 없으면 `processed_holdings.csv`는 0건이다. | `scripts/quality_gate.py` no balance file contract, `test_import_transaction_history_does_not_create_holdings` | PASS | 2026-04-29 | 거래내역으로 현재 보유종목을 추정하지 않는다. |
 | STK-AT-04 | data_contract | 잔고자료 없으면 `total_portfolio_value_status=unknown`이다. | `test_no_balance_files_keeps_portfolio_value_unknown`, `portfolio_summary.csv` | PASS | 2026-04-29 | `total_portfolio_value`는 blank다. |
