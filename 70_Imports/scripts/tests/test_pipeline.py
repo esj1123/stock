@@ -948,9 +948,10 @@ def test_qa_exception_cards_export_for_live_qa_checker():
         }
     ])
     content = qa_exception_cards(qa)
-    assert "QA exception summary" in content
+    assert "QA Exceptions" in content
+    assert "Exception Summary" in content
     assert "INV-EX-03" in content
-    assert "20_Companies/AEHR/Company.md" in content
+    assert "[[20_Companies/AEHR/Company\\|AEHR]]" in content
 
 
 def test_generate_qa_exception_for_missing_thesis(tmp_path: Path):

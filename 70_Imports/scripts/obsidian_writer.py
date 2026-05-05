@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import date
+from html import escape
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +13,7 @@ from nh_importer import canonical_overseas_position_key
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
 UTF8_BOM = b"\xef\xbb\xbf"
+EMPTY_DATA = "_No data to display._"
 
 
 def read_csv(path: Path) -> pd.DataFrame:
@@ -23,20 +25,281 @@ def read_csv(path: Path) -> pd.DataFrame:
         return pd.DataFrame()
 
 
+def markdown_cell(value: Any) -> str:
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value).replace("\r\n", "\n").replace("\r", "\n")
+    return text.replace("\\", "/").replace("|", "\\|").replace("\n", "<br>").strip()
+
+
 def markdown_table(df: pd.DataFrame, columns: list[str] | None = None, limit: int | None = None) -> str:
     if df.empty:
-        return "_표시할 데이터가 없습니다._"
+        return EMPTY_DATA
     view = df.copy()
     if columns:
-        view = view[[c for c in columns if c in view.columns]]
+        view = view[[col for col in columns if col in view.columns]]
     if limit:
         view = view.head(limit)
+    if view.empty or not list(view.columns):
+        return EMPTY_DATA
     headers = list(view.columns)
     lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
     for _, row in view.iterrows():
-        vals = [str(row.get(c, "")).replace("\n", " ") for c in headers]
+        vals = [markdown_cell(row.get(col, "")) for col in headers]
         lines.append("| " + " | ".join(vals) + " |")
     return "\n".join(lines)
+
+
+def inline_code(value: Any) -> str:
+    text = markdown_cell(value)
+    return "`" + text.replace("`", "\\`") + "`" if text else "`-`"
+
+
+def row_text(row: pd.Series, key: str) -> str:
+    value = row.get(key, "")
+    if value is None:
+        return ""
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    return str(value).strip()
+
+
+def note_or_code(value: Any, alias: str = "") -> str:
+    text = markdown_cell(value)
+    if not text:
+        return "`-`"
+    if text.endswith(".md") and "/" in text:
+        target = text[:-3]
+        display = alias.strip() if alias.strip() else target.split("/")[-2 if target.endswith("/Company") and "/" in target else -1]
+        return f"[[{target}|{display}]]"
+    return inline_code(text)
+
+
+def queue_summary(df: pd.DataFrame, label: str) -> str:
+    if df.empty:
+        return f"> [!summary] {label}\n> Total: 0"
+    severity = df["severity"].fillna("").astype(str).str.lower() if "severity" in df.columns else pd.Series("", index=df.index)
+    blocking = int((severity == "blocking").sum())
+    advisory = int((severity == "advisory").sum())
+    return f"> [!summary] {label}\n> Total: {len(df)} | Blocking: {blocking} | Advisory: {advisory}"
+
+
+def metric(summary: pd.DataFrame, name: str, default: str = "") -> str:
+    value = summary_value(summary, name)
+    return value if value != "" else default
+
+
+def number_value(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        if pd.isna(value):
+            return default
+    except Exception:
+        pass
+    try:
+        return float(str(value).replace(",", "").strip())
+    except Exception:
+        return default
+
+
+def percent_bar(value: Any, width: int = 20) -> str:
+    pct = max(0.0, min(100.0, number_value(value)))
+    filled = int(round(pct / 100 * width))
+    return "[" + "#" * filled + "-" * (width - filled) + f"] {pct:.2f}%"
+
+
+def progress_bar(value: Any) -> str:
+    pct = max(0.0, min(100.0, number_value(value)))
+    return f'<span class="stock-progress" aria-label="{pct:.2f}%"><span style="width: {pct:.2f}%;"></span></span>'
+
+
+def bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def current_holding_positions(holdings: pd.DataFrame, exclude_cash: bool = True) -> pd.DataFrame:
+    if holdings.empty:
+        return holdings
+    view = holdings.copy()
+    if exclude_cash and "asset_type" in view.columns:
+        view = view[view["asset_type"].fillna("").astype(str).str.lower() != "cash"]
+    return view
+
+
+def weight_summary_table(holdings: pd.DataFrame, group_col: str) -> str:
+    view = current_holding_positions(holdings)
+    if view.empty or group_col not in view.columns or "weight_pct" not in view.columns:
+        return "_No allocation data._"
+    rows = []
+    for name, group in view.groupby(group_col, dropna=False):
+        weight = sum(number_value(v) for v in group["weight_pct"])
+        label = str(name).strip() if str(name).strip() and str(name).lower() != "nan" else "(blank)"
+        rows.append({"bucket": label, "count": len(group), "weight_pct": round(weight, 2), "bar": progress_bar(weight)})
+    return markdown_table(pd.DataFrame(rows).sort_values("weight_pct", ascending=False))
+
+
+def position_cell(row: pd.Series) -> str:
+    ticker = escape(markdown_cell(row.get("ticker", "")))
+    name = escape(markdown_cell(row.get("security_name", "")))
+    if name and name != ticker:
+        return f'<span class="stock-position"><strong>{ticker}</strong><span>{name}</span></span>'
+    return f'<span class="stock-position"><strong>{ticker or "-"}</strong></span>'
+
+
+def risk_tags(row: pd.Series) -> str:
+    tags = []
+    if bool_value(row.get("is_leveraged", False)):
+        tags.append("leveraged ETF")
+    if number_value(row.get("pnl_pct")) <= -10:
+        tags.append("loss review")
+    if number_value(row.get("weight_pct")) >= 15:
+        tags.append("high weight")
+    if not tags:
+        return ""
+    return " ".join(f'<span class="stock-tag">{escape(tag)}</span>' for tag in tags)
+
+
+def compact_position_table(holdings: pd.DataFrame, limit: int | None = None, sort_col: str = "weight_pct", ascending: bool = False) -> str:
+    view = current_holding_positions(holdings)
+    if view.empty:
+        return "_No holding data._"
+    view = view.copy()
+    if sort_col in view.columns:
+        view["_sort"] = view[sort_col].apply(number_value)
+        view = view.sort_values("_sort", ascending=ascending)
+    if limit:
+        view = view.head(limit)
+    rows = []
+    for _, row in view.iterrows():
+        rows.append({
+            "position": position_cell(row),
+            "account": row_text(row, "account_type"),
+            "asset": row_text(row, "asset_type"),
+            "ccy": row_text(row, "currency"),
+            "weight_pct": row_text(row, "weight_pct"),
+            "pnl_pct": row_text(row, "pnl_pct"),
+            "tag": risk_tags(row),
+        })
+    return markdown_table(pd.DataFrame(rows))
+
+
+def top_weight_table(holdings: pd.DataFrame, limit: int = 8) -> str:
+    return compact_position_table(holdings, limit=limit, sort_col="weight_pct", ascending=False)
+
+
+def worst_pnl_table(holdings: pd.DataFrame, limit: int = 6) -> str:
+    return compact_position_table(holdings, limit=limit, sort_col="pnl_pct", ascending=True)
+
+
+def filtered_position_table(holdings: pd.DataFrame, predicate: str) -> str:
+    view = current_holding_positions(holdings)
+    if view.empty:
+        return "_No candidates._"
+    if predicate == "leveraged":
+        view = view[view.get("is_leveraged", False).apply(bool_value)] if "is_leveraged" in view.columns else view.iloc[0:0]
+    elif predicate == "loss_review":
+        view = view[view.get("pnl_pct", 0).apply(number_value) <= -10] if "pnl_pct" in view.columns else view.iloc[0:0]
+    if view.empty:
+        return "_No candidates._"
+    return compact_position_table(view, limit=None, sort_col="weight_pct", ascending=False)
+
+
+def largest_position_label(holdings: pd.DataFrame) -> str:
+    view = current_holding_positions(holdings)
+    if view.empty or "weight_pct" not in view.columns:
+        return "-"
+    row = view.assign(_weight=view["weight_pct"].apply(number_value)).sort_values("_weight", ascending=False).iloc[0]
+    ticker = markdown_cell(row.get("ticker", ""))
+    weight = number_value(row.get("weight_pct"))
+    return f"{ticker} ({weight:.2f}%)"
+
+
+def snapshot_card(label: str, value: Any, hint: str = "") -> str:
+    hint_html = f'<span class="stock-kpi-hint">{escape(markdown_cell(hint))}</span>' if hint else ""
+    return f'<div class="stock-kpi"><span class="stock-kpi-label">{escape(label)}</span><strong>{escape(markdown_cell(value))}</strong>{hint_html}</div>'
+
+
+def review_reason_summary_table(review: pd.DataFrame) -> str:
+    if review.empty or "reason" not in review.columns:
+        return "_No review data._"
+    rows = []
+    for (reason, severity), group in review.groupby(["reason", "severity"], dropna=False):
+        rows.append({"reason": reason, "severity": severity, "count": len(group)})
+    return markdown_table(pd.DataFrame(rows).sort_values(["severity", "count"], ascending=[True, False]))
+
+
+def cashflow_monthly_summary(cash: pd.DataFrame) -> str:
+    if cash.empty or "trade_date" not in cash.columns or "transaction_type" not in cash.columns:
+        return "_No cashflow data._"
+    view = cash.copy()
+    view["month"] = view["trade_date"].fillna("").astype(str).str.slice(0, 7)
+    view = view[view["month"].str.len() == 7]
+    if view.empty:
+        return "_No cashflow data._"
+    rows = []
+    for (month, tx_type), group in view.groupby(["month", "transaction_type"], dropna=False):
+        rows.append({"month": month, "transaction_type": tx_type, "count": len(group)})
+    return markdown_table(pd.DataFrame(rows).sort_values(["month", "transaction_type"]))
+
+
+def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: str) -> str:
+    parts = []
+    if warning:
+        parts.append(warning)
+    value_status = metric(summary, "total_portfolio_value_status", "unknown")
+    snapshot = [
+        "## Snapshot",
+        '<div class="stock-kpi-grid">',
+        snapshot_card("Holdings", metric(summary, "holding_count", "0")),
+        snapshot_card("Loss Review", metric(summary, "loss_review_required_count", "0"), "candidate count"),
+        snapshot_card("Leveraged ETF", metric(summary, "leveraged_etf_count", "0")),
+        snapshot_card("Largest Position", largest_position_label(holdings)),
+        snapshot_card("Value Status", value_status),
+        "</div>",
+    ]
+    parts.append("\n".join(snapshot))
+    if value_status.lower() == "unknown":
+        parts.append("> [!warning] Portfolio value status\n> Total portfolio value status is `unknown`. Add current balance files before relying on value-based summaries.")
+    data_warning = metric(summary, "data_quality_warning")
+    if data_warning:
+        parts.append(f"> [!warning] Data quality\n> {markdown_cell(data_warning)}")
+    parts.extend([
+        "## Allocation Overview",
+        "### Account allocation",
+        weight_summary_table(holdings, "account_type"),
+        "### Asset type allocation",
+        weight_summary_table(holdings, "asset_type"),
+        "### Currency allocation",
+        weight_summary_table(holdings, "currency"),
+        "## Concentration",
+        "### Top positions by weight",
+        top_weight_table(holdings),
+        "## Risk Review",
+        "### Lowest PnL candidates",
+        worst_pnl_table(holdings),
+        "### Leveraged ETF candidates",
+        filtered_position_table(holdings, "leveraged"),
+        "### Loss review candidates",
+        filtered_position_table(holdings, "loss_review"),
+    ])
+    parts.append("## Holdings Detail")
+    if holdings.empty:
+        parts.append("_표시할 데이터가 없습니다._")
+    else:
+        detail = markdown_table(holdings, ["ticker", "security_name", "account_type", "market", "asset_type", "currency", "evaluation_amount", "unrealized_pnl", "pnl_pct", "weight_pct"], 50)
+        parts.append(f"<details>\n<summary>Show all holdings ({len(holdings)})</summary>\n\n{detail}\n\n</details>")
+    return "\n\n".join(parts).strip()
 
 
 def summary_value(summary: pd.DataFrame, metric: str) -> str:
@@ -54,42 +317,322 @@ def summary_value(summary: pd.DataFrame, metric: str) -> str:
 def balance_data_warning(summary: pd.DataFrame) -> str:
     available = summary_value(summary, "balance_data_available").strip().lower()
     if available in {"false", "0", "no"}:
-        return "> [!warning] 잔고자료 미반영\n> 현재 raw 폴더에 종합잔고/ISA잔고/해외증권잔고 파일이 없어 포트폴리오 가치, 평가손익, 수익률을 산출하지 않았습니다. 거래내역은 `processed_transactions.csv`에만 반영됩니다."
+        return (
+            "> [!warning] Balance data not loaded\n"
+            "> Holdings or overseas balance files are missing, so value, PnL, and return summaries may be unavailable."
+        )
     return ""
 
 
-def number_value(value: Any, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    try:
-        if pd.isna(value):
-            return default
-    except Exception:
-        pass
-    try:
-        return float(str(value).replace(",", "").strip())
-    except Exception:
-        return default
+def dashboard_kpi_grid(cards: list[str]) -> str:
+    return "\n".join(["<div class=\"stock-kpi-grid\">", *cards, "</div>"])
 
 
-def holding_dedupe_metrics_table(summary: pd.DataFrame) -> str:
+def details_block(summary: str, body: str, open_by_default: bool = False) -> str:
+    if not body.strip():
+        body = EMPTY_DATA
+    open_attr = " open" if open_by_default else ""
+    return f"<details{open_attr}>\n<summary>{escape(summary)}</summary>\n\n{body.strip()}\n\n</details>"
+
+
+def normalized_text(value: Any, default: str = "-") -> str:
+    text = markdown_cell(value)
+    return text if text else default
+
+
+def tag_cell(values: Any) -> str:
+    if isinstance(values, str):
+        tags = [value.strip() for value in values.split(";") if value.strip()]
+    else:
+        tags = [str(value).strip() for value in values if str(value).strip()]
+    if not tags:
+        return ""
+    return " ".join(f'<span class="stock-tag">{escape(tag)}</span>' for tag in tags)
+
+
+def severity_tag(value: Any) -> str:
+    severity = normalized_text(value, "other").lower()
+    css = re.sub(r"[^a-z0-9_-]+", "-", severity).strip("-") or "other"
+    return f'<span class="stock-tag stock-tag-{escape(css)}">{escape(severity)}</span>'
+
+
+def queue_position_cell(row: pd.Series) -> str:
+    ticker = escape(row_text(row, "ticker") or "UNKNOWN")
+    name = escape(row_text(row, "security_name") or ticker)
+    if name and name != ticker:
+        return f'<span class="stock-position"><strong>{ticker}</strong><span>{name}</span></span>'
+    return f'<span class="stock-position"><strong>{ticker}</strong></span>'
+
+
+def queue_snapshot(view: pd.DataFrame, label: str) -> str:
+    severity = view["severity"].fillna("").astype(str).str.lower() if "severity" in view.columns else pd.Series("", index=view.index)
+    blocking = int((severity == "blocking").sum())
+    advisory = int((severity == "advisory").sum())
+    other = max(0, len(view) - blocking - advisory)
+    return "\n".join([
+        "## Snapshot",
+        dashboard_kpi_grid([
+            snapshot_card(label, len(view), "total rows"),
+            snapshot_card("Blocking", blocking),
+            snapshot_card("Advisory", advisory),
+            snapshot_card("Other", other),
+        ]),
+    ])
+
+
+def count_summary_table(view: pd.DataFrame, group_cols: list[str], label_col: str = "bucket") -> str:
+    if view.empty or any(col not in view.columns for col in group_cols):
+        return EMPTY_DATA
+    rows = []
+    total = max(1, len(view))
+    grouped = view.groupby(group_cols, dropna=False).size().reset_index(name="count")
+    for _, row in grouped.iterrows():
+        label = " / ".join(normalized_text(row.get(col), "(blank)") for col in group_cols)
+        count = int(row.get("count", 0))
+        rows.append({label_col: label, "count": count, "weight_pct": round(count / total * 100, 2), "bar": progress_bar(count / total * 100)})
+    return markdown_table(pd.DataFrame(rows).sort_values(["count", label_col], ascending=[False, True]))
+
+
+def review_item_table(rows: pd.DataFrame, limit: int | None = None) -> str:
+    if rows.empty:
+        return EMPTY_DATA
+    view = rows.copy()
+    if limit:
+        view = view.head(limit)
+    out = []
+    for _, row in view.iterrows():
+        out.append({
+            "position": queue_position_cell(row),
+            "reason": row_text(row, "reason"),
+            "severity": severity_tag(row_text(row, "severity")),
+            "action": row_text(row, "suggested_action"),
+        })
+    return markdown_table(pd.DataFrame(out))
+
+
+def review_queue_cards(review: pd.DataFrame) -> str:
+    if review.empty:
+        return "\n\n".join([
+            queue_snapshot(pd.DataFrame(columns=["severity"]), "Review Items"),
+            "## Reason summary",
+            EMPTY_DATA,
+        ])
+    view = review.copy()
+    view["severity"] = view.get("severity", "").fillna("").astype(str)
+    parts = [queue_snapshot(view, "Review Items"), "## Reason summary", count_summary_table(view, ["reason", "severity"], "reason")]
+    blocking = view[view["severity"].str.lower() == "blocking"]
+    advisory = view[view["severity"].str.lower() == "advisory"]
+    other = view[~view["severity"].str.lower().isin(["blocking", "advisory"])]
+    parts.extend(["## Blocking", review_item_table(blocking)])
+    if not advisory.empty:
+        parts.extend(["## Advisory", details_block(f"Show advisory items ({len(advisory)})", review_item_table(advisory))])
+    if not other.empty:
+        parts.extend(["## Other", details_block(f"Show other items ({len(other)})", review_item_table(other))])
+    return "\n\n".join(parts).strip()
+
+
+def risk_item_table(rows: pd.DataFrame, limit: int | None = None) -> str:
+    if rows.empty:
+        return EMPTY_DATA
+    view = rows.copy()
+    if "weight_pct" in view.columns:
+        view["_sort"] = view["weight_pct"].apply(number_value)
+        view = view.sort_values("_sort", ascending=False)
+    if limit:
+        view = view.head(limit)
+    out = []
+    for _, row in view.iterrows():
+        out.append({
+            "position": queue_position_cell(row),
+            "account": row_text(row, "account_type"),
+            "pnl_pct": row_text(row, "pnl_pct"),
+            "weight_pct": row_text(row, "weight_pct"),
+            "flags": tag_cell(row_text(row, "risk_flags")),
+            "action": row_text(row, "suggested_action"),
+        })
+    return markdown_table(pd.DataFrame(out))
+
+
+def risk_flag_summary_table(risk: pd.DataFrame) -> str:
+    if risk.empty or "risk_flags" not in risk.columns:
+        return EMPTY_DATA
+    counts: dict[str, int] = {}
+    for value in risk["risk_flags"]:
+        flags = [flag.strip() for flag in str(value or "").split(";") if flag.strip()]
+        if not flags:
+            flags = ["OTHER"]
+        for flag in flags:
+            counts[flag] = counts.get(flag, 0) + 1
+    max_count = max(counts.values()) if counts else 1
     rows = [
-        {"dedupe_item": "candidate_rows", "value": int(number_value(summary_value(summary, "holding_dedupe_candidate_rows")))},
-        {"dedupe_item": "retained_rows", "value": int(number_value(summary_value(summary, "holding_dedupe_retained_rows")))},
-        {"dedupe_item": "excluded_rows", "value": int(number_value(summary_value(summary, "holding_dedupe_excluded_rows")))},
-        {"dedupe_item": "excluded_evaluation_amount", "value": summary_value(summary, "holding_dedupe_excluded_evaluation_amount") or "0"},
+        {"risk_flag": tag_cell([flag]), "count": count, "bar": progress_bar(count / max_count * 100)}
+        for flag, count in counts.items()
     ]
-    return markdown_table(pd.DataFrame(rows))
+    return markdown_table(pd.DataFrame(rows).sort_values(["count", "risk_flag"], ascending=[False, True]))
 
 
-def holding_dedupe_summary_table(holdings: pd.DataFrame) -> str:
-    if holdings.empty or "dedupe_excluded_count" not in holdings.columns:
-        return markdown_table(pd.DataFrame())
+def risk_watchlist_cards(risk: pd.DataFrame) -> str:
+    if risk.empty:
+        return "\n\n".join([
+            "## Snapshot",
+            dashboard_kpi_grid([
+                snapshot_card("Risk Items", 0, "total rows"),
+                snapshot_card("Loss Review", 0),
+                snapshot_card("Leveraged ETF", 0),
+                snapshot_card("High Weight", 0),
+            ]),
+            "## Risk flag summary",
+            EMPTY_DATA,
+        ])
+    flags = risk.get("risk_flags", pd.Series("", index=risk.index)).fillna("").astype(str)
+    loss_count = int(flags.str.contains("LOSS_REVIEW", case=False, regex=False).sum())
+    leveraged_count = int(flags.str.contains("LEVERAGED", case=False, regex=False).sum())
+    high_weight_count = int(flags.str.contains("HIGH_WEIGHT", case=False, regex=False).sum())
+    parts = [
+        "## Snapshot",
+        dashboard_kpi_grid([
+            snapshot_card("Risk Items", len(risk), "total rows"),
+            snapshot_card("Loss Review", loss_count),
+            snapshot_card("Leveraged ETF", leveraged_count),
+            snapshot_card("High Weight", high_weight_count),
+        ]),
+        "## Risk flag summary",
+        risk_flag_summary_table(risk),
+        "## Priority Candidates",
+        risk_item_table(risk, limit=12),
+    ]
+    flag_rows: dict[str, list[pd.Series]] = {}
+    for _, row in risk.iterrows():
+        row_flags = [flag.strip() for flag in row_text(row, "risk_flags").split(";") if flag.strip()] or ["OTHER"]
+        for flag in row_flags:
+            flag_rows.setdefault(flag, []).append(row)
+    grouped = []
+    for flag in sorted(flag_rows):
+        grouped.append(f"### {markdown_cell(flag)}\n\n{risk_item_table(pd.DataFrame(flag_rows[flag]))}")
+    if grouped:
+        parts.extend(["## Flag Details", details_block(f"Show risk flag details ({len(risk)})", "\n\n".join(grouped))])
+    return "\n\n".join(parts).strip()
+
+
+def qa_exception_table(rows: pd.DataFrame, limit: int | None = None) -> str:
+    if rows.empty:
+        return EMPTY_DATA
+    view = rows.copy()
+    if limit:
+        view = view.head(limit)
+    out = []
+    for _, row in view.iterrows():
+        out.append({
+            "exception": inline_code(row_text(row, "exception_id") or "UNKNOWN"),
+            "severity": severity_tag(row_text(row, "severity")),
+            "file": note_or_code(row_text(row, "file")),
+            "issue": row_text(row, "issue"),
+            "action": row_text(row, "suggested_fix"),
+        })
+    return markdown_table(pd.DataFrame(out))
+
+
+def qa_exception_cards(qa: pd.DataFrame) -> str:
+    if qa.empty:
+        return "\n\n".join([
+            queue_snapshot(pd.DataFrame(columns=["severity"]), "QA Exceptions"),
+            "## Exception Summary",
+            EMPTY_DATA,
+        ])
+    view = qa.copy()
+    view["severity"] = view.get("severity", "").fillna("").astype(str)
+    blocking = view[view["severity"].str.lower() == "blocking"]
+    advisory = view[view["severity"].str.lower() == "advisory"]
+    other = view[~view["severity"].str.lower().isin(["blocking", "advisory"])]
+    parts = [
+        queue_snapshot(view, "QA Exceptions"),
+        "## Exception Summary",
+        count_summary_table(view, ["exception_id", "severity"], "exception"),
+        "## Blocking",
+        qa_exception_table(blocking),
+    ]
+    if not advisory.empty:
+        parts.extend(["## Advisory", details_block(f"Show advisory exceptions ({len(advisory)})", qa_exception_table(advisory))])
+    if not other.empty:
+        parts.extend(["## Other", details_block(f"Show other exceptions ({len(other)})", qa_exception_table(other))])
+    return "\n\n".join(parts).strip()
+
+
+def companies_content(holdings: pd.DataFrame) -> str:
+    if holdings.empty:
+        return "\n\n".join([
+            "## Snapshot",
+            dashboard_kpi_grid([
+                snapshot_card("Positions", 0),
+                snapshot_card("Cash Excluded", 0),
+                snapshot_card("Leveraged ETF", 0),
+            ]),
+            "## Current Holdings",
+            EMPTY_DATA,
+        ])
+    view = current_holding_positions(holdings)
+    cash_count = len(holdings) - len(view)
+    leveraged_count = int(view.get("is_leveraged", pd.Series(False, index=view.index)).fillna(False).apply(bool_value).sum()) if not view.empty else 0
+    currencies = int(view["currency"].nunique()) if "currency" in view.columns and not view.empty else 0
+    parts = [
+        "## Snapshot",
+        dashboard_kpi_grid([
+            snapshot_card("Positions", len(view)),
+            snapshot_card("Cash Excluded", cash_count),
+            snapshot_card("Leveraged ETF", leveraged_count),
+            snapshot_card("Currencies", currencies),
+        ]),
+        "## Current Holdings",
+        compact_position_table(view, limit=100),
+    ]
+    return "\n\n".join(parts).strip()
+
+
+def cashflow_group_table(cash: pd.DataFrame, group_cols: list[str], label_col: str) -> str:
+    if cash.empty or any(col not in cash.columns for col in group_cols):
+        return EMPTY_DATA
+    return count_summary_table(cash, group_cols, label_col)
+
+
+def cashflow_detail_table(cash: pd.DataFrame, limit: int | None = None) -> str:
+    return markdown_table(cash, ["trade_date", "transaction_type", "account_type", "ticker", "security_name", "settlement_amount", "currency"], limit)
+
+
+def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame) -> str:
+    months = 0
+    if not cash.empty and "trade_date" in cash.columns:
+        months = cash["trade_date"].fillna("").astype(str).str.slice(0, 7).loc[lambda s: s.str.len() == 7].nunique()
+    tx_types = int(cash["transaction_type"].nunique()) if not cash.empty and "transaction_type" in cash.columns else 0
+    monthly_source = cash.assign(month=cash["trade_date"].fillna("").astype(str).str.slice(0, 7)) if not cash.empty and "trade_date" in cash.columns else cash
+    parts = [
+        "## Snapshot",
+        dashboard_kpi_grid([
+            snapshot_card("Cashflow Rows", len(cash)),
+            snapshot_card("Dividend Rows", len(dividends)),
+            snapshot_card("Months", months),
+            snapshot_card("Types", tx_types),
+        ]),
+        "## Monthly activity",
+        cashflow_group_table(monthly_source, ["month", "transaction_type"], "month"),
+        "## Type summary",
+        cashflow_group_table(cash, ["transaction_type"], "type"),
+        "## Recent Cashflows",
+        cashflow_detail_table(cash, limit=20),
+        "## Details",
+        details_block(f"Show all cashflow rows ({len(cash)})", cashflow_detail_table(cash, limit=200)),
+        details_block(f"Show dividend rows ({len(dividends)})", markdown_table(dividends, ["trade_date", "ticker", "security_name", "settlement_amount", "currency"], 200)),
+    ]
+    return "\n\n".join(parts).strip()
+
+
+def holding_dedupe_summary_table(holdings: pd.DataFrame | None) -> str:
+    if holdings is None or holdings.empty or "dedupe_excluded_count" not in holdings.columns:
+        return EMPTY_DATA
     view = holdings.copy()
     view["_excluded"] = view["dedupe_excluded_count"].apply(number_value)
     view = view[view["_excluded"] > 0]
     if view.empty:
-        return markdown_table(pd.DataFrame())
+        return EMPTY_DATA
     columns = [
         "ticker",
         "security_name",
@@ -105,22 +648,148 @@ def holding_dedupe_summary_table(holdings: pd.DataFrame) -> str:
     return markdown_table(view.drop(columns=["_excluded"], errors="ignore"), columns, 50)
 
 
-def qa_exception_cards(qa: pd.DataFrame) -> str:
-    """Render QA exceptions for dashboards and live qa_checker compatibility."""
-    columns = ["exception_id", "severity", "file", "issue", "suggested_fix"]
-    if qa.empty:
-        return "\n\n".join(["## QA exception summary", markdown_table(pd.DataFrame(columns=columns))])
-    view = qa.copy()
-    for column in columns:
-        if column not in view.columns:
-            view[column] = ""
-    summary = view.groupby("severity", dropna=False).size().reset_index(name="count") if "severity" in view.columns else pd.DataFrame()
-    return "\n\n".join([
-        "## QA exception summary",
-        markdown_table(summary),
-        "## QA exceptions",
-        markdown_table(view, columns, 200),
-    ]).strip()
+def import_review_content(
+    summary: pd.DataFrame,
+    sources: pd.DataFrame,
+    skipped: pd.DataFrame,
+    unclassified: pd.DataFrame,
+    warning: str,
+    holdings: pd.DataFrame | None = None,
+) -> str:
+    parts = []
+    if warning:
+        parts.append(warning)
+    data_warning = metric(summary, "data_quality_warning")
+    if data_warning:
+        parts.append(f"> [!warning] Data quality\n> {markdown_cell(data_warning)}")
+    skipped_count = int(skipped["row_count"].apply(number_value).sum()) if not skipped.empty and "row_count" in skipped.columns else len(skipped)
+    dedupe_excluded = int(number_value(metric(summary, "holding_dedupe_excluded_rows", "0")))
+    dedupe_retained = int(number_value(metric(summary, "holding_dedupe_retained_rows", "0")))
+    dedupe_candidates = int(number_value(metric(summary, "holding_dedupe_candidate_rows", "0")))
+    dedupe_excluded_value = metric(summary, "holding_dedupe_excluded_evaluation_amount", "0")
+    parts.extend([
+        "## Snapshot",
+        dashboard_kpi_grid([
+            snapshot_card("Raw Files", metric(summary, "raw_file_count", "0")),
+            snapshot_card("Transaction Files", metric(summary, "transaction_history_file_count", "0")),
+            snapshot_card("Balance Files", metric(summary, "holdings_file_count", "0")),
+            snapshot_card("Value Status", metric(summary, "total_portfolio_value_status", "unknown")),
+            snapshot_card("Unclassified", len(unclassified)),
+            snapshot_card("Skipped", skipped_count),
+            snapshot_card("Dedupe Excluded", dedupe_excluded),
+        ]),
+        "## Source Files",
+        markdown_table(sources, ["source_file", "source_file_type", "account_type", "size_bytes", "modified_at", "sensitive_data_found"], 20),
+    ])
+    skipped_view = skipped
+    if not skipped.empty and "row_count" in skipped.columns:
+        group_cols = [col for col in ["skip_reason", "source_file_type", "account_type", "currency", "fx_rate"] if col in skipped.columns]
+        if group_cols:
+            skipped_view = skipped.groupby(group_cols, dropna=False)["row_count"].sum().reset_index()
+    parts.extend([
+        "## Import Quality",
+        "### Holding dedupe",
+        markdown_table(pd.DataFrame([
+            {"dedupe_item": "candidate_rows", "value": dedupe_candidates},
+            {"dedupe_item": "retained_rows", "value": dedupe_retained},
+            {"dedupe_item": "excluded_rows", "value": dedupe_excluded},
+            {"dedupe_item": "excluded_evaluation_amount", "value": dedupe_excluded_value},
+        ])),
+        holding_dedupe_summary_table(holdings),
+        "### Skipped broker helper rows",
+        markdown_table(skipped_view, ["skip_reason", "source_file_type", "account_type", "currency", "fx_rate", "row_count"], 20),
+        "### Unclassified transaction rows",
+        markdown_table(unclassified, limit=20),
+        "## Details",
+        details_block(f"Show all source rows ({len(sources)})", markdown_table(sources, limit=200)),
+        details_block(f"Show all skipped rows ({len(skipped_view)})", markdown_table(skipped_view, limit=200)),
+        details_block(f"Show all unclassified rows ({len(unclassified)})", markdown_table(unclassified, limit=200)),
+        "## Next Actions",
+        "- If unclassified rows remain, review the raw column mapping or transaction type rules.",
+        "- If balance-file warnings remain, add holdings or overseas balance files before relying on value and PnL summaries.",
+        "- If sensitive-data warnings appear, verify generated Markdown before publishing or syncing.",
+    ])
+    return "\n\n".join(parts).strip()
+
+
+def history_item_table(rows: pd.DataFrame, limit: int | None = None) -> str:
+    if rows.empty:
+        return EMPTY_DATA
+    view = rows.copy()
+    if limit:
+        view = view.head(limit)
+    out = []
+    for _, row in view.iterrows():
+        out.append({
+            "position": queue_position_cell(row),
+            "account": row_text(row, "account_type"),
+            "market": row_text(row, "market"),
+            "reason": row_text(row, "history_reason"),
+            "destination": row_text(row, "suggested_destination"),
+            "action": row_text(row, "suggested_action"),
+        })
+    return markdown_table(pd.DataFrame(out))
+
+
+def history_queue_cards(history: pd.DataFrame) -> str:
+    if history.empty:
+        return "\n\n".join([
+            "## Snapshot",
+            dashboard_kpi_grid([snapshot_card("History Candidates", 0)]),
+            "## Current Candidates",
+            EMPTY_DATA,
+        ])
+    reason_summary = count_summary_table(history, ["history_reason"], "reason") if "history_reason" in history.columns else EMPTY_DATA
+    account_summary = count_summary_table(history, ["account_type"], "account") if "account_type" in history.columns else EMPTY_DATA
+    parts = [
+        "## Snapshot",
+        dashboard_kpi_grid([
+            snapshot_card("History Candidates", len(history)),
+            snapshot_card("Accounts", history["account_type"].nunique() if "account_type" in history.columns else 0),
+            snapshot_card("Markets", history["market"].nunique() if "market" in history.columns else 0),
+        ]),
+        "> [!note] Scope\n> These are past-trade candidates with no current holding signal. They stay outside the primary Review Queue.",
+        "## Reason Summary",
+        reason_summary,
+        "## Account Summary",
+        account_summary,
+        "## Recent Candidates",
+        history_item_table(history, limit=20),
+        "## Details",
+        details_block(f"Show all history candidates ({len(history)})", history_item_table(history, limit=200)),
+    ]
+    return "\n\n".join(parts).strip()
+
+
+def exposure_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: str) -> str:
+    parts = []
+    if warning:
+        parts.append(warning)
+    value_status = metric(summary, "total_portfolio_value_status", "unknown")
+    view = current_holding_positions(holdings)
+    parts.extend([
+        "## Snapshot",
+        dashboard_kpi_grid([
+            snapshot_card("Positions", len(view)),
+            snapshot_card("Value Status", value_status),
+            snapshot_card("Leveraged ETF", metric(summary, "leveraged_etf_count", "0")),
+            snapshot_card("High Weight", metric(summary, "high_weight_count", "0")),
+        ]),
+        "## Allocation",
+        "### Account",
+        weight_summary_table(holdings, "account_type"),
+        "### Market",
+        weight_summary_table(holdings, "market"),
+        "### Asset Type",
+        weight_summary_table(holdings, "asset_type"),
+        "### Currency",
+        weight_summary_table(holdings, "currency"),
+        "## Leveraged ETF Exposure",
+        filtered_position_table(holdings, "leveraged"),
+    ])
+    if not view.empty:
+        parts.extend(["## Details", details_block(f"Show exposure detail ({len(view)})", compact_position_table(view, limit=200))])
+    return "\n\n".join(parts).strip()
 
 
 def replace_autogenerated_block(path: Path, content: str, dry_run: bool = False) -> tuple[bool, str]:
@@ -187,53 +856,24 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
-        return "\n".join([warning, "_CSV/SQLite 기준 생성 요약_", markdown_table(summary), "\n## 보유종목", markdown_table(holdings, ["ticker", "security_name", "account_type", "market", "asset_type", "currency", "evaluation_amount", "unrealized_pnl", "pnl_pct", "weight_pct"], 50)]).strip()
+        return portfolio_content(summary, holdings, warning)
+    if name == "Companies.md":
+        return companies_content(holdings)
     if name == "Exposure.md":
-        if holdings.empty or "evaluation_amount" not in holdings:
-            return "\n".join([warning, "_노출도 계산 데이터가 없습니다._"]).strip()
-        parts = []
-        for key in ["account_type", "market", "asset_type", "currency"]:
-            if key in holdings:
-                g = holdings.groupby(key, dropna=False)["evaluation_amount"].sum().reset_index()
-                total = g["evaluation_amount"].sum()
-                g["weight_pct"] = g["evaluation_amount"].apply(lambda v: round(v / total * 100, 2) if total else 0)
-                parts.append(f"## {key}\n" + markdown_table(g))
-        lev = holdings[holdings.get("is_leveraged", False) == True] if "is_leveraged" in holdings else pd.DataFrame()
-        parts.append("## leveraged ETF exposure\n" + markdown_table(lev, ["ticker", "security_name", "evaluation_amount", "weight_pct"]))
-        return "\n\n".join(parts)
+        return exposure_content(summary, holdings, warning)
     if name == "Cashflows.md":
-        return "\n".join(["## 현금흐름", markdown_table(cash, ["trade_date", "transaction_type", "account_type", "settlement_amount", "currency"], 100), "\n## 배당/분배금", markdown_table(dividends, ["trade_date", "ticker", "security_name", "settlement_amount", "currency"], 100)])
+        return cashflow_content(cash, dividends)
     if name == "Import_Review.md":
-        status_rows = summary[summary.get("metric", pd.Series(dtype=str)).isin(["raw_file_count", "transaction_history_file_count", "holdings_file_count", "balance_data_available", "total_portfolio_value_status", "total_portfolio_value_basis", "portfolio_summary_estimated", "data_quality_warning"])] if not summary.empty else summary
-        skipped_view = skipped
-        if not skipped.empty and "row_count" in skipped.columns:
-            group_cols = [col for col in ["skip_reason", "source_file_type", "account_type", "currency", "fx_rate"] if col in skipped.columns]
-            if group_cols:
-                skipped_view = skipped.groupby(group_cols, dropna=False)["row_count"].sum().reset_index()
-        return "\n".join([
-            warning,
-            "## Data status",
-            markdown_table(status_rows),
-            "\n## Imported source files",
-            markdown_table(sources),
-            "\n## Holding dedupe",
-            holding_dedupe_metrics_table(summary),
-            holding_dedupe_summary_table(holdings),
-            "\n## Skipped broker helper rows",
-            markdown_table(skipped_view, ["skip_reason", "source_file_type", "account_type", "currency", "fx_rate", "row_count"], 50),
-            "\n## Unclassified transaction rows",
-            markdown_table(unclassified, limit=50),
-            "\n## Next actions\n- unclassified row가 있으면 컬럼 매핑 또는 거래유형 키워드를 보완하세요.\n- 잔고자료 미반영 경고가 있으면 종합잔고/ISA잔고/해외증권잔고 파일을 raw 폴더에 추가하세요.\n- sensitive warning이 있으면 generated Markdown에 노출되지 않았는지 확인하세요.",
-        ]).strip()
+        return import_review_content(summary, sources, skipped, unclassified, warning, holdings)
     if name == "Risk_Watchlist.md":
-        return "\n".join([warning, markdown_table(risk, ["ticker", "security_name", "account_type", "risk_flags", "pnl_pct", "weight_pct", "suggested_action"], 100)]).strip()
+        return "\n".join([warning, risk_watchlist_cards(risk)]).strip()
     if name == "Review_Queue.md":
-        return "\n".join([warning, markdown_table(review, ["ticker", "security_name", "reason", "severity", "suggested_action"], 100)]).strip()
+        return "\n".join([warning, review_queue_cards(review)]).strip()
     if name == "History_Queue.md":
-        return "\n".join(["_현재 보유수량과 평가금액이 0인 과거 거래종목 후보입니다. 기본 Review Queue에서는 제외됩니다._", markdown_table(history, ["ticker", "security_name", "account_type", "market", "history_reason", "suggested_destination", "suggested_action"], 200)])
+        return history_queue_cards(history)
     if name == "QA_Exceptions.md":
-        return markdown_table(qa, ["exception_id", "severity", "file", "issue", "suggested_fix"], 200)
-    return "_지원하지 않는 대시보드입니다._"
+        return qa_exception_cards(qa)
+    return "_Unsupported dashboard._"
 
 
 def safe_component(value: Any) -> str:
@@ -310,6 +950,7 @@ leveraged_etf_rule_link: "[[05_Principles/Leveraged_ETF_Rules]]"
 """
     return f"""---
 type: company
+doc_type: company
 ticker: "{ticker}"
 name: "{name}"
 market: "{row.get('market', '')}"
@@ -404,7 +1045,7 @@ def write_company_notes(vault_root: Path, processed_dir: Path, create_companies:
 def write_dashboards(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = False) -> list[str]:
     processed_dir = processed_dir or vault_root / "70_Imports" / "processed"
     warnings: list[str] = []
-    for name in ["Portfolio.md", "Exposure.md", "Cashflows.md", "Import_Review.md", "Risk_Watchlist.md", "Review_Queue.md", "History_Queue.md", "QA_Exceptions.md"]:
+    for name in ["Portfolio.md", "Companies.md", "Exposure.md", "Cashflows.md", "Import_Review.md", "Risk_Watchlist.md", "Review_Queue.md", "History_Queue.md", "QA_Exceptions.md"]:
         path = vault_root / "10_Dashboard" / name
         ok, warning = replace_autogenerated_block(path, dashboard_content(name, processed_dir), dry_run=dry_run)
         if not ok:
