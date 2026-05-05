@@ -10,11 +10,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
+import pandas as pd
+
 IMPORT_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "70_Imports" / "scripts"
 if str(IMPORT_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(IMPORT_SCRIPTS_DIR))
 
-from nh_importer import canonical_overseas_position_key, is_overseas_cashflow_amount_only_helper_row, is_overseas_position_row
+from nh_importer import canonical_overseas_position_key, dedupe_holdings, is_overseas_cashflow_amount_only_helper_row, is_overseas_position_row
 from obsidian_writer import company_note_identity_key, parse_note_frontmatter
 
 
@@ -176,18 +178,42 @@ def is_overseas_holding_row(row: dict[str, str]) -> bool:
 
 
 def duplicate_overseas_holding_findings(holdings: list[dict[str, str]]) -> list[str]:
-    by_key: dict[str, set[str]] = {}
-    for row in holdings:
-        if not is_overseas_holding_row(row):
-            continue
+    if not holdings:
+        return []
+    original = pd.DataFrame(holdings)
+    deduped = dedupe_holdings(original)
+    if len(deduped) == len(original):
+        by_key: dict[str, set[str]] = {}
+        key_rows: dict[str, list[dict[str, str]]] = {}
+        for row in holdings:
+            if not is_overseas_holding_row(row):
+                continue
+            key = canonical_overseas_position_key(row)
+            if is_blank(key):
+                continue
+            by_key.setdefault(key, set()).add(str(row.get("source_file_type", "")))
+            key_rows.setdefault(key, []).append(row)
+        return [
+            f"{key} appears in both holdings and overseas_balance"
+            for key, source_types in sorted(by_key.items())
+            if {"holdings", "overseas_balance"}.issubset(source_types)
+            and all(is_blank(row.get("balance_quantity", "")) and is_blank(row.get("evaluation_amount", "")) for row in key_rows.get(key, []))
+        ]
+
+    before_counts: dict[str, int] = {}
+    after_counts: dict[str, int] = {}
+    for _, row in original.iterrows():
         key = canonical_overseas_position_key(row)
-        if is_blank(key):
-            continue
-        by_key.setdefault(key, set()).add(str(row.get("source_file_type", "")))
+        if key:
+            before_counts[key] = before_counts.get(key, 0) + 1
+    for _, row in deduped.iterrows():
+        key = canonical_overseas_position_key(row)
+        if key:
+            after_counts[key] = after_counts.get(key, 0) + 1
     return [
-        f"{key} appears in both holdings and overseas_balance"
-        for key, source_types in sorted(by_key.items())
-        if {"holdings", "overseas_balance"}.issubset(source_types)
+        f"{key} has {before_counts[key] - after_counts.get(key, 0)} duplicate row(s) excluded by source priority"
+        for key in sorted(before_counts)
+        if before_counts[key] > after_counts.get(key, 0)
     ]
 
 

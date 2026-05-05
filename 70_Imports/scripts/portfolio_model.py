@@ -203,6 +203,28 @@ def source_type_counts(processed_dir: Path) -> tuple[int, int, int]:
     return raw_count, transaction_count, holding_count
 
 
+def holding_dedupe_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
+    if holdings.empty or "dedupe_excluded_count" not in holdings.columns:
+        return {
+            "candidate_rows": 0,
+            "retained_rows": 0,
+            "excluded_rows": 0,
+            "excluded_evaluation_amount": 0.0,
+        }
+    excluded_counts = pd.to_numeric(holdings["dedupe_excluded_count"], errors="coerce").fillna(0)
+    retained_rows = int((excluded_counts > 0).sum())
+    excluded_rows = int(excluded_counts.sum())
+    excluded_value = 0.0
+    if "dedupe_excluded_evaluation_amount" in holdings.columns:
+        excluded_value = float(pd.to_numeric(holdings["dedupe_excluded_evaluation_amount"], errors="coerce").fillna(0).sum())
+    return {
+        "candidate_rows": retained_rows + excluded_rows,
+        "retained_rows": retained_rows,
+        "excluded_rows": excluded_rows,
+        "excluded_evaluation_amount": excluded_value,
+    }
+
+
 def portfolio_summary_rows(
     total_value: Any,
     holding_count: int,
@@ -215,6 +237,14 @@ def portfolio_summary_rows(
     transaction_file_count: int,
     holdings_file_count: int,
     balance_data_available: bool,
+    total_cost: Any = "",
+    total_unrealized_pnl: Any = "",
+    portfolio_pnl_pct: Any = "",
+    leveraged_etf_total_weight_pct: Any = "",
+    dedupe_candidate_rows: int = 0,
+    dedupe_retained_rows: int = 0,
+    dedupe_excluded_rows: int = 0,
+    dedupe_excluded_evaluation_amount: float = 0.0,
 ) -> pd.DataFrame:
     if balance_data_available and holding_count:
         basis = "balance_file_evaluation_amount_sum"
@@ -233,6 +263,10 @@ def portfolio_summary_rows(
         warning = "잔고자료 미반영: 종합잔고/ISA잔고/해외증권잔고 파일이 없어 포트폴리오 가치, 평가손익, 수익률을 산출하지 않았습니다."
     return pd.DataFrame([
         {"metric": "total_portfolio_value", "value": total_value},
+        {"metric": "total_cost", "value": total_cost},
+        {"metric": "total_unrealized_pnl", "value": total_unrealized_pnl},
+        {"metric": "pnl_pct", "value": portfolio_pnl_pct},
+        {"metric": "leveraged_etf_total_weight_pct", "value": leveraged_etf_total_weight_pct},
         {"metric": "total_portfolio_value_status", "value": status},
         {"metric": "total_portfolio_value_basis", "value": basis},
         {"metric": "portfolio_summary_estimated", "value": estimated},
@@ -242,6 +276,11 @@ def portfolio_summary_rows(
         {"metric": "holdings_file_count", "value": holdings_file_count},
         {"metric": "holding_count", "value": holding_count},
         {"metric": "original_holding_rows_before_current_filter", "value": original_holding_count},
+        {"metric": "holding_dedupe_status", "value": "applied" if dedupe_excluded_rows else "none"},
+        {"metric": "holding_dedupe_candidate_rows", "value": dedupe_candidate_rows},
+        {"metric": "holding_dedupe_retained_rows", "value": dedupe_retained_rows},
+        {"metric": "holding_dedupe_excluded_rows", "value": dedupe_excluded_rows},
+        {"metric": "holding_dedupe_excluded_evaluation_amount", "value": dedupe_excluded_evaluation_amount},
         {"metric": "history_queue_count", "value": history_count},
         {"metric": "loss_review_required_count", "value": loss_count},
         {"metric": "leveraged_etf_count", "value": leveraged_count},
@@ -273,6 +312,7 @@ def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.D
     holdings["ticker"] = holdings.get("ticker", "").astype(str)
     holdings = holdings[~holdings["ticker"].str.lower().isin(["", "nan", "none"])].copy()
     holdings = remove_overlapping_overseas_holdings(holdings)
+    dedupe_metrics = holding_dedupe_metrics(holdings)
     if holdings.empty:
         summary = portfolio_summary_rows(
             total_value="",
@@ -286,6 +326,10 @@ def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.D
             transaction_file_count=transaction_file_count,
             holdings_file_count=holdings_file_count,
             balance_data_available=balance_data_available,
+            dedupe_candidate_rows=dedupe_metrics["candidate_rows"],
+            dedupe_retained_rows=dedupe_metrics["retained_rows"],
+            dedupe_excluded_rows=dedupe_metrics["excluded_rows"],
+            dedupe_excluded_evaluation_amount=dedupe_metrics["excluded_evaluation_amount"],
         )
         return summary, pd.DataFrame(columns=NORMALIZED_COLUMNS), pd.DataFrame(columns=RISK_COLUMNS), pd.DataFrame(columns=REVIEW_COLUMNS), pd.DataFrame(columns=HISTORY_COLUMNS)
     group_cols = [c for c in ["account_type", "ticker"] if c in holdings.columns]
@@ -314,6 +358,14 @@ def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.D
     else:
         current_holdings["weight_pct"] = current_holdings["evaluation_amount"].apply(lambda v: round(float(v) / total_value * 100, 4) if total_value else 0)
         current_holdings["is_leveraged"] = current_holdings.apply(lambda r: is_leveraged_etf_name(r.get("security_name", ""), r.get("ticker", "")), axis=1)
+    total_unrealized_pnl = float(current_holdings["unrealized_pnl"].sum()) if "unrealized_pnl" in current_holdings and not current_holdings.empty else ""
+    total_cost = float(total_value - total_unrealized_pnl) if total_unrealized_pnl != "" else ""
+    portfolio_pnl_pct = round(total_unrealized_pnl / total_cost * 100, 4) if total_cost not in {"", 0.0} else ""
+    leveraged_weight = (
+        round(float(current_holdings.loc[current_holdings["is_leveraged"], "weight_pct"].sum()), 4)
+        if "is_leveraged" in current_holdings and "weight_pct" in current_holdings and not current_holdings.empty
+        else ""
+    )
 
     risk_rows = []
     review_rows = []
@@ -360,6 +412,14 @@ def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.D
         transaction_file_count=transaction_file_count,
         holdings_file_count=holdings_file_count,
         balance_data_available=balance_data_available,
+        total_cost=total_cost,
+        total_unrealized_pnl=total_unrealized_pnl,
+        portfolio_pnl_pct=portfolio_pnl_pct,
+        leveraged_etf_total_weight_pct=leveraged_weight,
+        dedupe_candidate_rows=dedupe_metrics["candidate_rows"],
+        dedupe_retained_rows=dedupe_metrics["retained_rows"],
+        dedupe_excluded_rows=dedupe_metrics["excluded_rows"],
+        dedupe_excluded_evaluation_amount=dedupe_metrics["excluded_evaluation_amount"],
     )
     risk_df = pd.DataFrame(risk_rows, columns=RISK_COLUMNS).drop_duplicates() if risk_rows else pd.DataFrame(columns=RISK_COLUMNS)
     review_df = pd.DataFrame(review_rows, columns=REVIEW_COLUMNS).drop_duplicates() if review_rows else pd.DataFrame(columns=REVIEW_COLUMNS)
