@@ -28,6 +28,26 @@ SKIPPED_ROWS_COLUMNS = [
 
 OVERSEAS_CASHFLOW_AMOUNT_ONLY_SKIP_REASON = "OVERSEAS_CASHFLOW_AMOUNT_ONLY_NO_IDENTITY"
 
+HOLDING_DEDUPE_COLUMNS = [
+    "dedupe_group_id",
+    "dedupe_action",
+    "dedupe_reason",
+    "preferred_source",
+    "dedupe_excluded_count",
+    "dedupe_excluded_evaluation_amount",
+]
+
+HOLDING_SOURCE_PRIORITY = {
+    "overseas_balance": 0,
+    "holdings": 10,
+}
+
+HOLDING_QUANTITY_TOLERANCE = 1e-6
+HOLDING_AMOUNT_ABS_TOLERANCE = 1.0
+HOLDING_AMOUNT_REL_TOLERANCE = 0.001
+
+GENERIC_ACCOUNT_TYPES = {"", "comprehensive", "overseas", "generic"}
+
 TRANSACTION_TYPES = {
     "buy", "sell", "deposit", "withdrawal", "dividend", "interest", "exchange",
     "fee", "tax", "transfer", "split", "rights", "unknown",
@@ -694,7 +714,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
 def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
     return {
         "processed_transactions.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
-        "processed_holdings.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
+        "processed_holdings.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS + HOLDING_DEDUPE_COLUMNS),
         "processed_cashflows.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "processed_dividends.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "portfolio_summary.csv": pd.DataFrame(columns=["metric", "value"]),
@@ -710,28 +730,231 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
     }
 
 
-def remove_overlapping_overseas_holdings(df: pd.DataFrame) -> pd.DataFrame:
+def normalize_holding_identity(row: dict[str, Any] | pd.Series) -> dict[str, str]:
+    """Return normalized fields used to compare holding rows."""
+    source_type = str(_row_value(row, "source_file_type") or "").strip().lower()
+    account_type = str(_row_value(row, "account_type") or "").strip().lower()
+    asset_type = str(_row_value(row, "asset_type") or "").strip().lower()
+    position_key = canonical_overseas_position_key(row)
+    market = str(_row_value(row, "market") or "").strip().upper()
+    if not market and position_key.startswith(("US:", "ISIN:")):
+        market = "US"
+    currency = currency_code_from_text(_row_value(row, "currency"))
+    return {
+        "source_type": source_type,
+        "account_type": account_type,
+        "asset_type": asset_type,
+        "position_key": position_key,
+        "market": market,
+        "currency": currency,
+    }
+
+
+def build_holding_dedupe_key(row: dict[str, Any] | pd.Series) -> str:
+    """Build a broad grouping key for possible duplicate overseas holdings."""
+    identity = normalize_holding_identity(row)
+    if identity["asset_type"] == "cash":
+        return ""
+    if not identity["position_key"] or not is_overseas_position_row(row):
+        return ""
+    return "|".join(["overseas", identity["position_key"], identity["market"]])
+
+
+def rank_holding_source(row: dict[str, Any] | pd.Series) -> int:
+    """Rank holding sources; lower values are more authoritative."""
+    source_type = normalize_holding_identity(row)["source_type"]
+    return HOLDING_SOURCE_PRIORITY.get(source_type, 100)
+
+
+def _dedupe_number(value: Any) -> float | None:
+    parsed = parse_optional_korean_number(value)
+    if parsed is None:
+        return None
+    try:
+        if pd.isna(parsed):
+            return None
+    except Exception:
+        pass
+    return float(parsed)
+
+
+def _numbers_close(left: Any, right: Any, abs_tol: float, rel_tol: float) -> bool:
+    left_num = _dedupe_number(left)
+    right_num = _dedupe_number(right)
+    if left_num is None or right_num is None:
+        return False
+    diff = abs(left_num - right_num)
+    if diff <= abs_tol:
+        return True
+    scale = max(abs(left_num), abs(right_num), 1.0)
+    return diff <= scale * rel_tol
+
+
+def _numbers_missing_or_close(left: Any, right: Any, abs_tol: float, rel_tol: float) -> bool:
+    left_num = _dedupe_number(left)
+    right_num = _dedupe_number(right)
+    if left_num is None or right_num is None:
+        return True
+    return _numbers_close(left_num, right_num, abs_tol, rel_tol)
+
+
+def _meaningful_amounts_close(left: Any, right: Any) -> bool:
+    left_num = _dedupe_number(left)
+    right_num = _dedupe_number(right)
+    if left_num is None or right_num is None:
+        return False
+    if max(abs(left_num), abs(right_num)) <= HOLDING_AMOUNT_ABS_TOLERANCE:
+        return False
+    return _numbers_close(left_num, right_num, HOLDING_AMOUNT_ABS_TOLERANCE, HOLDING_AMOUNT_REL_TOLERANCE)
+
+
+def _accounts_compatible(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    return left in GENERIC_ACCOUNT_TYPES or right in GENERIC_ACCOUNT_TYPES
+
+
+def _identity_compatible(left: dict[str, str], right: dict[str, str]) -> bool:
+    if left["asset_type"] == "cash" or right["asset_type"] == "cash":
+        return False
+    if left["position_key"] != right["position_key"]:
+        return False
+    if left["market"] and right["market"] and left["market"] != right["market"]:
+        return False
+    if left["currency"] and right["currency"] and left["currency"] != right["currency"]:
+        return False
+    return _accounts_compatible(left["account_type"], right["account_type"])
+
+
+def _holding_amounts_match(left: dict[str, Any] | pd.Series, right: dict[str, Any] | pd.Series) -> bool:
+    quantity_close = _numbers_close(
+        _row_value(left, "balance_quantity"),
+        _row_value(right, "balance_quantity"),
+        HOLDING_QUANTITY_TOLERANCE,
+        HOLDING_QUANTITY_TOLERANCE,
+    )
+    evaluation_close = _numbers_missing_or_close(
+        _row_value(left, "evaluation_amount"),
+        _row_value(right, "evaluation_amount"),
+        HOLDING_AMOUNT_ABS_TOLERANCE,
+        HOLDING_AMOUNT_REL_TOLERANCE,
+    )
+    if quantity_close and evaluation_close:
+        return True
+
+    strict_evaluation_close = _numbers_close(
+        _row_value(left, "evaluation_amount"),
+        _row_value(right, "evaluation_amount"),
+        HOLDING_AMOUNT_ABS_TOLERANCE,
+        HOLDING_AMOUNT_REL_TOLERANCE,
+    )
+    cost_close = any(
+        _meaningful_amounts_close(_row_value(left, field), _row_value(right, field))
+        for field in ["trade_amount", "settlement_amount"]
+    )
+    return strict_evaluation_close and cost_close
+
+
+def _same_economic_holding(left: dict[str, Any] | pd.Series, right: dict[str, Any] | pd.Series) -> bool:
+    left_id = normalize_holding_identity(left)
+    right_id = normalize_holding_identity(right)
+    return _identity_compatible(left_id, right_id) and _holding_amounts_match(left, right)
+
+
+def dedupe_holdings(df: pd.DataFrame) -> pd.DataFrame:
+    """Remove duplicate overseas holdings while retaining source audit columns."""
     if df.empty or "ticker" not in df.columns:
-        return df.copy()
-    work = df.copy()
-    source_type = work["source_file_type"].fillna("").astype(str) if "source_file_type" in work.columns else pd.Series("", index=work.index)
-    canonical_keys = work.apply(canonical_overseas_position_key, axis=1)
-    is_overseas = work.apply(is_overseas_position_row, axis=1)
-    overseas_balance_keys = set(canonical_keys[source_type.eq("overseas_balance") & is_overseas & canonical_keys.ne("")])
-    if not overseas_balance_keys:
-        return work.reset_index(drop=True)
-    drop_mask = source_type.eq("holdings") & is_overseas & canonical_keys.isin(overseas_balance_keys)
-    return work[~drop_mask].reset_index(drop=True)
+        empty = df.copy()
+        for col in HOLDING_DEDUPE_COLUMNS:
+            if col not in empty.columns:
+                empty[col] = pd.Series(dtype="object")
+        return empty
+
+    original = df.copy().reset_index(drop=True)
+    existing_counts = pd.to_numeric(
+        original.get("dedupe_excluded_count", pd.Series(0, index=original.index)),
+        errors="coerce",
+    ).fillna(0)
+    existing_has_dedupe = bool((existing_counts > 0).any())
+    work = original.copy()
+    if "source_file_type" not in work.columns:
+        work["source_file_type"] = ""
+    work["preferred_source"] = work["source_file_type"].fillna("").astype(str)
+    work["dedupe_group_id"] = ""
+    work["dedupe_action"] = "retained"
+    work["dedupe_reason"] = ""
+    work["dedupe_excluded_count"] = 0
+    work["dedupe_excluded_evaluation_amount"] = 0.0
+    work["_dedupe_key"] = work.apply(build_holding_dedupe_key, axis=1)
+
+    drop_indices: set[int] = set()
+    excluded_by_preferred: dict[int, list[int]] = {}
+    groups = work[work["_dedupe_key"].fillna("").astype(str).ne("")].groupby("_dedupe_key", dropna=False)
+
+    for group_key, group in groups:
+        source_types = group.get("source_file_type", pd.Series("", index=group.index)).fillna("").astype(str).str.lower()
+        if "overseas_balance" not in set(source_types) or "holdings" not in set(source_types):
+            continue
+        preferred_indices = [
+            idx for idx in group.index
+            if str(work.at[idx, "source_file_type"]).strip().lower() == "overseas_balance"
+        ]
+        preferred_indices = sorted(preferred_indices, key=lambda idx: (rank_holding_source(work.loc[idx]), idx))
+        candidate_indices = [
+            idx for idx in group.index
+            if str(work.at[idx, "source_file_type"]).strip().lower() == "holdings"
+        ]
+        for candidate_idx in candidate_indices:
+            if candidate_idx in drop_indices:
+                continue
+            candidate = work.loc[candidate_idx]
+            for preferred_idx in preferred_indices:
+                preferred = work.loc[preferred_idx]
+                if _same_economic_holding(preferred, candidate):
+                    drop_indices.add(candidate_idx)
+                    excluded_by_preferred.setdefault(preferred_idx, []).append(candidate_idx)
+                    break
+
+        for preferred_idx, excluded_indices in excluded_by_preferred.items():
+            if preferred_idx not in group.index or not excluded_indices:
+                continue
+            group_id = hashlib.sha256(str(group_key).encode("utf-8")).hexdigest()[:12]
+            excluded_value = sum(_dedupe_number(work.at[idx, "evaluation_amount"]) or 0.0 for idx in excluded_indices)
+            work.at[preferred_idx, "dedupe_group_id"] = group_id
+            work.at[preferred_idx, "dedupe_action"] = "retained_preferred"
+            work.at[preferred_idx, "dedupe_reason"] = "overseas_balance_retained_over_holdings_duplicate"
+            work.at[preferred_idx, "preferred_source"] = "overseas_balance"
+            work.at[preferred_idx, "dedupe_excluded_count"] = int(work.at[preferred_idx, "dedupe_excluded_count"]) + len(excluded_indices)
+            work.at[preferred_idx, "dedupe_excluded_evaluation_amount"] = (
+                float(work.at[preferred_idx, "dedupe_excluded_evaluation_amount"]) + excluded_value
+            )
+
+    if not drop_indices and existing_has_dedupe:
+        for col in HOLDING_DEDUPE_COLUMNS:
+            if col not in original.columns:
+                original[col] = ""
+        return original.reset_index(drop=True)
+
+    result = work[~work.index.isin(drop_indices)].drop(columns=["_dedupe_key"], errors="ignore").reset_index(drop=True)
+    for col in HOLDING_DEDUPE_COLUMNS:
+        if col not in result.columns:
+            result[col] = ""
+    return result
+
+
+def remove_overlapping_overseas_holdings(df: pd.DataFrame) -> pd.DataFrame:
+    """Backward-compatible wrapper for overseas holding deduplication."""
+    return dedupe_holdings(df)
 
 
 def collapse_holding_rows(df: pd.DataFrame) -> pd.DataFrame:
     if df.empty:
-        return pd.DataFrame(columns=NORMALIZED_COLUMNS)
+        return pd.DataFrame(columns=NORMALIZED_COLUMNS + HOLDING_DEDUPE_COLUMNS)
     work = df.copy()
     work["ticker"] = work.get("ticker", "").astype(str)
     work = work[~work["ticker"].str.lower().isin(["", "nan", "none"])]
     if work.empty:
-        return pd.DataFrame(columns=NORMALIZED_COLUMNS)
+        return pd.DataFrame(columns=NORMALIZED_COLUMNS + HOLDING_DEDUPE_COLUMNS)
     work = remove_overlapping_overseas_holdings(work)
     if "trade_date" in work:
         work["_sort_date"] = pd.to_datetime(work["trade_date"], errors="coerce")
@@ -743,7 +966,7 @@ def collapse_holding_rows(df: pd.DataFrame) -> pd.DataFrame:
 
 def split_current_history_holdings(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if df.empty:
-        return pd.DataFrame(columns=NORMALIZED_COLUMNS), pd.DataFrame(columns=HISTORY_COLUMNS)
+        return pd.DataFrame(columns=NORMALIZED_COLUMNS + HOLDING_DEDUPE_COLUMNS), pd.DataFrame(columns=HISTORY_COLUMNS)
     work = df.copy()
     has_balance_col = "balance_quantity" in work.columns
     has_evaluation_col = "evaluation_amount" in work.columns
