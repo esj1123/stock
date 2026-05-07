@@ -9,6 +9,7 @@ import pytest
 sys.path.append(str(Path(__file__).resolve().parents[3] / "scripts"))
 
 from nh_importer import (
+    BROKER_ADJACENT_DUPLICATE_CASHFLOW_SKIP_REASON,
     COLUMN_ALIASES,
     OVERSEAS_CASHFLOW_AMOUNT_ONLY_SKIP_REASON,
     canonical_overseas_position_key,
@@ -16,6 +17,7 @@ from nh_importer import (
     extract_symbol_from_parentheses,
     import_raw_dir,
     infer_asset_type,
+    infer_market,
     infer_source_file_type,
     is_leveraged_etf_name,
     load_workbook_tables,
@@ -136,6 +138,41 @@ def test_currency_fx_rate_split_from_overseas_balance(tmp_path: Path):
     assert normalized["fx_rate"].iloc[0] == 1473.10
 
 
+def test_us_transaction_history_missing_currency_defaults_to_usd(tmp_path: Path):
+    df = pd.DataFrame([
+        {
+            COLUMN_ALIASES["trade_date"][0]: "2026-04-29",
+            COLUMN_ALIASES["transaction_raw"][0]: "buy",
+            COLUMN_ALIASES["ticker"][0]: "AAPL",
+            COLUMN_ALIASES["security_name"][0]: "Apple",
+            COLUMN_ALIASES["settlement_amount"][0]: "12.34",
+        },
+    ])
+    normalized, _, _ = normalize_dataframe(df, tmp_path / "transaction_history.xlsx", "table_0")
+
+    assert normalized["source_file_type"].iloc[0] == "transaction_history"
+    assert normalized["market"].iloc[0] == "US"
+    assert normalized["currency"].iloc[0] == "USD"
+    assert infer_market("", "Apple (AAPL)") == "US"
+    assert infer_market("KYG254571055", "") == "US"
+
+
+def test_us_holding_missing_currency_stays_krw_by_default(tmp_path: Path):
+    df = pd.DataFrame([
+        {
+            COLUMN_ALIASES["ticker"][0]: "AAPL",
+            COLUMN_ALIASES["security_name"][0]: "Apple",
+            COLUMN_ALIASES["balance_quantity"][0]: "1",
+            COLUMN_ALIASES["evaluation_amount"][0]: "100",
+        },
+    ])
+    normalized, _, _ = normalize_dataframe(df, tmp_path / "holdings.xlsx", "Sheet1")
+
+    assert normalized["source_file_type"].iloc[0] == "holdings"
+    assert normalized["market"].iloc[0] == "US"
+    assert normalized["currency"].iloc[0] == "KRW"
+
+
 def test_quality_gate_currency_helper_flags_fx_rate():
     assert invalid_currency_findings([{"ticker": "AAPL", "currency": "USD"}]) == []
     findings = invalid_currency_findings([{"ticker": "AAPL", "currency": "1473.10"}])
@@ -220,6 +257,207 @@ def test_amount_only_row_with_deposit_keyword_is_not_skipped(tmp_path: Path):
     assert transactions["transaction_type"].iloc[0] == "deposit"
     assert unclassified.empty
     assert skipped.empty
+
+
+def test_cashflow_deposit_amount_column_creates_deposit_after_aug_2025(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {"거래일자": "2025-09-02", "적요": "monthly cash add", "입금액": "1000000", "출금액": "0"},
+        {"거래일자": "2025-09-03", "적요": "cash withdrawal", "입금액": "0", "출금액": "250000"},
+    ]).to_excel(raw / "cash_after_aug_2025.xlsx", index=False)
+
+    import_raw_dir(vault)
+    processed = vault / "70_Imports" / "processed"
+    cashflows = pd.read_csv(processed / "processed_cashflows.csv")
+    source_index = pd.read_csv(processed / "source_file_index.csv")
+    unclassified = pd.read_csv(processed / "unclassified_rows.csv")
+    skipped = pd.read_csv(processed / "skipped_rows.csv")
+
+    assert source_index["source_file_type"].iloc[0] == "cashflow"
+    assert cashflows["trade_date"].tolist() == ["2025-09-02", "2025-09-03"]
+    assert cashflows["transaction_type"].tolist() == ["deposit", "withdrawal"]
+    assert cashflows["settlement_amount"].tolist() == [1000000, 250000]
+    assert unclassified.empty
+    assert skipped.empty
+
+
+def test_position_like_deposit_rows_stay_out_of_principal_cashflows(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {"거래일자": "2025-09-02", "적요": "monthly cash add", "입금액": "1000000", "출금액": "0"},
+        {"거래일자": "2025-09-03", "종목코드": "AAPL", "종목명": "Apple", "수량": "1", "입금액": "100", "출금액": "0"},
+    ]).to_excel(raw / "cash_after_aug_2025.xlsx", index=False)
+    pd.DataFrame([
+        {"거래일자": "2025-09-04", "거래유형": "입금", "거래금액": "500000"},
+        {"거래일자": "2025-09-05", "거래유형": "입금", "종목코드": "TSLA", "종목명": "Tesla", "수량": "1", "거래금액": "200"},
+    ]).to_excel(raw / "종합거래내역.xlsx", index=False)
+
+    import_raw_dir(vault)
+    processed = vault / "70_Imports" / "processed"
+    transactions = pd.read_csv(processed / "processed_transactions.csv")
+    cashflows = pd.read_csv(processed / "processed_cashflows.csv")
+
+    assert len(transactions[transactions["transaction_type"] == "deposit"]) == 4
+    assert cashflows["settlement_amount"].tolist() == [1000000, 500000]
+    assert cashflows["transaction_type"].tolist() == ["deposit", "deposit"]
+    assert cashflows["ticker"].fillna("").tolist() == ["", ""]
+    assert cashflows["quantity"].fillna(0).tolist() == [0, 0]
+
+
+def test_adjacent_duplicate_principal_cashflow_rows_are_skipped(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000", "잔고": "1000000", "받는통장표시내용 거래내역메모": "nan"},
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000", "잔고": "0", "받는통장표시내용 거래내역메모": ""},
+    ]).to_excel(raw / "종합거래내역.xlsx", index=False)
+
+    summary = import_raw_dir(vault)
+    processed = vault / "70_Imports" / "processed"
+    transactions = pd.read_csv(processed / "processed_transactions.csv")
+    cashflows = pd.read_csv(processed / "processed_cashflows.csv")
+    skipped = pd.read_csv(processed / "skipped_rows.csv")
+
+    assert summary.duplicate_rows_removed == 1
+    assert len(transactions) == 1
+    assert len(cashflows) == 1
+    assert cashflows["settlement_amount"].tolist() == [200000]
+    assert skipped["skip_reason"].iloc[0] == BROKER_ADJACENT_DUPLICATE_CASHFLOW_SKIP_REASON
+    assert skipped["row_count"].iloc[0] == 1
+
+
+def test_non_adjacent_same_amount_principal_cashflows_are_preserved(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000"},
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "1000"},
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000"},
+    ]).to_excel(raw / "종합거래내역.xlsx", index=False)
+
+    import_raw_dir(vault)
+    cashflows = pd.read_csv(vault / "70_Imports" / "processed" / "processed_cashflows.csv")
+
+    assert len(cashflows) == 3
+    assert cashflows["settlement_amount"].tolist() == [200000, 1000, 200000]
+
+
+def test_cashflow_view_dedupes_residual_pair_after_adjacent_helper_skip(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000", "받는통장표시내용 거래내역메모": "same transfer"},
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000", "받는통장표시내용 거래내역메모": ""},
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000", "받는통장표시내용 거래내역메모": "same transfer"},
+    ]).to_excel(raw / "종합거래내역.xlsx", index=False)
+
+    import_raw_dir(vault)
+    processed = vault / "70_Imports" / "processed"
+    transactions = pd.read_csv(processed / "processed_transactions.csv")
+    cashflows = pd.read_csv(processed / "processed_cashflows.csv")
+
+    assert len(transactions) == 2
+    assert len(cashflows) == 1
+    assert cashflows["settlement_amount"].tolist() == [200000]
+
+
+def test_adjacent_same_amount_principal_cashflows_with_distinct_memos_are_preserved(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000", "받는통장표시내용 거래내역메모": "first transfer"},
+        {"거래일자": "2026-01-10", "거래유형": "입금", "거래금액": "200000", "받는통장표시내용 거래내역메모": "second transfer"},
+    ]).to_excel(raw / "종합거래내역.xlsx", index=False)
+
+    import_raw_dir(vault)
+    processed = vault / "70_Imports" / "processed"
+    cashflows = pd.read_csv(processed / "processed_cashflows.csv")
+    skipped = pd.read_csv(processed / "skipped_rows.csv")
+
+    assert len(cashflows) == 2
+    assert skipped.empty
+
+
+def test_cashflow_named_position_snapshot_becomes_holdings_view(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "No": 1,
+            "잔고유형": "stock",
+            "상품명": "Samsung",
+            "상품코드": "005930",
+            "구분": "domestic",
+            "수량": "2",
+            "현재가": "70000",
+            "매입금액": "120000",
+            "평가금액": "140000",
+            "평가손익": "20000",
+            "수익률": "16.67",
+        },
+    ]).to_excel(raw / "입출금_잔고.xlsx", index=False)
+
+    import_raw_dir(vault)
+    processed = vault / "70_Imports" / "processed"
+    idx = pd.read_csv(processed / "source_file_index.csv")
+    transactions = pd.read_csv(processed / "processed_transactions.csv")
+    cashflows = pd.read_csv(processed / "processed_cashflows.csv")
+    holdings = pd.read_csv(processed / "processed_holdings.csv")
+
+    assert set(idx["source_file_type"]) == {"holdings"}
+    assert transactions.empty
+    assert cashflows.empty
+    assert len(holdings) == 1
+    assert holdings["source_file_type"].iloc[0] == "holdings"
+    assert str(holdings["ticker"].iloc[0]).zfill(6) == "005930"
+    assert holdings["balance_quantity"].iloc[0] == 2
+    assert holdings["evaluation_amount"].iloc[0] == 140000
+
+
+def test_overseas_cashflow_named_position_snapshot_becomes_overseas_balance(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "구분 구분": "stock",
+            "종목명 (코드) 종목명 (코드)": "Apple (AAPL)",
+            "시장명 시장명": "NASDAQ",
+            "보유수량 보유수량": "3",
+            "매입가 현재가": "150",
+            "장부금액(외화) 장부금액(원화)": "400",
+            "평가금액(외화) 평가금액(원화)": "450",
+            "평가손익(외화) 평가손익(원화)": "50",
+            "수익률(외화) 수익률(원화)": "12.5",
+            "통화 환율": "USD",
+        },
+    ]).to_excel(raw / "overseas_cashflow.xlsx", index=False)
+
+    import_raw_dir(vault)
+    processed = vault / "70_Imports" / "processed"
+    idx = pd.read_csv(processed / "source_file_index.csv")
+    transactions = pd.read_csv(processed / "processed_transactions.csv")
+    cashflows = pd.read_csv(processed / "processed_cashflows.csv")
+    holdings = pd.read_csv(processed / "processed_holdings.csv")
+
+    assert set(idx["source_file_type"]) == {"overseas_balance"}
+    assert transactions.empty
+    assert cashflows.empty
+    assert len(holdings) == 1
+    assert holdings["source_file_type"].iloc[0] == "overseas_balance"
+    assert holdings["account_type"].iloc[0] == "overseas"
+    assert holdings["balance_quantity"].iloc[0] == 3
+    assert holdings["evaluation_amount"].iloc[0] == 450
+    assert holdings["currency"].iloc[0] == "USD"
 
 
 def test_cash_holdings_do_not_create_company_review_items(tmp_path: Path):
@@ -671,6 +909,30 @@ def test_transaction_history_with_balance_columns_is_not_holdings(tmp_path: Path
     assert pd.isna(normalized["pnl_pct"].iloc[0])
 
 
+def test_multiindex_transaction_history_uses_leaf_headers_for_amount_columns(tmp_path: Path):
+    columns = pd.MultiIndex.from_tuples([
+        (COLUMN_ALIASES["trade_date"][0], COLUMN_ALIASES["trade_date"][0]),
+        (COLUMN_ALIASES["transaction_raw"][0], COLUMN_ALIASES["transaction_raw"][0]),
+        (COLUMN_ALIASES["security_name"][0], COLUMN_ALIASES["security_name"][0]),
+        (COLUMN_ALIASES["quantity"][0], COLUMN_ALIASES["price"][0]),
+        (COLUMN_ALIASES["trade_amount"][0], COLUMN_ALIASES["settlement_amount"][0]),
+    ])
+    df = pd.DataFrame(
+        [["2026-04-29", "buy", "Test Security 005930", "123.45", "678.90"]],
+        columns=columns,
+    )
+    normalized, _, _ = normalize_dataframe(df, tmp_path / "transaction_history.xlsx", "table_0")
+
+    assert len(normalized) == 1
+    row = normalized.iloc[0]
+    assert row["source_file_type"] == "transaction_history"
+    assert row["transaction_type"] == "buy"
+    assert row["quantity"] == 0
+    assert row["price"] == 123.45
+    assert row["trade_amount"] == 0
+    assert row["settlement_amount"] == 678.9
+
+
 def test_transaction_history_precedence_over_cashflow_keywords():
     df = pd.DataFrame([
         {
@@ -825,6 +1087,62 @@ def test_import_review_dashboard_includes_holding_dedupe_summary(tmp_path: Path)
     assert "## Holding dedupe" in content
     assert "AEHR" in content
     assert "overseas_balance_retained_over_holdings_duplicate" in content
+
+
+def test_cashflow_dashboard_monthly_activity_sorts_by_month_and_shows_principal(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {"trade_date": "2025-07-10", "transaction_type": "deposit", "account_type": "comprehensive", "settlement_amount": 1000, "currency": "KRW"},
+        {"trade_date": "2025-09-02", "transaction_type": "deposit", "account_type": "comprehensive", "settlement_amount": 2000, "currency": "KRW"},
+        {"trade_date": "2025-09-03", "transaction_type": "deposit", "account_type": "comprehensive", "ticker": "AAPL", "quantity": 1, "settlement_amount": 999, "currency": "KRW"},
+        {"trade_date": "2025-08-01", "transaction_type": "withdrawal", "account_type": "comprehensive", "settlement_amount": 500, "currency": "KRW"},
+        {"trade_date": "2025-08-15", "transaction_type": "exchange", "account_type": "comprehensive", "settlement_amount": 300, "currency": "KRW"},
+    ]).to_csv(processed / "processed_cashflows.csv", index=False)
+    pd.DataFrame(columns=["trade_date", "ticker", "security_name", "settlement_amount", "currency"]).to_csv(processed / "processed_dividends.csv", index=False)
+
+    content = dashboard_content("Cashflows.md", processed)
+    monthly = content.split("## Monthly activity", 1)[1].split("## Type summary", 1)[0]
+
+    assert "Net Principal" in content
+    assert "| net_principal | 2500.0 |" in content
+    assert "weight_pct" not in monthly
+    assert "exchange" not in monthly
+    assert "999" not in content
+    assert monthly.find("| 2025-09 ") < monthly.find("| 2025-08 ") < monthly.find("| 2025-07 ")
+    assert "| 2025-09 | 1 | 2000.0 | 0.0 | 2000.0 | 2500.0 |" in monthly
+    assert "| 2025-08 | 1 | 0.0 | 500.0 | -500.0 | 500.0 |" in monthly
+
+
+def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {"metric": "holding_count", "value": "2"},
+        {"metric": "total_cost", "value": "1500"},
+        {"metric": "total_portfolio_value", "value": "1800"},
+        {"metric": "total_unrealized_pnl", "value": "300"},
+        {"metric": "pnl_pct", "value": "20"},
+        {"metric": "loss_review_required_count", "value": "0"},
+        {"metric": "leveraged_etf_count", "value": "0"},
+        {"metric": "total_portfolio_value_status", "value": "available"},
+        {"metric": "balance_data_available", "value": "True"},
+    ]).to_csv(processed / "portfolio_summary.csv", index=False)
+    pd.DataFrame([
+        {"ticker": "AAA", "security_name": "AAA", "account_type": "ISA", "asset_type": "stock", "currency": "KRW", "evaluation_amount": 1000, "unrealized_pnl": 100, "pnl_pct": 11.11, "weight_pct": 55.56},
+        {"ticker": "BBB", "security_name": "BBB", "account_type": "ISA", "asset_type": "stock", "currency": "KRW", "evaluation_amount": 800, "unrealized_pnl": 200, "pnl_pct": 33.33, "weight_pct": 44.44},
+    ]).to_csv(processed / "processed_holdings.csv", index=False)
+
+    content = dashboard_content("Portfolio.md", processed)
+
+    assert "Principal" in content
+    assert "Total Value" in content
+    assert "Unrealized PnL" in content
+    assert "Return" in content
+    assert "<strong>1500</strong>" in content
+    assert "<strong>1800</strong>" in content
+    assert "<strong>300</strong>" in content
+    assert "<strong>20</strong>" in content
 
 
 

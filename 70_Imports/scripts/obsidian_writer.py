@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from nh_importer import canonical_overseas_position_key
+from nh_importer import canonical_overseas_position_key, is_principal_cashflow_row
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
@@ -262,6 +262,10 @@ def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: st
         "## Snapshot",
         '<div class="stock-kpi-grid">',
         snapshot_card("Holdings", metric(summary, "holding_count", "0")),
+        snapshot_card("Principal", metric(summary, "total_cost", "-"), "cost basis"),
+        snapshot_card("Total Value", metric(summary, "total_portfolio_value", "-")),
+        snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-")),
+        snapshot_card("Return", metric(summary, "pnl_pct", "-"), "pnl_pct"),
         snapshot_card("Loss Review", metric(summary, "loss_review_required_count", "0"), "candidate count"),
         snapshot_card("Leveraged ETF", metric(summary, "leveraged_etf_count", "0")),
         snapshot_card("Largest Position", largest_position_label(holdings)),
@@ -594,32 +598,103 @@ def cashflow_group_table(cash: pd.DataFrame, group_cols: list[str], label_col: s
     return count_summary_table(cash, group_cols, label_col)
 
 
+def principal_cashflow_rows(cash: pd.DataFrame) -> pd.DataFrame:
+    if cash.empty:
+        return cash.copy()
+    return cash[cash.apply(is_principal_cashflow_row, axis=1)].copy()
+
+
+def cashflow_principal_totals(cash: pd.DataFrame) -> dict[str, float]:
+    view = principal_cashflow_rows(cash)
+    if view.empty or "transaction_type" not in view.columns or "settlement_amount" not in view.columns:
+        return {"deposits": 0.0, "withdrawals": 0.0, "net_principal": 0.0}
+    tx = view["transaction_type"].fillna("").astype(str).str.lower()
+    amounts = view["settlement_amount"].apply(number_value)
+    deposits = float(amounts[tx == "deposit"].sum())
+    withdrawals = float(amounts[tx == "withdrawal"].sum())
+    return {
+        "deposits": round(deposits, 2),
+        "withdrawals": round(withdrawals, 2),
+        "net_principal": round(deposits - withdrawals, 2),
+    }
+
+
+def cashflow_principal_summary_table(cash: pd.DataFrame) -> str:
+    totals = cashflow_principal_totals(cash)
+    return markdown_table(pd.DataFrame([
+        {"item": "deposits", "amount": totals["deposits"]},
+        {"item": "withdrawals", "amount": totals["withdrawals"]},
+        {"item": "net_principal", "amount": totals["net_principal"]},
+    ]))
+
+
+def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
+    required = {"trade_date", "transaction_type", "settlement_amount"}
+    view = principal_cashflow_rows(cash)
+    if view.empty or not required.issubset(set(view.columns)):
+        return EMPTY_DATA
+    view["month"] = view["trade_date"].fillna("").astype(str).str.slice(0, 7)
+    view = view[view["month"].str.len() == 7].copy()
+    if view.empty:
+        return EMPTY_DATA
+    view["_transaction_type"] = view["transaction_type"].fillna("").astype(str).str.lower()
+    view["_amount"] = view["settlement_amount"].apply(number_value)
+    view["_deposit"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "deposit" else 0.0, axis=1)
+    view["_withdrawal"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "withdrawal" else 0.0, axis=1)
+    view["_net_principal"] = view["_deposit"] - view["_withdrawal"]
+    monthly = view.groupby("month", dropna=False).agg(
+        cashflow_rows=("_amount", "size"),
+        deposits=("_deposit", "sum"),
+        withdrawals=("_withdrawal", "sum"),
+        net_principal=("_net_principal", "sum"),
+    ).reset_index().sort_values("month", ascending=True)
+    monthly["cumulative_principal"] = monthly["net_principal"].cumsum()
+    for col in ["deposits", "withdrawals", "net_principal", "cumulative_principal"]:
+        monthly[col] = monthly[col].round(2)
+    monthly = monthly.sort_values("month", ascending=False)
+    return markdown_table(monthly)
+
+
 def cashflow_detail_table(cash: pd.DataFrame, limit: int | None = None) -> str:
-    return markdown_table(cash, ["trade_date", "transaction_type", "account_type", "ticker", "security_name", "settlement_amount", "currency"], limit)
+    view = cash.copy()
+    if not view.empty and "trade_date" in view.columns:
+        view["_sort_date"] = pd.to_datetime(view["trade_date"], errors="coerce")
+        sort_cols = ["_sort_date"]
+        ascending = [False]
+        if "trade_time" in view.columns:
+            view["_sort_time"] = view["trade_time"].fillna("").astype(str)
+            sort_cols.append("_sort_time")
+            ascending.append(False)
+        view = view.sort_values(sort_cols, ascending=ascending, na_position="last").drop(columns=["_sort_date", "_sort_time"], errors="ignore")
+    return markdown_table(view, ["trade_date", "transaction_type", "account_type", "ticker", "security_name", "settlement_amount", "currency"], limit)
 
 
 def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame) -> str:
+    principal_cash = principal_cashflow_rows(cash)
     months = 0
-    if not cash.empty and "trade_date" in cash.columns:
-        months = cash["trade_date"].fillna("").astype(str).str.slice(0, 7).loc[lambda s: s.str.len() == 7].nunique()
-    tx_types = int(cash["transaction_type"].nunique()) if not cash.empty and "transaction_type" in cash.columns else 0
-    monthly_source = cash.assign(month=cash["trade_date"].fillna("").astype(str).str.slice(0, 7)) if not cash.empty and "trade_date" in cash.columns else cash
+    if not principal_cash.empty and "trade_date" in principal_cash.columns:
+        months = principal_cash["trade_date"].fillna("").astype(str).str.slice(0, 7).loc[lambda s: s.str.len() == 7].nunique()
+    tx_types = int(principal_cash["transaction_type"].nunique()) if not principal_cash.empty and "transaction_type" in principal_cash.columns else 0
+    principal_totals = cashflow_principal_totals(principal_cash)
     parts = [
         "## Snapshot",
         dashboard_kpi_grid([
-            snapshot_card("Cashflow Rows", len(cash)),
+            snapshot_card("Cashflow Rows", len(principal_cash)),
             snapshot_card("Dividend Rows", len(dividends)),
             snapshot_card("Months", months),
             snapshot_card("Types", tx_types),
+            snapshot_card("Net Principal", principal_totals["net_principal"], "deposits - withdrawals"),
         ]),
+        "## Principal summary",
+        cashflow_principal_summary_table(principal_cash),
         "## Monthly activity",
-        cashflow_group_table(monthly_source, ["month", "transaction_type"], "month"),
+        cashflow_monthly_activity_table(principal_cash),
         "## Type summary",
-        cashflow_group_table(cash, ["transaction_type"], "type"),
+        cashflow_group_table(principal_cash, ["transaction_type"], "type"),
         "## Recent Cashflows",
-        cashflow_detail_table(cash, limit=20),
+        cashflow_detail_table(principal_cash, limit=20),
         "## Details",
-        details_block(f"Show all cashflow rows ({len(cash)})", cashflow_detail_table(cash, limit=200)),
+        details_block(f"Show all principal cashflow rows ({len(principal_cash)})", cashflow_detail_table(principal_cash, limit=200)),
         details_block(f"Show dividend rows ({len(dividends)})", markdown_table(dividends, ["trade_date", "ticker", "security_name", "settlement_amount", "currency"], 200)),
     ]
     return "\n\n".join(parts).strip()

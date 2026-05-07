@@ -19,6 +19,8 @@ NORMALIZED_COLUMNS = [
     "balance_quantity", "evaluation_amount", "unrealized_pnl", "pnl_pct", "raw_memo",
 ]
 
+INTERNAL_NORMALIZED_COLUMNS = ["_source_sheet", "_raw_row_number"]
+
 HISTORY_COLUMNS = NORMALIZED_COLUMNS + ["history_reason", "suggested_destination", "suggested_action"]
 
 SKIPPED_ROWS_COLUMNS = [
@@ -27,6 +29,7 @@ SKIPPED_ROWS_COLUMNS = [
 ]
 
 OVERSEAS_CASHFLOW_AMOUNT_ONLY_SKIP_REASON = "OVERSEAS_CASHFLOW_AMOUNT_ONLY_NO_IDENTITY"
+BROKER_ADJACENT_DUPLICATE_CASHFLOW_SKIP_REASON = "BROKER_ADJACENT_DUPLICATE_CASHFLOW"
 
 HOLDING_DEDUPE_COLUMNS = [
     "dedupe_group_id",
@@ -41,6 +44,9 @@ HOLDING_SOURCE_PRIORITY = {
     "overseas_balance": 0,
     "holdings": 10,
 }
+
+BALANCE_SOURCE_TYPES = {"holdings", "overseas_balance"}
+TRANSACTION_SOURCE_TYPES = {"transaction_history", "transactions", "cashflow"}
 
 HOLDING_QUANTITY_TOLERANCE = 1e-6
 HOLDING_AMOUNT_ABS_TOLERANCE = 1.0
@@ -93,6 +99,8 @@ COLUMN_ALIASES = {
     "price": ["단가", "평균단가", "매입단가", "현재가", "체결가", "가격"],
     "trade_amount": ["거래금액", "매매금액", "체결금액", "금액"],
     "settlement_amount": ["정산금액", "결제금액", "잔고금액", "원화금액"],
+    "deposit_amount": ["입금액", "입금금액", "입금"],
+    "withdrawal_amount": ["출금액", "출금금액", "출금"],
     "fee": ["수수료", "제수수료", "매매수수료"],
     "tax": ["세금", "제세금", "거래세", "원천징수세"],
     "currency": ["통화", "통화코드", "거래통화", "결제통화"],
@@ -124,6 +132,37 @@ class ImportSummary:
 
 def normalize_key(value: Any) -> str:
     return re.sub(r"[^0-9a-zA-Z가-힣]+", "", str(value or "")).lower()
+
+
+MULTIINDEX_COLUMN_SEPARATOR = " __ "
+STRICT_MULTIINDEX_EXACT_CANONICALS = {
+    "quantity",
+    "trade_amount",
+    "balance_quantity",
+}
+
+
+def flatten_column_name(column: Any) -> str:
+    if not isinstance(column, tuple):
+        return str(column).strip()
+    parts: list[str] = []
+    for value in column:
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        text = str(value).strip()
+        if not text or text.lower() == "nan" or text.lower().startswith("unnamed:"):
+            continue
+        if parts and normalize_key(parts[-1]) == normalize_key(text):
+            continue
+        parts.append(text)
+    return MULTIINDEX_COLUMN_SEPARATOR.join(parts).strip()
+
+
+def column_label_parts(column: Any) -> list[str]:
+    return [part.strip() for part in str(column).split(MULTIINDEX_COLUMN_SEPARATOR) if part.strip()]
 
 
 def extract_symbol_from_parentheses(value: Any) -> str:
@@ -249,8 +288,14 @@ def currency_code_from_text(value: Any) -> str:
     return text if re.fullmatch(r"[A-Z]{3}", text) else ""
 
 
-def normalize_currency_and_fx_rate(raw_currency: Any, raw_fx_rate: Any = "", source_type: str = "") -> tuple[str, Any]:
-    default_currency = "USD" if "overseas" in str(source_type).lower() else "KRW"
+def normalize_currency_and_fx_rate(raw_currency: Any, raw_fx_rate: Any = "", source_type: str = "", market: str = "") -> tuple[str, Any]:
+    source_key = str(source_type or "").strip().lower()
+    market_key = str(market or "").strip().upper()
+    default_currency = (
+        "USD"
+        if "overseas" in source_key or (source_key in {"transaction_history", "transactions"} and market_key == "US")
+        else "KRW"
+    )
     fx_rate = fx_rate_from_text(raw_fx_rate)
     currency = currency_code_from_text(raw_currency)
     currency_fx_rate = fx_rate_from_text(raw_currency)
@@ -368,6 +413,238 @@ def is_overseas_cashflow_amount_only_helper_row(row: dict[str, Any] | pd.Series,
     return True
 
 
+def is_valid_normalized_date(value: Any) -> bool:
+    return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value or "").strip()))
+
+
+def is_principal_cashflow_row(row: dict[str, Any] | pd.Series, tolerance: float = 1e-9) -> bool:
+    tx_type = str(_row_value(row, "transaction_type") or "").strip().lower()
+    if tx_type not in {"deposit", "withdrawal"}:
+        return False
+    if not is_valid_normalized_date(_row_value(row, "trade_date")):
+        return False
+    if not is_blank_text(_row_value(row, "ticker")):
+        return False
+    if not is_zero_or_blank_amount(_row_value(row, "quantity"), tolerance=tolerance):
+        return False
+    settlement_amount = parse_korean_number(_row_value(row, "settlement_amount"))
+    return abs(settlement_amount) > tolerance
+
+
+def is_position_snapshot_row(row: dict[str, Any] | pd.Series, tolerance: float = 1e-9) -> bool:
+    source_type = str(_row_value(row, "source_file_type") or "").strip().lower()
+    if source_type in {"transaction_history", "transactions"}:
+        return False
+    has_identity = not is_blank_text(_row_value(row, "ticker")) or not is_blank_text(_row_value(row, "security_name"))
+    if not has_identity:
+        return False
+    balance_quantity = parse_korean_number(_row_value(row, "balance_quantity"))
+    evaluation_amount = parse_korean_number(_row_value(row, "evaluation_amount"))
+    quantity = parse_korean_number(_row_value(row, "quantity"))
+    if abs(balance_quantity) > tolerance or abs(evaluation_amount) > tolerance:
+        return True
+    return source_type in BALANCE_SOURCE_TYPES and abs(quantity) > tolerance
+
+
+def is_transaction_ledger_row(row: dict[str, Any] | pd.Series, tolerance: float = 1e-9) -> bool:
+    if is_position_snapshot_row(row, tolerance=tolerance):
+        return False
+    source_type = str(_row_value(row, "source_file_type") or "").strip().lower()
+    if source_type in TRANSACTION_SOURCE_TYPES:
+        return True
+    tx_type = str(_row_value(row, "transaction_type") or "").strip().lower()
+    if tx_type in TRANSACTION_TYPES - {"unknown"} and is_valid_normalized_date(_row_value(row, "trade_date")):
+        return True
+    amount = parse_korean_number(_row_value(row, "settlement_amount")) or parse_korean_number(_row_value(row, "trade_amount"))
+    return tx_type in TRANSACTION_TYPES - {"unknown"} and abs(amount) > tolerance
+
+
+def is_blankish_or_zeroish(value: Any, tolerance: float = 1e-9) -> bool:
+    if is_blank_text(value):
+        return True
+    return abs(parse_korean_number(value)) <= tolerance
+
+
+def normalized_values_equal(left: Any, right: Any, tolerance: float = 1e-9) -> bool:
+    if is_blank_text(left) and is_blank_text(right):
+        return True
+    return str(left or "").strip() == str(right or "").strip()
+
+
+def normalized_numbers_equal(left: Any, right: Any, tolerance: float = 1e-9) -> bool:
+    if is_blank_text(left) and is_blank_text(right):
+        return True
+    return abs(parse_korean_number(left) - parse_korean_number(right)) <= tolerance
+
+
+def principal_cashflow_import_key_needs_raw_position(row: dict[str, Any]) -> bool:
+    return is_principal_cashflow_row(row)
+
+
+def adjacent_principal_cashflow_duplicate(left: pd.Series, right: pd.Series, tolerance: float = 1e-9) -> bool:
+    if not is_principal_cashflow_row(left, tolerance=tolerance) or not is_principal_cashflow_row(right, tolerance=tolerance):
+        return False
+    if not normalized_values_equal(left.get("source_file", ""), right.get("source_file", "")):
+        return False
+    if not normalized_values_equal(left.get("_source_sheet", ""), right.get("_source_sheet", "")):
+        return False
+    left_row = parse_korean_number(left.get("_raw_row_number", ""))
+    right_row = parse_korean_number(right.get("_raw_row_number", ""))
+    if int(right_row) - int(left_row) != 1:
+        return False
+
+    text_fields = [
+        "source_file_type", "account_type", "market", "asset_type", "ticker", "security_name",
+        "trade_date", "trade_time", "transaction_type", "currency",
+    ]
+    number_fields = [
+        "quantity", "price", "trade_amount", "settlement_amount", "fee", "tax", "fx_rate",
+        "balance_quantity", "evaluation_amount", "unrealized_pnl", "pnl_pct",
+    ]
+    if any(not normalized_values_equal(left.get(field, ""), right.get(field, "")) for field in text_fields):
+        return False
+    if any(not normalized_numbers_equal(left.get(field, ""), right.get(field, ""), tolerance=tolerance) for field in number_fields):
+        return False
+
+    left_memo = left.get("raw_memo", "")
+    right_memo = right.get("raw_memo", "")
+    return (
+        normalized_values_equal(left_memo, right_memo)
+        or is_blank_text(left_memo)
+        or is_blank_text(right_memo)
+    )
+
+
+def preferred_adjacent_duplicate_keep(left: pd.Series, right: pd.Series) -> str:
+    left_memo_blank = is_blank_text(left.get("raw_memo", ""))
+    right_memo_blank = is_blank_text(right.get("raw_memo", ""))
+    if left_memo_blank and not right_memo_blank:
+        return "right"
+    return "left"
+
+
+def broker_adjacent_duplicate_skip_record(row: pd.Series) -> dict[str, Any]:
+    fx_rate = row.get("fx_rate", "")
+    return {
+        "source_file": row.get("source_file", ""),
+        "source_file_type": row.get("source_file_type", ""),
+        "account_type": row.get("account_type", ""),
+        "skip_reason": BROKER_ADJACENT_DUPLICATE_CASHFLOW_SKIP_REASON,
+        "currency": currency_code_from_text(row.get("currency", "")),
+        "fx_rate": "" if pd.isna(fx_rate) else fx_rate,
+        "amount_kind": "adjacent_principal_cashflow_duplicate",
+        "row_count": 1,
+    }
+
+
+def group_skipped_records(records: list[dict[str, Any]]) -> pd.DataFrame:
+    if not records:
+        return pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS)
+    skipped = pd.DataFrame(records, columns=SKIPPED_ROWS_COLUMNS)
+    group_cols = [col for col in SKIPPED_ROWS_COLUMNS if col != "row_count"]
+    skipped = skipped.groupby(group_cols, dropna=False, as_index=False)["row_count"].sum()
+    return skipped[SKIPPED_ROWS_COLUMNS]
+
+
+def combine_skipped_rows(*frames: pd.DataFrame) -> pd.DataFrame:
+    non_empty = [frame for frame in frames if frame is not None and not frame.empty]
+    if not non_empty:
+        return pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS)
+    combined = pd.concat(non_empty, ignore_index=True)
+    group_cols = [col for col in SKIPPED_ROWS_COLUMNS if col != "row_count"]
+    return combined.groupby(group_cols, dropna=False, as_index=False)["row_count"].sum()[SKIPPED_ROWS_COLUMNS]
+
+
+def remove_adjacent_duplicate_principal_cashflows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
+    if df.empty or not set(INTERNAL_NORMALIZED_COLUMNS).issubset(set(df.columns)):
+        return df, pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS)
+
+    drop_indices: set[int] = set()
+    skipped_records: list[dict[str, Any]] = []
+    group_cols = ["source_file", "_source_sheet"]
+    for _, group in df.groupby(group_cols, dropna=False, sort=False):
+        sorted_group = group.sort_values("_raw_row_number", kind="stable")
+        kept_indices: list[int] = []
+        for idx, row in sorted_group.iterrows():
+            if kept_indices:
+                previous_idx = kept_indices[-1]
+                previous = df.loc[previous_idx]
+                if adjacent_principal_cashflow_duplicate(previous, row):
+                    if preferred_adjacent_duplicate_keep(previous, row) == "right":
+                        drop_indices.add(previous_idx)
+                        skipped_records.append(broker_adjacent_duplicate_skip_record(previous))
+                        kept_indices[-1] = idx
+                    else:
+                        drop_indices.add(idx)
+                        skipped_records.append(broker_adjacent_duplicate_skip_record(row))
+                    continue
+            kept_indices.append(idx)
+
+    if not drop_indices:
+        return df, pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS)
+    return df.drop(index=sorted(drop_indices)).copy(), group_skipped_records(skipped_records)
+
+
+def raw_memo_values_compatible_for_cashflow_dedupe(values: pd.Series) -> bool:
+    meaningful = {
+        str(value).strip()
+        for value in values
+        if not is_blank_text(value)
+    }
+    return len(meaningful) <= 1
+
+
+def has_remaining_rows_between(context_rows: pd.DataFrame, left: pd.Series, right: pd.Series) -> bool:
+    if context_rows.empty or not set(INTERNAL_NORMALIZED_COLUMNS).issubset(set(context_rows.columns)):
+        return True
+    if not normalized_values_equal(left.get("source_file", ""), right.get("source_file", "")):
+        return True
+    if not normalized_values_equal(left.get("_source_sheet", ""), right.get("_source_sheet", "")):
+        return True
+    left_row = parse_korean_number(left.get("_raw_row_number", ""))
+    right_row = parse_korean_number(right.get("_raw_row_number", ""))
+    lower = min(left_row, right_row)
+    upper = max(left_row, right_row)
+    if upper - lower <= 1:
+        return False
+    middle = context_rows[
+        context_rows["source_file"].fillna("").astype(str).eq(str(left.get("source_file", "")))
+        & context_rows["_source_sheet"].fillna("").astype(str).eq(str(left.get("_source_sheet", "")))
+        & (pd.to_numeric(context_rows["_raw_row_number"], errors="coerce").fillna(0) > lower)
+        & (pd.to_numeric(context_rows["_raw_row_number"], errors="coerce").fillna(0) < upper)
+    ]
+    return not middle.empty
+
+
+def dedupe_principal_cashflow_view(cashflows: pd.DataFrame, context_rows: pd.DataFrame | None = None) -> pd.DataFrame:
+    if cashflows.empty:
+        return cashflows.copy()
+    context = context_rows if context_rows is not None else cashflows
+    key_cols = ["account_type", "trade_date", "transaction_type", "settlement_amount", "currency"]
+    drop_indices: set[int] = set()
+    for _, group in cashflows.groupby(key_cols, dropna=False, sort=False):
+        if len(group) <= 1:
+            continue
+        if not raw_memo_values_compatible_for_cashflow_dedupe(group.get("raw_memo", pd.Series(dtype=str))):
+            continue
+        sorted_group = group.sort_values(["source_file", "_source_sheet", "_raw_row_number"], kind="stable")
+        kept = sorted_group.iloc[0]
+        for idx, candidate in sorted_group.iloc[1:].iterrows():
+            same_source = normalized_values_equal(kept.get("source_file", ""), candidate.get("source_file", ""))
+            if not same_source:
+                drop_indices.add(idx)
+                continue
+            if not has_remaining_rows_between(context, kept, candidate):
+                drop_indices.add(idx)
+    if not drop_indices:
+        return cashflows.copy()
+    return cashflows.drop(index=sorted(drop_indices)).copy()
+
+
+def strip_internal_normalized_columns(df: pd.DataFrame) -> pd.DataFrame:
+    return df.drop(columns=INTERNAL_NORMALIZED_COLUMNS, errors="ignore")
+
+
 def split_skipped_broker_helper_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if df.empty:
         return df, pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS)
@@ -389,10 +666,7 @@ def split_skipped_broker_helper_rows(df: pd.DataFrame) -> tuple[pd.DataFrame, pd
             "row_count": 1,
         })
 
-    skipped = pd.DataFrame(skipped_records, columns=SKIPPED_ROWS_COLUMNS)
-    group_cols = [col for col in SKIPPED_ROWS_COLUMNS if col != "row_count"]
-    skipped = skipped.groupby(group_cols, dropna=False, as_index=False)["row_count"].sum()
-    return df[~skip_mask].copy(), skipped[SKIPPED_ROWS_COLUMNS]
+    return df[~skip_mask].copy(), group_skipped_records(skipped_records)
 
 
 def is_leveraged_etf_name(name: Any, metadata: Any = "") -> bool:
@@ -467,13 +741,59 @@ def load_workbook_tables(path: Path) -> dict[str, pd.DataFrame]:
 
 
 def find_column(columns: list[Any], canonical: str) -> Any | None:
+    aliases = COLUMN_ALIASES.get(canonical, [])
+    if not aliases:
+        return None
+    parts_by_column = {col: column_label_parts(col) or [str(col)] for col in columns}
+
+    for alias in aliases:
+        alias_norm = normalize_key(alias)
+        for col, parts in parts_by_column.items():
+            targets = parts[-1:] if len(parts) > 1 else parts
+            if alias_norm and any(alias_norm == normalize_key(target) for target in targets):
+                return col
+
     normalized = {col: normalize_key(col) for col in columns}
-    for alias in COLUMN_ALIASES.get(canonical, []):
+    for alias in aliases:
         alias_norm = normalize_key(alias)
         for col, col_norm in normalized.items():
-            if alias_norm and alias_norm in col_norm:
+            if len(parts_by_column[col]) == 1 and alias_norm and alias_norm == col_norm:
+                return col
+
+    for alias in sorted(aliases, key=lambda value: len(normalize_key(value)), reverse=True):
+        alias_norm = normalize_key(alias)
+        for col, parts in parts_by_column.items():
+            if len(parts) > 1 and canonical in STRICT_MULTIINDEX_EXACT_CANONICALS:
+                continue
+            targets = parts[-1:] if len(parts) > 1 else [str(col)]
+            if alias_norm and any(alias_norm in normalize_key(target) for target in targets):
                 return col
     return None
+
+
+def table_has_position_snapshot_columns(columns: list[Any]) -> bool:
+    has_identity = find_column(columns, "ticker") is not None or find_column(columns, "security_name") is not None
+    has_quantity = find_column(columns, "balance_quantity") is not None or find_column(columns, "quantity") is not None
+    has_valuation = (
+        find_column(columns, "evaluation_amount") is not None
+        or find_column(columns, "price") is not None
+        or find_column(columns, "pnl_pct") is not None
+    )
+    return has_identity and has_quantity and has_valuation
+
+
+def position_snapshot_source_type(source_type: str, account_type: str, columns: list[Any]) -> str:
+    normalized_source_type = str(source_type or "").strip().lower()
+    if normalized_source_type in BALANCE_SOURCE_TYPES:
+        return normalized_source_type
+    if normalized_source_type in {"transaction_history", "transactions"}:
+        return ""
+    if not table_has_position_snapshot_columns(columns):
+        return ""
+    column_text = " ".join(str(col) for col in columns).lower()
+    if str(account_type or "").strip().lower() == "overseas" or any(keyword in column_text for keyword in ["overseas", "외화", "해외", "시장명"]):
+        return "overseas_balance"
+    return "holdings"
 
 
 def infer_account_type(file_name: str, sheet_name: str = "") -> str:
@@ -491,6 +811,14 @@ def infer_market(ticker: str, name: str = "", file_type: str = "") -> str:
     t = str(ticker or "").strip().upper()
     if re.fullmatch(r"\d{6}", t):
         return "KR"
+    if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{10}", t):
+        return "KR" if t.startswith("KR") else "US"
+    if re.fullmatch(r"[A-Z]{1,5}", t) and t not in VALID_CURRENCY_CODES:
+        return "US"
+    for symbol in [extract_symbol_from_parentheses(ticker), extract_symbol_from_parentheses(name)]:
+        symbol_key = str(symbol or "").strip().upper()
+        if re.fullmatch(r"[A-Z]{1,5}", symbol_key) and symbol_key not in VALID_CURRENCY_CODES:
+            return "US"
     if t.startswith("US") or "overseas" in file_type:
         return "US"
     return ""
@@ -576,7 +904,10 @@ def infer_source_file_type(path: Path, sheet_name: str, df: pd.DataFrame) -> str
     ]
     strong_transaction_file_signals = ["종합거래내역", "거래내역 상세", "거래내역상세"]
     strong_transaction_column_signals = ["실거래일자", "거래유형", "상세내용"]
-    cashflow_signals = ["입출금내역", "입출금", "예수금", "출금가능금액", "cashflow", "cash flow", "cash_flow"]
+    cashflow_signals = [
+        "입출금내역", "입출금", "예수금", "출금가능금액", "입금액", "입금금액", "출금액", "출금금액",
+        "cashflow", "cash flow", "cash_flow",
+    ]
     overseas_balance_signals = ["해외증권잔고조회", "해외증권잔고", "외화평가금액", "해외잔고"]
     holdings_signals = [
         "종합잔고", "잔고조회", "계좌잔고", "보유잔고", "보유현황",
@@ -623,11 +954,13 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         return pd.DataFrame(columns=NORMALIZED_COLUMNS), pd.DataFrame(), []
     flat = df.copy()
     if isinstance(flat.columns, pd.MultiIndex):
-        flat.columns = [" ".join([str(x) for x in col if str(x) != "nan"]).strip() for col in flat.columns]
-    flat.columns = [str(c).strip() for c in flat.columns]
+        flat.columns = [flatten_column_name(col) for col in flat.columns]
+    else:
+        flat.columns = [flatten_column_name(c) for c in flat.columns]
     columns = list(flat.columns)
     source_type = infer_source_file_type(source_path, sheet_name, flat)
     account_type = infer_account_type(source_path.name, sheet_name)
+    snapshot_source_type = position_snapshot_source_type(source_type, account_type, columns)
     source_file = safe_source_name(source_path)
     unknown_columns = [str(c) for c in columns if not any(find_column(columns, key) == c for key in COLUMN_ALIASES)]
 
@@ -636,6 +969,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
     audit_rows: list[dict[str, Any]] = []
 
     for idx, raw in flat.iterrows():
+        row_source_type = snapshot_source_type or source_type
         raw_json = json.dumps({str(k): redact_sensitive(v) for k, v in raw.to_dict().items()}, ensure_ascii=False, default=str)
         date = normalize_date(raw.get(cols["trade_date"])) if cols.get("trade_date") is not None else ""
         name = str(raw.get(cols["security_name"]) if cols.get("security_name") is not None else "").strip()
@@ -649,9 +983,18 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         memo = str(raw.get(cols["memo"]) if cols.get("memo") is not None else raw_type).strip()
         tx_type = classify_transaction_type(" ".join([raw_type, memo, name]))
         quantity = parse_korean_number(raw.get(cols["quantity"])) if cols.get("quantity") is not None else 0.0
-        is_balance_source = source_type in {"holdings", "overseas_balance"}
+        is_balance_source = row_source_type in BALANCE_SOURCE_TYPES
         balance_quantity_value = parse_korean_number(raw.get(cols["balance_quantity"])) if cols.get("balance_quantity") is not None else (quantity if is_balance_source else 0.0)
+        deposit_amount = parse_korean_number(raw.get(cols["deposit_amount"])) if cols.get("deposit_amount") is not None else 0.0
+        withdrawal_amount = parse_korean_number(raw.get(cols["withdrawal_amount"])) if cols.get("withdrawal_amount") is not None else 0.0
+        if tx_type == "unknown":
+            if deposit_amount and not withdrawal_amount:
+                tx_type = "deposit"
+            elif withdrawal_amount and not deposit_amount:
+                tx_type = "withdrawal"
         trade_amount = parse_korean_number(raw.get(cols["trade_amount"])) if cols.get("trade_amount") is not None else 0.0
+        if not trade_amount:
+            trade_amount = deposit_amount or withdrawal_amount
         settlement_amount = parse_korean_number(raw.get(cols["settlement_amount"])) if cols.get("settlement_amount") is not None else trade_amount
         evaluation_amount_value = parse_korean_number(raw.get(cols["evaluation_amount"])) if cols.get("evaluation_amount") is not None else 0.0
         unrealized_pnl_value = parse_korean_number(raw.get(cols["unrealized_pnl"])) if cols.get("unrealized_pnl") is not None else 0.0
@@ -662,7 +1005,8 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         pnl_pct = pnl_pct_value if is_balance_source else pd.NA
         raw_currency = raw.get(cols["currency"]) if cols.get("currency") is not None else ""
         raw_fx_rate = raw.get(cols["exchange_rate"]) if cols.get("exchange_rate") is not None else ""
-        currency, fx_rate = normalize_currency_and_fx_rate(raw_currency, raw_fx_rate, source_type)
+        market = infer_market(ticker, name, row_source_type)
+        currency, fx_rate = normalize_currency_and_fx_rate(raw_currency, raw_fx_rate, row_source_type, market)
         asset_type = infer_asset_type(name, ticker)
         if asset_type == "cash":
             currency = normalize_cash_currency(name, ticker, currency)
@@ -672,7 +1016,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             continue
 
         stable = {
-            "source_file_type": source_type, "account_type": account_type, "ticker": ticker,
+            "source_file_type": row_source_type, "account_type": account_type, "ticker": ticker,
             "security_name": name, "trade_date": date, "trade_time": normalize_time(raw.get(cols["trade_time"])) if cols.get("trade_time") is not None else "",
             "transaction_type": tx_type, "quantity": quantity, "price": parse_korean_number(raw.get(cols["price"])) if cols.get("price") is not None else 0.0,
             "trade_amount": trade_amount, "settlement_amount": settlement_amount,
@@ -680,13 +1024,16 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "tax": parse_korean_number(raw.get(cols["tax"])) if cols.get("tax") is not None else 0.0,
             "currency": currency, "fx_rate": fx_rate_for_stable, "raw_memo": memo,
         }
+        if principal_cashflow_import_key_needs_raw_position(stable):
+            stable["source_sheet"] = sheet_name
+            stable["raw_row_number"] = int(idx) + 1
         import_id = hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         row = {
             "import_id": import_id,
             "source_file": source_file,
-            "source_file_type": source_type,
+            "source_file_type": row_source_type,
             "account_type": account_type,
-            "market": infer_market(ticker, name, source_type),
+            "market": market,
             "asset_type": asset_type,
             "ticker": ticker,
             "security_name": redact_sensitive(name),
@@ -706,11 +1053,13 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "unrealized_pnl": unrealized_pnl,
             "pnl_pct": pnl_pct,
             "raw_memo": redact_sensitive(memo),
+            "_source_sheet": sheet_name,
+            "_raw_row_number": int(idx) + 1,
         }
         rows.append(row)
         audit_rows.append({"import_id": import_id, "source_file": source_file, "sheet": sheet_name, "row_number": int(idx) + 1, "raw_json": raw_json})
 
-    return pd.DataFrame(rows, columns=NORMALIZED_COLUMNS), pd.DataFrame(audit_rows), unknown_columns
+    return pd.DataFrame(rows, columns=NORMALIZED_COLUMNS + INTERNAL_NORMALIZED_COLUMNS), pd.DataFrame(audit_rows), unknown_columns
 
 
 def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
@@ -1132,24 +1481,25 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
     combined = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame(columns=NORMALIZED_COLUMNS)
     summary.parsed_rows = len(combined)
     before = len(combined)
+    combined, adjacent_skipped_rows = remove_adjacent_duplicate_principal_cashflows(combined)
     if not combined.empty:
         combined = combined.drop_duplicates(subset=["import_id"], keep="last").reset_index(drop=True)
     summary.duplicate_rows_removed = before - len(combined)
-    combined, skipped_rows = split_skipped_broker_helper_rows(combined)
-    outputs["skipped_rows.csv"] = skipped_rows
+    combined, helper_skipped_rows = split_skipped_broker_helper_rows(combined)
+    outputs["skipped_rows.csv"] = combine_skipped_rows(adjacent_skipped_rows, helper_skipped_rows)
     summary.unclassified_rows = int((combined.get("transaction_type", pd.Series(dtype=str)) == "unknown").sum()) if not combined.empty else 0
     summary.unknown_columns = len(unknown_columns)
 
-    transaction_source_types = {"transaction_history", "transactions", "cashflow"}
-    outputs["processed_transactions.csv"] = combined[combined["source_file_type"].isin(transaction_source_types)].copy() if not combined.empty else outputs["processed_transactions.csv"]
-    holding_candidates = combined[combined["source_file_type"].isin(["holdings", "overseas_balance"])].copy() if not combined.empty else outputs["processed_holdings.csv"]
+    outputs["processed_transactions.csv"] = combined[combined.apply(is_transaction_ledger_row, axis=1)].copy() if not combined.empty else outputs["processed_transactions.csv"]
+    holding_candidates = combined[combined.apply(is_position_snapshot_row, axis=1)].copy() if not combined.empty else outputs["processed_holdings.csv"]
     collapsed_holdings = collapse_holding_rows(holding_candidates)
     current_holdings, history_holdings = split_current_history_holdings(collapsed_holdings)
     outputs["processed_holdings.csv"] = current_holdings
     outputs["history_queue.csv"] = history_holdings
     outputs["post_mortem_candidates.csv"] = history_holdings
     tx_rows = outputs["processed_transactions.csv"]
-    outputs["processed_cashflows.csv"] = tx_rows[tx_rows["transaction_type"].isin(["deposit", "withdrawal", "exchange", "transfer", "interest"])].copy() if not tx_rows.empty else outputs["processed_cashflows.csv"]
+    principal_cashflows = tx_rows[tx_rows.apply(is_principal_cashflow_row, axis=1)].copy() if not tx_rows.empty else outputs["processed_cashflows.csv"]
+    outputs["processed_cashflows.csv"] = dedupe_principal_cashflow_view(principal_cashflows, context_rows=tx_rows)
     outputs["processed_dividends.csv"] = tx_rows[tx_rows["transaction_type"].eq("dividend")].copy() if not tx_rows.empty else outputs["processed_dividends.csv"]
     outputs["unclassified_rows.csv"] = tx_rows[tx_rows["transaction_type"].eq("unknown")].copy() if not tx_rows.empty else outputs["unclassified_rows.csv"]
     source_index_columns = list(outputs["source_file_index.csv"].columns)
@@ -1160,6 +1510,9 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
 
     if unknown_columns:
         outputs["unknown_columns.csv"] = pd.DataFrame(unknown_columns)
+
+    for name, frame in list(outputs.items()):
+        outputs[name] = strip_internal_normalized_columns(frame)
 
     if dry_run:
         return summary

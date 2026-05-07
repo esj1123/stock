@@ -16,7 +16,7 @@ IMPORT_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "70_Imports" / "scrip
 if str(IMPORT_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(IMPORT_SCRIPTS_DIR))
 
-from nh_importer import canonical_overseas_position_key, dedupe_holdings, is_overseas_cashflow_amount_only_helper_row, is_overseas_position_row
+from nh_importer import canonical_overseas_position_key, dedupe_holdings, is_overseas_cashflow_amount_only_helper_row, is_overseas_position_row, is_principal_cashflow_row
 from obsidian_writer import company_note_identity_key, existing_company_note_index, parse_note_frontmatter, safe_component
 
 
@@ -336,6 +336,7 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     source_index = read_csv_rows(processed_dir / "source_file_index.csv")
     transactions = read_csv_rows(processed_dir / "processed_transactions.csv")
     holdings = read_csv_rows(processed_dir / "processed_holdings.csv")
+    cashflows = read_csv_rows(processed_dir / "processed_cashflows.csv")
     unclassified_rows = read_csv_rows(processed_dir / "unclassified_rows.csv")
     summary = summary_map(processed_dir)
 
@@ -394,6 +395,17 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "cash assets excluded from Company QA", "FAIL", "; ".join(cash_qa_findings[:5]))
     else:
         write_result(results, "cash assets excluded from Company QA", "PASS", "no cash ticker appears in Company thesis/sell-criteria QA.")
+
+    bad_cashflow_rows = []
+    for idx, row in enumerate(cashflows, start=2):
+        if not is_principal_cashflow_row(row):
+            bad_cashflow_rows.append(
+                f"row {idx} transaction_type={row.get('transaction_type')} ticker={row.get('ticker')} quantity={row.get('quantity')} trade_date={row.get('trade_date')}"
+            )
+    if bad_cashflow_rows:
+        write_result(results, "processed_cashflows principal-only contract", "FAIL", "; ".join(bad_cashflow_rows[:5]))
+    else:
+        write_result(results, "processed_cashflows principal-only contract", "PASS", f"{len(cashflows)} principal cashflow rows.")
 
     skip_findings = skipped_rows_findings(processed_dir, unclassified_rows)
     if skip_findings:
