@@ -11,6 +11,7 @@ sys.path.append(str(Path(__file__).resolve().parents[3] / "scripts"))
 from nh_importer import (
     BROKER_ADJACENT_DUPLICATE_CASHFLOW_SKIP_REASON,
     COLUMN_ALIASES,
+    MULTIINDEX_COLUMN_SEPARATOR,
     OVERSEAS_CASHFLOW_AMOUNT_ONLY_SKIP_REASON,
     canonical_overseas_position_key,
     dedupe_holdings,
@@ -289,6 +290,37 @@ def import_synthetic_transactions(tmp_path: Path, rows: list[dict[str, object]],
     pd.DataFrame(rows).to_excel(raw / file_name, index=False)
     import_raw_dir(tmp_path)
     return tmp_path / "70_Imports" / "processed"
+
+
+def paired_header(first: str, second: str) -> str:
+    return f"{first}{MULTIINDEX_COLUMN_SEPARATOR}{second}"
+
+
+def paired_namoo_transaction_rows() -> list[dict[str, object]]:
+    return [
+        {
+            COLUMN_ALIASES["trade_date"][0]: "2026-01-10",
+            COLUMN_ALIASES["transaction_raw"][0]: "buy",
+            COLUMN_ALIASES["ticker"][0]: "AAPL",
+            COLUMN_ALIASES["security_name"][0]: "Apple",
+            paired_header(COLUMN_ALIASES["quantity"][0], COLUMN_ALIASES["price"][0]): "8",
+            paired_header(COLUMN_ALIASES["trade_amount"][0], COLUMN_ALIASES["settlement_amount"][0]): "412",
+            paired_header(COLUMN_ALIASES["fee"][0], COLUMN_ALIASES["tax"][0]): "1.25",
+            paired_header(COLUMN_ALIASES["balance_quantity"][0], COLUMN_ALIASES["evaluation_amount"][0]): "100",
+            paired_header(COLUMN_ALIASES["transaction_raw"][0], COLUMN_ALIASES["memo"][0]): "row one memo",
+        },
+        {
+            COLUMN_ALIASES["trade_date"][0]: "",
+            COLUMN_ALIASES["transaction_raw"][0]: "",
+            COLUMN_ALIASES["ticker"][0]: "",
+            COLUMN_ALIASES["security_name"][0]: "",
+            paired_header(COLUMN_ALIASES["quantity"][0], COLUMN_ALIASES["price"][0]): "51.5",
+            paired_header(COLUMN_ALIASES["trade_amount"][0], COLUMN_ALIASES["settlement_amount"][0]): "410",
+            paired_header(COLUMN_ALIASES["fee"][0], COLUMN_ALIASES["tax"][0]): "2.5",
+            paired_header(COLUMN_ALIASES["balance_quantity"][0], COLUMN_ALIASES["evaluation_amount"][0]): "999999",
+            paired_header(COLUMN_ALIASES["transaction_raw"][0], COLUMN_ALIASES["memo"][0]): "row two memo",
+        },
+    ]
 
 
 def read_processed_csv(processed: Path, name: str) -> pd.DataFrame:
@@ -1240,6 +1272,71 @@ def test_multiindex_transaction_history_uses_leaf_headers_for_amount_columns(tmp
     assert row["price"] == 123.45
     assert row["trade_amount"] == 0
     assert row["settlement_amount"] == 678.9
+
+
+def test_paired_namoo_transaction_rows_collapse_before_unit_normalization(tmp_path: Path):
+    df = pd.DataFrame(paired_namoo_transaction_rows())
+    normalized, raw_audit, _ = normalize_dataframe(df, tmp_path / "transaction_history.xlsx", "table_0")
+
+    assert len(normalized) == 1
+    row = normalized.iloc[0]
+    assert row["source_file_type"] == "transaction_history"
+    assert row["transaction_type"] == "buy"
+    assert row["ticker"] == "AAPL"
+    assert row["quantity"] == 8
+    assert row["price"] == 51.5
+    assert row["trade_amount"] == 412
+    assert row["settlement_amount"] == 410
+    assert row["fee"] == 1.25
+    assert row["tax"] == 2.5
+    assert pd.isna(row["balance_quantity"])
+    assert pd.isna(row["evaluation_amount"])
+    assert row["quantity_unit"] == "shares"
+    assert row["price_kind"] == "unit_price"
+    assert row["price_unit"] == "USD/share"
+    assert row["currency_native"] == "USD"
+    assert row["trade_amount_native"] == 412
+    assert is_blank_or_na(row["trade_amount_krw"])
+    assert row["settlement_amount_native"] == 410
+    assert is_blank_or_na(row["settlement_amount_krw"])
+    assert row["amount_kind"] == "trade_amount"
+    assert row["cashflow_role"] == "trade_settlement"
+    assert row["amount_review_status"] == "fx_missing"
+    assert row["_source_sheet"] == "table_0"
+    assert row["_raw_row_number"] == "1-2"
+    assert raw_audit["row_number"].iloc[0] == "1-2"
+    assert "row one memo" in row["raw_memo"]
+    assert "row two memo" in row["raw_memo"]
+
+
+def test_import_paired_namoo_transaction_rows_does_not_create_holdings(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame(paired_namoo_transaction_rows()).to_excel(raw / "transaction_history.xlsx", index=False)
+
+    import_raw_dir(vault)
+    processed = vault / "70_Imports" / "processed"
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    holdings = read_processed_csv(processed, "processed_holdings.csv")
+
+    assert len(transactions) == 1
+    row = transactions.iloc[0]
+    assert row["transaction_type"] == "buy"
+    assert row["quantity"] == 8
+    assert row["price"] == 51.5
+    assert row["trade_amount"] == 412
+    assert row["settlement_amount"] == 410
+    assert row["fee"] == 1.25
+    assert row["tax"] == 2.5
+    assert row["quantity_unit"] == "shares"
+    assert row["price_kind"] == "unit_price"
+    assert row["currency_native"] == "USD"
+    assert row["trade_amount_native"] == 412
+    assert is_blank_or_na(row["trade_amount_krw"])
+    assert row["cashflow_role"] == "trade_settlement"
+    assert row["amount_review_status"] == "fx_missing"
+    assert holdings.empty
 
 
 def test_transaction_history_precedence_over_cashflow_keywords():

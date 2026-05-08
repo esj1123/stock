@@ -160,6 +160,7 @@ def normalize_key(value: Any) -> str:
 
 
 MULTIINDEX_COLUMN_SEPARATOR = " __ "
+COLLAPSED_RAW_ROW_NUMBER_COLUMN = "_collapsed_raw_row_number"
 STRICT_MULTIINDEX_EXACT_CANONICALS = {
     "quantity",
     "trade_amount",
@@ -188,6 +189,174 @@ def flatten_column_name(column: Any) -> str:
 
 def column_label_parts(column: Any) -> list[str]:
     return [part.strip() for part in str(column).split(MULTIINDEX_COLUMN_SEPARATOR) if part.strip()]
+
+
+def canonical_for_header_part(label: Any, preferred: list[str] | None = None) -> str:
+    label_norm = normalize_key(label)
+    if not label_norm:
+        return ""
+    preferred = preferred or []
+
+    exact_matches: list[str] = []
+    for canonical, aliases in COLUMN_ALIASES.items():
+        if any(label_norm == normalize_key(alias) for alias in aliases):
+            exact_matches.append(canonical)
+    for canonical in preferred:
+        if canonical in exact_matches:
+            return canonical
+    if exact_matches:
+        return exact_matches[0]
+
+    partial_matches: list[str] = []
+    for canonical, aliases in COLUMN_ALIASES.items():
+        for alias in sorted(aliases, key=lambda value: len(normalize_key(value)), reverse=True):
+            alias_norm = normalize_key(alias)
+            if alias_norm and alias_norm in label_norm:
+                partial_matches.append(canonical)
+                break
+    for canonical in preferred:
+        if canonical in partial_matches:
+            return canonical
+    return partial_matches[0] if partial_matches else ""
+
+
+def paired_column_targets(column: Any) -> tuple[str, str] | None:
+    parts = column_label_parts(column)
+    if len(parts) < 2:
+        return None
+    left = canonical_for_header_part(
+        parts[0],
+        ["quantity", "trade_amount", "balance_quantity", "fee", "transaction_raw"],
+    )
+    right_preferences = {
+        "quantity": ["price"],
+        "trade_amount": ["settlement_amount"],
+        "balance_quantity": ["evaluation_amount"],
+        "fee": ["tax"],
+        "transaction_raw": ["memo"],
+    }
+    right = canonical_for_header_part(parts[1], right_preferences.get(left, []))
+    allowed_pairs = {
+        ("quantity", "price"),
+        ("trade_amount", "settlement_amount"),
+        ("balance_quantity", "evaluation_amount"),
+        ("fee", "tax"),
+        ("transaction_raw", "memo"),
+    }
+    return (left, right) if (left, right) in allowed_pairs else None
+
+
+def canonical_output_column(canonical: str) -> str:
+    aliases = COLUMN_ALIASES.get(canonical, [])
+    return aliases[0] if aliases else canonical
+
+
+def merge_cell_value(merged: dict[Any, Any], target: Any, value: Any, append: bool = False) -> None:
+    if is_blank_text(value):
+        return
+    current = merged.get(target, "")
+    if not append:
+        if is_blank_text(current):
+            merged[target] = value
+        return
+    value_text = str(value).strip()
+    if is_blank_text(current):
+        merged[target] = value_text
+        return
+    current_parts = [part.strip() for part in str(current).split(";") if part.strip()]
+    if value_text not in current_parts:
+        merged[target] = f"{current}; {value_text}"
+
+
+def rows_have_compatible_pair_identity(left: pd.Series, right: pd.Series, identity_cols: list[Any]) -> bool:
+    for col in identity_cols:
+        if col is None:
+            continue
+        left_value = left.get(col, "")
+        right_value = right.get(col, "")
+        if not is_blank_text(right_value) and not normalized_values_equal(left_value, right_value):
+            return False
+    return True
+
+
+def collapse_namoo_transaction_pair_rows(df: pd.DataFrame, source_file: str = "", sheet_name: str = "") -> pd.DataFrame:
+    if df.empty or len(df) < 2:
+        return df
+
+    columns = list(df.columns)
+    pair_map = {col: targets for col in columns if (targets := paired_column_targets(col)) is not None}
+    if not pair_map:
+        return df
+
+    non_pair_columns = [col for col in columns if col not in pair_map]
+    identity_cols = [
+        find_column(non_pair_columns, "trade_date"),
+        find_column(non_pair_columns, "ticker"),
+        find_column(non_pair_columns, "security_name"),
+    ]
+    transaction_col = find_column(non_pair_columns, "transaction_raw")
+
+    collapsed_rows: list[dict[Any, Any]] = []
+    records = list(df.reset_index(drop=True).iterrows())
+    idx = 0
+    while idx < len(records):
+        row_number, left = records[idx]
+        if idx + 1 >= len(records):
+            item = left.to_dict()
+            item[COLLAPSED_RAW_ROW_NUMBER_COLUMN] = str(row_number + 1)
+            collapsed_rows.append(item)
+            break
+
+        next_row_number, right = records[idx + 1]
+        left_has_pair_values = any(not is_blank_text(left.get(col, "")) for col in pair_map)
+        right_has_pair_values = any(not is_blank_text(right.get(col, "")) for col in pair_map)
+        left_has_identity = any(
+            col is not None and not is_blank_text(left.get(col, ""))
+            for col in identity_cols
+        )
+        right_has_identity = any(
+            col is not None and not is_blank_text(right.get(col, ""))
+            for col in identity_cols
+        )
+        right_has_transaction_marker = transaction_col is not None and not is_blank_text(right.get(transaction_col, ""))
+        right_starts_new_transaction = right_has_identity and right_has_transaction_marker
+        should_collapse = (
+            left_has_pair_values
+            and right_has_pair_values
+            and left_has_identity
+            and not right_starts_new_transaction
+            and rows_have_compatible_pair_identity(left, right, identity_cols)
+        )
+
+        if not should_collapse:
+            item = left.to_dict()
+            item[COLLAPSED_RAW_ROW_NUMBER_COLUMN] = str(row_number + 1)
+            collapsed_rows.append(item)
+            idx += 1
+            continue
+
+        merged: dict[Any, Any] = {}
+        for col in non_pair_columns:
+            merged[col] = left.get(col, "")
+            if is_blank_text(merged[col]):
+                merged[col] = right.get(col, "")
+
+        memo_col = canonical_output_column("memo")
+        transaction_col = canonical_output_column("transaction_raw")
+        for col, (left_target, right_target) in pair_map.items():
+            for target, value in [(left_target, left.get(col, "")), (right_target, right.get(col, ""))]:
+                if target in {"transaction_raw", "memo"}:
+                    if target == "transaction_raw" and is_blank_text(merged.get(transaction_col, "")):
+                        merge_cell_value(merged, transaction_col, value)
+                    merge_cell_value(merged, memo_col, value, append=True)
+                    continue
+                merge_cell_value(merged, canonical_output_column(target), value)
+
+        merged[COLLAPSED_RAW_ROW_NUMBER_COLUMN] = f"{row_number + 1}-{next_row_number + 1}"
+        collapsed_rows.append(merged)
+        idx += 2
+
+    return pd.DataFrame(collapsed_rows)
 
 
 def extract_symbol_from_parentheses(value: Any) -> str:
@@ -820,6 +989,20 @@ def normalized_numbers_equal(left: Any, right: Any, tolerance: float = 1e-9) -> 
     return abs(parse_korean_number(left) - parse_korean_number(right)) <= tolerance
 
 
+def raw_row_start_order_value(value: Any) -> float:
+    text = str(value or "").strip()
+    if "-" in text:
+        text = text.split("-", 1)[0]
+    return parse_korean_number(text)
+
+
+def raw_row_end_order_value(value: Any) -> float:
+    text = str(value or "").strip()
+    if "-" in text:
+        text = text.rsplit("-", 1)[-1]
+    return parse_korean_number(text)
+
+
 def principal_cashflow_import_key_needs_raw_position(row: dict[str, Any]) -> bool:
     return is_principal_cashflow_row(row)
 
@@ -831,8 +1014,8 @@ def adjacent_principal_cashflow_duplicate(left: pd.Series, right: pd.Series, tol
         return False
     if not normalized_values_equal(left.get("_source_sheet", ""), right.get("_source_sheet", "")):
         return False
-    left_row = parse_korean_number(left.get("_raw_row_number", ""))
-    right_row = parse_korean_number(right.get("_raw_row_number", ""))
+    left_row = raw_row_end_order_value(left.get("_raw_row_number", ""))
+    right_row = raw_row_start_order_value(right.get("_raw_row_number", ""))
     if int(right_row) - int(left_row) != 1:
         return False
 
@@ -906,7 +1089,11 @@ def remove_adjacent_duplicate_principal_cashflows(df: pd.DataFrame) -> tuple[pd.
     skipped_records: list[dict[str, Any]] = []
     group_cols = ["source_file", "_source_sheet"]
     for _, group in df.groupby(group_cols, dropna=False, sort=False):
-        sorted_group = group.sort_values("_raw_row_number", kind="stable")
+        sorted_group = (
+            group.assign(_raw_row_sort=group["_raw_row_number"].map(raw_row_start_order_value))
+            .sort_values("_raw_row_sort", kind="stable")
+            .drop(columns=["_raw_row_sort"])
+        )
         kept_indices: list[int] = []
         for idx, row in sorted_group.iterrows():
             if kept_indices:
@@ -944,8 +1131,8 @@ def has_remaining_rows_between(context_rows: pd.DataFrame, left: pd.Series, righ
         return True
     if not normalized_values_equal(left.get("_source_sheet", ""), right.get("_source_sheet", "")):
         return True
-    left_row = parse_korean_number(left.get("_raw_row_number", ""))
-    right_row = parse_korean_number(right.get("_raw_row_number", ""))
+    left_row = raw_row_end_order_value(left.get("_raw_row_number", ""))
+    right_row = raw_row_start_order_value(right.get("_raw_row_number", ""))
     lower = min(left_row, right_row)
     upper = max(left_row, right_row)
     if upper - lower <= 1:
@@ -953,8 +1140,8 @@ def has_remaining_rows_between(context_rows: pd.DataFrame, left: pd.Series, righ
     middle = context_rows[
         context_rows["source_file"].fillna("").astype(str).eq(str(left.get("source_file", "")))
         & context_rows["_source_sheet"].fillna("").astype(str).eq(str(left.get("_source_sheet", "")))
-        & (pd.to_numeric(context_rows["_raw_row_number"], errors="coerce").fillna(0) > lower)
-        & (pd.to_numeric(context_rows["_raw_row_number"], errors="coerce").fillna(0) < upper)
+        & (context_rows["_raw_row_number"].map(raw_row_start_order_value) > lower)
+        & (context_rows["_raw_row_number"].map(raw_row_start_order_value) < upper)
     ]
     return not middle.empty
 
@@ -970,7 +1157,11 @@ def dedupe_principal_cashflow_view(cashflows: pd.DataFrame, context_rows: pd.Dat
             continue
         if not raw_memo_values_compatible_for_cashflow_dedupe(group.get("raw_memo", pd.Series(dtype=str))):
             continue
-        sorted_group = group.sort_values(["source_file", "_source_sheet", "_raw_row_number"], kind="stable")
+        sorted_group = (
+            group.assign(_raw_row_sort=group["_raw_row_number"].map(raw_row_start_order_value))
+            .sort_values(["source_file", "_source_sheet", "_raw_row_sort"], kind="stable")
+            .drop(columns=["_raw_row_sort"])
+        )
         kept = sorted_group.iloc[0]
         for idx, candidate in sorted_group.iloc[1:].iterrows():
             same_source = normalized_values_equal(kept.get("source_file", ""), candidate.get("source_file", ""))
@@ -1302,10 +1493,17 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         flat.columns = [flatten_column_name(c) for c in flat.columns]
     columns = list(flat.columns)
     source_type = infer_source_file_type(source_path, sheet_name, flat)
+    if source_type in {"transaction_history", "transactions"}:
+        flat = collapse_namoo_transaction_pair_rows(flat, source_path.name, sheet_name)
+        columns = list(flat.columns)
     account_type = infer_account_type(source_path.name, sheet_name)
     snapshot_source_type = position_snapshot_source_type(source_type, account_type, columns)
     source_file = safe_source_name(source_path)
-    unknown_columns = [str(c) for c in columns if not any(find_column(columns, key) == c for key in COLUMN_ALIASES)]
+    unknown_columns = [
+        str(c)
+        for c in columns
+        if c != COLLAPSED_RAW_ROW_NUMBER_COLUMN and not any(find_column(columns, key) == c for key in COLUMN_ALIASES)
+    ]
 
     cols = {key: find_column(columns, key) for key in COLUMN_ALIASES}
     rows: list[dict[str, Any]] = []
@@ -1313,6 +1511,9 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
 
     for idx, raw in flat.iterrows():
         row_source_type = snapshot_source_type or source_type
+        raw_row_number = raw.get(COLLAPSED_RAW_ROW_NUMBER_COLUMN, "")
+        if is_blank_text(raw_row_number):
+            raw_row_number = int(idx) + 1
         raw_json = json.dumps({str(k): redact_sensitive(v) for k, v in raw.to_dict().items()}, ensure_ascii=False, default=str)
         date = normalize_date(raw.get(cols["trade_date"])) if cols.get("trade_date") is not None else ""
         name = str(raw.get(cols["security_name"]) if cols.get("security_name") is not None else "").strip()
@@ -1491,7 +1692,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         }
         if principal_cashflow_import_key_needs_raw_position(stable):
             stable["source_sheet"] = sheet_name
-            stable["raw_row_number"] = int(idx) + 1
+            stable["raw_row_number"] = raw_row_number
         import_id = hashlib.sha256(json.dumps(stable, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
         fx_event_id = f"FX-{import_id[:12]}" if cashflow_role == "internal_fx_exchange" else ""
         row = {
@@ -1560,10 +1761,10 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "fx_event_id": fx_event_id,
             "fx_pair_status": fx_pair_status,
             "_source_sheet": sheet_name,
-            "_raw_row_number": int(idx) + 1,
+            "_raw_row_number": raw_row_number,
         }
         rows.append(row)
-        audit_rows.append({"import_id": import_id, "source_file": source_file, "sheet": sheet_name, "row_number": int(idx) + 1, "raw_json": raw_json})
+        audit_rows.append({"import_id": import_id, "source_file": source_file, "sheet": sheet_name, "row_number": raw_row_number, "raw_json": raw_json})
 
     return pd.DataFrame(rows, columns=NORMALIZED_COLUMNS + INTERNAL_NORMALIZED_COLUMNS), pd.DataFrame(audit_rows), unknown_columns
 
