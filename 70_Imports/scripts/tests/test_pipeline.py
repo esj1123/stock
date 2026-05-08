@@ -414,13 +414,15 @@ def test_fx_exchange_is_internal_transfer_not_principal_cashflow(tmp_path: Path)
         )
     ])
     transactions = read_processed_csv(processed, "processed_transactions.csv")
-    assert_columns_present(transactions, ["cashflow_role", "affects_principal", "is_internal_transfer"])
+    assert_columns_present(transactions, ["cashflow_role", "affects_principal", "is_internal_transfer", "fx_event_id", "fx_pair_status"])
     row = transactions.iloc[0]
 
     assert row["transaction_type"] == "exchange"
     assert row["cashflow_role"] == "internal_fx_exchange"
     assert not boolish(row["affects_principal"])
     assert boolish(row["is_internal_transfer"])
+    assert str(row["fx_event_id"]).startswith("FX-")
+    assert row["fx_pair_status"] == "unpaired"
     assert read_processed_csv(processed, "processed_cashflows.csv").empty
 
 
