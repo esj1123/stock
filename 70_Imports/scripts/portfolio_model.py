@@ -19,6 +19,16 @@ RISK_COLUMNS = ["ticker", "security_name", "account_type", "risk_flags", "pnl_pc
 REVIEW_COLUMNS = ["ticker", "security_name", "reason", "severity", "suggested_action"]
 SUMMARY_COLUMNS = ["metric", "value"]
 BALANCE_SOURCE_TYPES = {"holdings", "overseas_balance"}
+CURRENCY_NORMALIZATION_STATUS = "pending"
+AMOUNT_UNIT_CLASSIFICATION_STATUS = "pending"
+PROFIT_RESULT_STATUS = "preliminary"
+RECONCILIATION_STATUS = "currency_normalization_pending"
+PRELIMINARY_RECONCILIATION_WARNING = (
+    "Portfolio/Cashflows differences are not official reconciliation yet. "
+    "Raw numeric values may mix KRW and USD. "
+    "Raw numeric values may also mix quantity, unit price, total amount, fee, tax, FX rate, dividend, interest, and internal FX transfer. "
+    "Final total return should not be considered official until unit/currency-aware processing is complete."
+)
 
 
 def load_csv(path: Path) -> pd.DataFrame:
@@ -269,6 +279,11 @@ def portfolio_summary_rows(
         {"metric": "leveraged_etf_total_weight_pct", "value": leveraged_etf_total_weight_pct},
         {"metric": "total_portfolio_value_status", "value": status},
         {"metric": "total_portfolio_value_basis", "value": basis},
+        {"metric": "currency_normalization_status", "value": CURRENCY_NORMALIZATION_STATUS},
+        {"metric": "amount_unit_classification_status", "value": AMOUNT_UNIT_CLASSIFICATION_STATUS},
+        {"metric": "profit_result_status", "value": PROFIT_RESULT_STATUS},
+        {"metric": "reconciliation_status", "value": RECONCILIATION_STATUS},
+        {"metric": "preliminary_reconciliation_warning", "value": PRELIMINARY_RECONCILIATION_WARNING},
         {"metric": "portfolio_summary_estimated", "value": estimated},
         {"metric": "balance_data_available", "value": balance_data_available},
         {"metric": "raw_file_count", "value": raw_file_count},

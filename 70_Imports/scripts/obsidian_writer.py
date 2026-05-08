@@ -9,6 +9,13 @@ from typing import Any
 import pandas as pd
 
 from nh_importer import canonical_overseas_position_key, is_principal_cashflow_row
+from portfolio_model import (
+    AMOUNT_UNIT_CLASSIFICATION_STATUS,
+    CURRENCY_NORMALIZATION_STATUS,
+    PRELIMINARY_RECONCILIATION_WARNING,
+    PROFIT_RESULT_STATUS,
+    RECONCILIATION_STATUS,
+)
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
@@ -253,19 +260,41 @@ def cashflow_monthly_summary(cash: pd.DataFrame) -> str:
     return markdown_table(pd.DataFrame(rows).sort_values(["month", "transaction_type"]))
 
 
+def preliminary_reconciliation_warning(summary: pd.DataFrame | None = None) -> str:
+    summary = summary if summary is not None else pd.DataFrame()
+    warning = metric(summary, "preliminary_reconciliation_warning", PRELIMINARY_RECONCILIATION_WARNING)
+    statuses = [
+        ("currency_normalization_status", metric(summary, "currency_normalization_status", CURRENCY_NORMALIZATION_STATUS)),
+        ("amount_unit_classification_status", metric(summary, "amount_unit_classification_status", AMOUNT_UNIT_CLASSIFICATION_STATUS)),
+        ("profit_result_status", metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)),
+        ("reconciliation_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)),
+    ]
+    status_text = "; ".join(f"`{name}={markdown_cell(value)}`" for name, value in statuses)
+    return "\n".join([
+        "> [!warning] Preliminary profit and reconciliation",
+        f"> {markdown_cell(warning)}",
+        f"> Status: {status_text}",
+    ])
+
+
 def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: str) -> str:
     parts = []
     if warning:
         parts.append(warning)
+    parts.append(preliminary_reconciliation_warning(summary))
     value_status = metric(summary, "total_portfolio_value_status", "unknown")
+    profit_status = metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)
+    reconciliation_status = metric(summary, "reconciliation_status", RECONCILIATION_STATUS)
     snapshot = [
         "## Snapshot",
         '<div class="stock-kpi-grid">',
         snapshot_card("Holdings", metric(summary, "holding_count", "0")),
-        snapshot_card("Principal", metric(summary, "total_cost", "-"), "cost basis"),
+        snapshot_card("Principal", metric(summary, "total_cost", "-"), "preliminary cost basis"),
         snapshot_card("Total Value", metric(summary, "total_portfolio_value", "-")),
-        snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-")),
-        snapshot_card("Return", metric(summary, "pnl_pct", "-"), "pnl_pct"),
+        snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-"), "preliminary"),
+        snapshot_card("Return", metric(summary, "pnl_pct", "-"), "preliminary pnl_pct"),
+        snapshot_card("Profit Status", profit_status),
+        snapshot_card("Recon Status", reconciliation_status),
         snapshot_card("Loss Review", metric(summary, "loss_review_required_count", "0"), "candidate count"),
         snapshot_card("Leveraged ETF", metric(summary, "leveraged_etf_count", "0")),
         snapshot_card("Largest Position", largest_position_label(holdings)),
@@ -669,7 +698,8 @@ def cashflow_detail_table(cash: pd.DataFrame, limit: int | None = None) -> str:
     return markdown_table(view, ["trade_date", "transaction_type", "account_type", "ticker", "security_name", "settlement_amount", "currency"], limit)
 
 
-def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame) -> str:
+def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame, summary: pd.DataFrame | None = None) -> str:
+    summary = summary if summary is not None else pd.DataFrame()
     principal_cash = principal_cashflow_rows(cash)
     months = 0
     if not principal_cash.empty and "trade_date" in principal_cash.columns:
@@ -677,13 +707,15 @@ def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame) -> str:
     tx_types = int(principal_cash["transaction_type"].nunique()) if not principal_cash.empty and "transaction_type" in principal_cash.columns else 0
     principal_totals = cashflow_principal_totals(principal_cash)
     parts = [
+        preliminary_reconciliation_warning(summary),
         "## Snapshot",
         dashboard_kpi_grid([
             snapshot_card("Cashflow Rows", len(principal_cash)),
             snapshot_card("Dividend Rows", len(dividends)),
             snapshot_card("Months", months),
             snapshot_card("Types", tx_types),
-            snapshot_card("Net Principal", principal_totals["net_principal"], "deposits - withdrawals"),
+            snapshot_card("Net Principal", principal_totals["net_principal"], "preliminary deposits - withdrawals"),
+            snapshot_card("Recon Status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)),
         ]),
         "## Principal summary",
         cashflow_principal_summary_table(principal_cash),
@@ -937,7 +969,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Exposure.md":
         return exposure_content(summary, holdings, warning)
     if name == "Cashflows.md":
-        return cashflow_content(cash, dividends)
+        return cashflow_content(cash, dividends, summary)
     if name == "Import_Review.md":
         return import_review_content(summary, sources, skipped, unclassified, warning, holdings)
     if name == "Risk_Watchlist.md":

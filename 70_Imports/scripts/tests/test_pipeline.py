@@ -999,6 +999,10 @@ def test_holdings_file_makes_portfolio_summary_available(tmp_path: Path):
     assert len(holdings) == 1
     assert summary_map["total_portfolio_value_status"] == "available"
     assert float(summary_map["total_portfolio_value"]) == 100000
+    assert summary_map["currency_normalization_status"] == "pending"
+    assert summary_map["amount_unit_classification_status"] == "pending"
+    assert summary_map["profit_result_status"] == "preliminary"
+    assert summary_map["reconciliation_status"] == "currency_normalization_pending"
 
 
 def test_mixed_transaction_history_and_holdings_split_correctly(tmp_path: Path):
@@ -1105,6 +1109,11 @@ def test_cashflow_dashboard_monthly_activity_sorts_by_month_and_shows_principal(
     monthly = content.split("## Monthly activity", 1)[1].split("## Type summary", 1)[0]
 
     assert "Net Principal" in content
+    assert "Preliminary profit and reconciliation" in content
+    assert "Portfolio/Cashflows differences are not official reconciliation yet." in content
+    assert "Raw numeric values may mix KRW and USD." in content
+    assert "quantity, unit price, total amount, fee, tax, FX rate, dividend, interest, and internal FX transfer" in content
+    assert "reconciliation_status=currency_normalization_pending" in content
     assert "| net_principal | 2500.0 |" in content
     assert "weight_pct" not in monthly
     assert "exchange" not in monthly
@@ -1139,6 +1148,9 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "Total Value" in content
     assert "Unrealized PnL" in content
     assert "Return" in content
+    assert "Preliminary profit and reconciliation" in content
+    assert "Final total return should not be considered official until unit/currency-aware processing is complete." in content
+    assert "profit_result_status=preliminary" in content
     assert "<strong>1500</strong>" in content
     assert "<strong>1800</strong>" in content
     assert "<strong>300</strong>" in content
