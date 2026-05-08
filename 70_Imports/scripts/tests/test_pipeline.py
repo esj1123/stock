@@ -173,6 +173,284 @@ def test_us_holding_missing_currency_stays_krw_by_default(tmp_path: Path):
     assert normalized["currency"].iloc[0] == "KRW"
 
 
+AMOUNT_UNIT_AUDIT_COLUMNS = [
+    "source_file",
+    "source_file_type",
+    "account_type",
+    "market",
+    "trade_date",
+    "transaction_type",
+    "ticker",
+    "security_name",
+    "raw_quantity",
+    "raw_price",
+    "raw_trade_amount",
+    "raw_settlement_amount",
+    "quantity_unit",
+    "price_unit",
+    "currency_native",
+    "money_unit_native",
+    "fx_rate_to_krw",
+    "amount_kind",
+    "amount_basis",
+    "amount_native",
+    "amount_krw",
+    "cashflow_role",
+    "affects_principal",
+    "affects_profit",
+    "is_internal_transfer",
+    "amount_confidence",
+    "amount_review_status",
+    "amount_review_reason",
+]
+
+UNIT_MISMATCH_AUDIT_COLUMNS = [
+    "source_file",
+    "source_file_type",
+    "account_type",
+    "market",
+    "transaction_type",
+    "ticker",
+    "currency_native",
+    "amount_normalization_status",
+    "amount_normalization_reason",
+    "cashflow_role",
+]
+
+
+def assert_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
+    missing = [col for col in columns if col not in df.columns]
+    assert not missing, f"missing expected unit/currency normalization columns: {missing}"
+
+
+def is_blank_or_na(value) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    return str(value).strip() == ""
+
+
+def boolish(value) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def synthetic_transaction_row(
+    *,
+    trade_date: str = "2026-01-10",
+    transaction_raw: str = "buy",
+    ticker: str = "AAPL",
+    security_name: str = "Apple",
+    quantity: str | int | float = 8,
+    price: str | int | float = 51.5,
+    trade_amount: str | int | float = 412,
+    settlement_amount: str | int | float | None = None,
+    currency: str | None = None,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        COLUMN_ALIASES["trade_date"][0]: trade_date,
+        COLUMN_ALIASES["transaction_raw"][0]: transaction_raw,
+        COLUMN_ALIASES["ticker"][0]: ticker,
+        COLUMN_ALIASES["security_name"][0]: security_name,
+        COLUMN_ALIASES["quantity"][0]: quantity,
+        COLUMN_ALIASES["price"][0]: price,
+        COLUMN_ALIASES["trade_amount"][0]: trade_amount,
+    }
+    if settlement_amount is not None:
+        row[COLUMN_ALIASES["settlement_amount"][0]] = settlement_amount
+    if currency is not None:
+        row[COLUMN_ALIASES["currency"][0]] = currency
+    return row
+
+
+def normalize_synthetic_transaction(tmp_path: Path, row: dict[str, object], file_name: str = "transaction_history.xlsx") -> pd.DataFrame:
+    normalized, _, _ = normalize_dataframe(pd.DataFrame([row]), tmp_path / file_name, "Sheet1")
+    assert len(normalized) == 1
+    return normalized
+
+
+def import_synthetic_transactions(tmp_path: Path, rows: list[dict[str, object]], file_name: str = "transaction_history.xlsx") -> Path:
+    raw = tmp_path / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame(rows).to_excel(raw / file_name, index=False)
+    import_raw_dir(tmp_path)
+    return tmp_path / "70_Imports" / "processed"
+
+
+def read_processed_csv(processed: Path, name: str) -> pd.DataFrame:
+    path = processed / name
+    assert path.exists(), f"missing processed output: {name}"
+    return pd.read_csv(path, dtype={"ticker": str})
+
+
+def test_quantity_is_not_money_amount(tmp_path: Path):
+    normalized = normalize_synthetic_transaction(tmp_path, synthetic_transaction_row())
+    assert_columns_present(normalized, ["quantity_unit", "amount_kind", "amount_krw"])
+    row = normalized.iloc[0]
+
+    assert row["quantity"] == 8
+    assert str(row["quantity_unit"]).lower() in {"", "share", "shares", "contract", "contracts"}
+    assert str(row["amount_kind"]).lower() not in {"quantity", "share_quantity", "shares", "contracts"}
+    assert is_blank_or_na(row["amount_krw"]) or float(row["amount_krw"]) != 8
+
+
+def test_price_is_unit_price_not_total_money(tmp_path: Path):
+    normalized = normalize_synthetic_transaction(tmp_path, synthetic_transaction_row())
+    assert_columns_present(normalized, ["amount_kind", "price_unit"])
+    row = normalized.iloc[0]
+    kind_values = {str(row.get("price_kind", "")).lower(), str(row.get("amount_kind", "")).lower()}
+
+    assert row["price"] == 51.5
+    assert "unit_price" in kind_values
+    assert "share" in str(row["price_unit"]).lower()
+
+    processed = import_synthetic_transactions(tmp_path, [synthetic_transaction_row()])
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+    assert cashflows.empty
+
+
+def test_us_transaction_amount_is_native_usd_not_krw_without_fx(tmp_path: Path):
+    normalized = normalize_synthetic_transaction(tmp_path, synthetic_transaction_row())
+    assert_columns_present(normalized, ["currency_native", "trade_amount_native", "trade_amount_krw"])
+    row = normalized.iloc[0]
+    status = row.get("amount_review_status", row.get("amount_normalization_status", ""))
+
+    assert row["market"] == "US"
+    assert row["currency_native"] == "USD"
+    assert row["trade_amount_native"] == 412
+    assert is_blank_or_na(row["trade_amount_krw"])
+    assert status == "fx_missing"
+
+
+def test_isa_domestic_transaction_amount_defaults_to_krw(tmp_path: Path):
+    row = synthetic_transaction_row(
+        ticker="005930",
+        security_name="Samsung Electronics",
+        quantity=10,
+        price=70000,
+        trade_amount=700000,
+    )
+    normalized = normalize_synthetic_transaction(tmp_path, row, file_name="isa_transaction_history.xlsx")
+    assert_columns_present(normalized, ["currency_native", "trade_amount_native", "trade_amount_krw"])
+    out = normalized.iloc[0]
+    status = out.get("amount_review_status", out.get("amount_normalization_status", ""))
+
+    assert out["market"] == "KR"
+    assert out["currency_native"] == "KRW"
+    assert out["trade_amount_native"] == 700000
+    assert out["trade_amount_krw"] == 700000
+    assert status == "ok"
+
+
+def test_foreign_dividend_is_income_not_external_principal(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="외화배당금입금 dividend",
+            ticker="AAPL",
+            security_name="Apple",
+            quantity=0,
+            price=0,
+            trade_amount=12.34,
+            currency="USD",
+        )
+    ])
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    assert_columns_present(transactions, ["cashflow_role", "affects_principal", "affects_profit"])
+    row = transactions.iloc[0]
+
+    assert row["transaction_type"] == "dividend"
+    assert row["cashflow_role"] == "income_dividend"
+    assert not boolish(row["affects_principal"])
+    assert boolish(row["affects_profit"])
+    assert read_processed_csv(processed, "processed_cashflows.csv").empty
+
+
+def test_krw_interest_is_income_not_external_principal(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="예탁금이용료 interest",
+            ticker="",
+            security_name="",
+            quantity=0,
+            price=0,
+            trade_amount=1200,
+            currency="KRW",
+        )
+    ])
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    assert_columns_present(transactions, ["cashflow_role", "affects_principal"])
+    row = transactions.iloc[0]
+
+    assert row["transaction_type"] == "interest"
+    assert row["cashflow_role"] == "income_interest"
+    assert not boolish(row["affects_principal"])
+    assert read_processed_csv(processed, "processed_cashflows.csv").empty
+
+
+def test_fx_exchange_is_internal_transfer_not_principal_cashflow(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="환전 exchange",
+            ticker="",
+            security_name="",
+            quantity=0,
+            price=0,
+            trade_amount=100000,
+            currency="KRW",
+        )
+    ])
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    assert_columns_present(transactions, ["cashflow_role", "affects_principal", "is_internal_transfer"])
+    row = transactions.iloc[0]
+
+    assert row["transaction_type"] == "exchange"
+    assert row["cashflow_role"] == "internal_fx_exchange"
+    assert not boolish(row["affects_principal"])
+    assert boolish(row["is_internal_transfer"])
+    assert read_processed_csv(processed, "processed_cashflows.csv").empty
+
+
+def test_processed_cashflows_contains_external_principal_only(tmp_path: Path):
+    rows = [
+        synthetic_transaction_row(transaction_raw="deposit", ticker="", security_name="", quantity=0, price=0, trade_amount=1000),
+        synthetic_transaction_row(transaction_raw="withdrawal", ticker="", security_name="", quantity=0, price=0, trade_amount=250),
+        synthetic_transaction_row(transaction_raw="외화배당금입금 dividend", quantity=0, price=0, trade_amount=10, currency="USD"),
+        synthetic_transaction_row(transaction_raw="예탁금이용료 interest", ticker="", security_name="", quantity=0, price=0, trade_amount=5, currency="KRW"),
+        synthetic_transaction_row(transaction_raw="환전 exchange", ticker="", security_name="", quantity=0, price=0, trade_amount=100),
+        synthetic_transaction_row(transaction_raw="buy", ticker="AAPL", security_name="Apple", quantity=8, price=51.5, trade_amount=412),
+        synthetic_transaction_row(transaction_raw="sell", ticker="AAPL", security_name="Apple", quantity=1, price=55, trade_amount=55),
+    ]
+    processed = import_synthetic_transactions(tmp_path, rows)
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+
+    assert set(cashflows["transaction_type"]) == {"deposit", "withdrawal"}
+    assert len(cashflows) == 2
+    assert not set(cashflows["transaction_type"]).intersection({"dividend", "interest", "exchange", "buy", "sell"})
+
+
+def test_amount_unit_audit_exists_after_import(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [synthetic_transaction_row()])
+    audit_path = processed / "amount_unit_audit.csv"
+
+    assert audit_path.exists()
+    audit = pd.read_csv(audit_path)
+    assert_columns_present(audit, AMOUNT_UNIT_AUDIT_COLUMNS)
+
+
+def test_unit_mismatch_audit_exists_after_import(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [synthetic_transaction_row()])
+    audit_path = processed / "unit_mismatch_audit.csv"
+
+    assert audit_path.exists()
+    audit = pd.read_csv(audit_path)
+    assert_columns_present(audit, UNIT_MISMATCH_AUDIT_COLUMNS)
+
+
 def test_quality_gate_currency_helper_flags_fx_rate():
     assert invalid_currency_findings([{"ticker": "AAPL", "currency": "USD"}]) == []
     findings = invalid_currency_findings([{"ticker": "AAPL", "currency": "1473.10"}])
