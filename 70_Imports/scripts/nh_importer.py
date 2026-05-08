@@ -17,6 +17,17 @@ NORMALIZED_COLUMNS = [
     "ticker", "security_name", "trade_date", "trade_time", "transaction_type",
     "quantity", "price", "trade_amount", "settlement_amount", "fee", "tax", "currency", "fx_rate",
     "balance_quantity", "evaluation_amount", "unrealized_pnl", "pnl_pct", "raw_memo",
+    "quantity_unit", "price_unit", "price_kind", "money_unit_native", "money_unit_krw",
+    "amount_kind", "amount_basis", "amount_sign_convention", "amount_confidence",
+    "amount_review_status", "amount_review_reason",
+    "currency_native", "fx_rate_to_krw", "fx_rate_source", "fx_rate_status",
+    "amount_native", "amount_krw", "amount_krw_source",
+    "amount_normalization_status", "amount_normalization_reason",
+    "trade_amount_native", "trade_amount_krw", "settlement_amount_native", "settlement_amount_krw",
+    "fee_native", "fee_krw", "tax_native", "tax_krw",
+    "evaluation_amount_native", "evaluation_amount_krw", "unrealized_pnl_native", "unrealized_pnl_krw",
+    "cashflow_role", "affects_principal", "affects_profit", "is_internal_transfer",
+    "is_valuation_snapshot", "is_trade_settlement",
 ]
 
 INTERNAL_NORMALIZED_COLUMNS = ["_source_sheet", "_raw_row_number"]
@@ -38,6 +49,20 @@ HOLDING_DEDUPE_COLUMNS = [
     "preferred_source",
     "dedupe_excluded_count",
     "dedupe_excluded_evaluation_amount",
+]
+
+AMOUNT_UNIT_AUDIT_COLUMNS = [
+    "source_file", "source_file_type", "account_type", "market", "trade_date", "transaction_type",
+    "ticker", "security_name", "raw_quantity", "raw_price", "raw_trade_amount", "raw_settlement_amount",
+    "raw_fee", "raw_tax", "quantity_unit", "price_unit", "currency_native", "money_unit_native",
+    "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis", "amount_native", "amount_krw",
+    "cashflow_role", "affects_principal", "affects_profit", "is_internal_transfer",
+    "amount_confidence", "amount_review_status", "amount_review_reason",
+]
+
+UNIT_MISMATCH_AUDIT_COLUMNS = [
+    "source_file", "source_file_type", "account_type", "market", "transaction_type", "ticker",
+    "currency_native", "amount_normalization_status", "amount_normalization_reason", "cashflow_role",
 ]
 
 HOLDING_SOURCE_PRIORITY = {
@@ -306,6 +331,141 @@ def normalize_currency_and_fx_rate(raw_currency: Any, raw_fx_rate: Any = "", sou
     return currency, (fx_rate if fx_rate is not None else pd.NA)
 
 
+def normalized_fx_rate_value(value: Any) -> float | None:
+    if is_blank_text(value):
+        return None
+    try:
+        return float(value)
+    except Exception:
+        return fx_rate_from_text(value)
+
+
+def convert_native_to_krw(amount: float, currency_native: str, fx_rate_to_krw: Any) -> tuple[float, Any, str]:
+    currency = str(currency_native or "").strip().upper()
+    if currency == "KRW":
+        return amount, amount, "raw_native"
+    if abs(float(amount or 0)) <= 1e-9 and currency:
+        return amount, 0.0, "raw_native"
+    fx_rate = normalized_fx_rate_value(fx_rate_to_krw)
+    if currency and fx_rate is not None:
+        return amount, round(amount * fx_rate, 6), "derived_krw_from_fx"
+    return amount, pd.NA, ""
+
+
+def money_status(currency_native: str, fx_rate_to_krw: Any, amount: float) -> tuple[str, str]:
+    currency = str(currency_native or "").strip().upper()
+    if not currency:
+        return "currency_ambiguous", "native currency could not be inferred"
+    if currency == "KRW":
+        return "ok", ""
+    if abs(float(amount or 0)) <= 1e-9:
+        return "ok", ""
+    if normalized_fx_rate_value(fx_rate_to_krw) is None:
+        return "fx_missing", "non-KRW native amount has no FX rate or broker-provided KRW amount"
+    return "ok", ""
+
+
+def cashflow_role_for(tx_type: str, source_type: str, asset_type: str = "") -> str:
+    tx = str(tx_type or "").strip().lower()
+    source = str(source_type or "").strip().lower()
+    asset = str(asset_type or "").strip().lower()
+    if source in BALANCE_SOURCE_TYPES:
+        return "valuation_snapshot"
+    if asset == "cash" and tx == "unknown":
+        return "cash_balance"
+    return {
+        "deposit": "external_deposit",
+        "withdrawal": "external_withdrawal",
+        "dividend": "income_dividend",
+        "interest": "income_interest",
+        "exchange": "internal_fx_exchange",
+        "buy": "trade_settlement",
+        "sell": "trade_settlement",
+        "fee": "expense_fee",
+        "tax": "expense_tax",
+        "transfer": "internal_transfer",
+    }.get(tx, "unknown")
+
+
+def amount_kind_for(
+    tx_type: str,
+    source_type: str,
+    asset_type: str,
+    trade_amount: float,
+    settlement_amount: float,
+    fee: float,
+    tax: float,
+    evaluation_amount: float,
+    unrealized_pnl: float,
+    quantity: float,
+    price: float,
+) -> str:
+    source = str(source_type or "").strip().lower()
+    tx = str(tx_type or "").strip().lower()
+    asset = str(asset_type or "").strip().lower()
+    if source in BALANCE_SOURCE_TYPES:
+        if asset == "cash":
+            return "cash_balance"
+        if abs(evaluation_amount) > 1e-9:
+            return "evaluation_amount"
+        if abs(unrealized_pnl) > 1e-9:
+            return "unrealized_pnl"
+    if tx == "dividend":
+        return "dividend"
+    if tx == "interest":
+        return "interest"
+    if tx == "exchange":
+        return "fx_exchange_leg"
+    if tx == "fee" or (abs(fee) > 1e-9 and not any(abs(v) > 1e-9 for v in [trade_amount, settlement_amount])):
+        return "fee"
+    if tx == "tax" or (abs(tax) > 1e-9 and not any(abs(v) > 1e-9 for v in [trade_amount, settlement_amount])):
+        return "tax"
+    if tx in {"buy", "sell"} and abs(trade_amount) > 1e-9:
+        return "trade_amount"
+    if tx in {"deposit", "withdrawal"} and abs(settlement_amount or trade_amount) > 1e-9:
+        return "settlement_amount"
+    if abs(trade_amount) > 1e-9:
+        return "trade_amount"
+    if abs(settlement_amount) > 1e-9:
+        return "settlement_amount"
+    if abs(price) > 1e-9:
+        return "unit_price"
+    if abs(quantity) > 1e-9:
+        return "quantity"
+    return "unknown"
+
+
+def primary_amount_for_kind(
+    amount_kind: str,
+    trade_amount: float,
+    settlement_amount: float,
+    fee: float,
+    tax: float,
+    evaluation_amount: float,
+    unrealized_pnl: float,
+    quantity: float,
+    price: float,
+) -> float:
+    return {
+        "trade_amount": trade_amount,
+        "settlement_amount": settlement_amount,
+        "fee": fee,
+        "tax": tax,
+        "dividend": settlement_amount or trade_amount,
+        "interest": settlement_amount or trade_amount,
+        "evaluation_amount": evaluation_amount,
+        "unrealized_pnl": unrealized_pnl,
+        "cash_balance": settlement_amount or trade_amount or evaluation_amount,
+        "fx_exchange_leg": settlement_amount or trade_amount,
+        "unit_price": price,
+        "quantity": quantity,
+    }.get(amount_kind, 0.0)
+
+
+def is_money_amount_kind(amount_kind: str) -> bool:
+    return amount_kind not in {"quantity", "unit_price", "fx_rate", "unknown"}
+
+
 def normalize_date(value: Any) -> str:
     if value is None or (isinstance(value, float) and pd.isna(value)):
         return ""
@@ -345,6 +505,8 @@ def classify_transaction_type(text: Any) -> str:
         ("deposit", ["deposit"]),
         ("withdrawal", ["withdrawal", "withdraw"]),
         ("exchange", ["exchange"]),
+        ("dividend", ["dividend", "div"]),
+        ("interest", ["interest"]),
         ("fee", ["fee"]),
         ("tax", ["tax"]),
     ]:
@@ -417,10 +579,25 @@ def is_valid_normalized_date(value: Any) -> bool:
     return bool(re.fullmatch(r"\d{4}-\d{2}-\d{2}", str(value or "").strip()))
 
 
+def boolish_text(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
+
+
 def is_principal_cashflow_row(row: dict[str, Any] | pd.Series, tolerance: float = 1e-9) -> bool:
     tx_type = str(_row_value(row, "transaction_type") or "").strip().lower()
     if tx_type not in {"deposit", "withdrawal"}:
         return False
+    role = str(_row_value(row, "cashflow_role") or "").strip().lower()
+    if role:
+        expected_role = "external_deposit" if tx_type == "deposit" else "external_withdrawal"
+        if role != expected_role:
+            return False
+        if not boolish_text(_row_value(row, "affects_principal")):
+            return False
+        if str(_row_value(row, "amount_review_status") or "").strip().lower() != "ok":
+            return False
     if not is_valid_normalized_date(_row_value(row, "trade_date")):
         return False
     if not is_blank_text(_row_value(row, "ticker")):
@@ -996,6 +1173,9 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         if not trade_amount:
             trade_amount = deposit_amount or withdrawal_amount
         settlement_amount = parse_korean_number(raw.get(cols["settlement_amount"])) if cols.get("settlement_amount") is not None else trade_amount
+        price = parse_korean_number(raw.get(cols["price"])) if cols.get("price") is not None else 0.0
+        fee = parse_korean_number(raw.get(cols["fee"])) if cols.get("fee") is not None else 0.0
+        tax = parse_korean_number(raw.get(cols["tax"])) if cols.get("tax") is not None else 0.0
         evaluation_amount_value = parse_korean_number(raw.get(cols["evaluation_amount"])) if cols.get("evaluation_amount") is not None else 0.0
         unrealized_pnl_value = parse_korean_number(raw.get(cols["unrealized_pnl"])) if cols.get("unrealized_pnl") is not None else 0.0
         pnl_pct_value = parse_korean_percent(raw.get(cols["pnl_pct"])) if cols.get("pnl_pct") is not None else pd.NA
@@ -1011,6 +1191,73 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         if asset_type == "cash":
             currency = normalize_cash_currency(name, ticker, currency)
         fx_rate_for_stable = "" if pd.isna(fx_rate) else fx_rate
+        currency_native = currency
+        fx_rate_to_krw = fx_rate
+        quantity_unit = "shares" if abs(quantity) > 1e-9 and asset_type != "cash" else ""
+        price_kind = "unit_price" if abs(price) > 1e-9 else ""
+        price_unit = f"{currency_native}/share" if price_kind and quantity_unit == "shares" else (currency_native if price_kind else "")
+        amount_kind = amount_kind_for(
+            tx_type,
+            row_source_type,
+            asset_type,
+            trade_amount,
+            settlement_amount,
+            fee,
+            tax,
+            evaluation_amount_value,
+            unrealized_pnl_value,
+            quantity,
+            price,
+        )
+        amount_native_value = primary_amount_for_kind(
+            amount_kind,
+            trade_amount,
+            settlement_amount,
+            fee,
+            tax,
+            evaluation_amount_value,
+            unrealized_pnl_value,
+            quantity,
+            price,
+        )
+        amount_native, amount_krw, amount_krw_source = convert_native_to_krw(amount_native_value, currency_native, fx_rate_to_krw)
+        amount_is_money = is_money_amount_kind(amount_kind)
+        amount_review_status, amount_review_reason = (
+            money_status(currency_native, fx_rate_to_krw, amount_native_value)
+            if amount_is_money
+            else ("not_applicable", "")
+        )
+        if not amount_is_money:
+            amount_basis = "not_money" if amount_kind in {"quantity", "unit_price"} else "unknown"
+            amount_confidence = "official_raw" if amount_kind in {"quantity", "unit_price"} else "unavailable"
+        elif amount_review_status == "ok" and str(currency_native).upper() == "KRW":
+            amount_basis = "raw_native"
+            amount_confidence = "official_raw"
+        elif amount_review_status == "ok":
+            amount_basis = "derived_krw_from_fx"
+            amount_confidence = "derived"
+            amount_krw_source = "fx_rate_to_krw"
+        else:
+            amount_basis = "raw_native"
+            amount_confidence = "unavailable"
+        fx_rate_status = (
+            "available"
+            if normalized_fx_rate_value(fx_rate_to_krw) is not None
+            else ("not_required" if currency_native == "KRW" else "missing")
+        )
+        fx_rate_source = "raw" if fx_rate_status == "available" else ""
+        cashflow_role = cashflow_role_for(tx_type, row_source_type, asset_type)
+        affects_principal = cashflow_role in {"external_deposit", "external_withdrawal"} and amount_review_status == "ok"
+        affects_profit = cashflow_role in {"income_dividend", "income_interest"} or amount_kind == "unrealized_pnl"
+        is_internal_transfer = cashflow_role in {"internal_fx_exchange", "internal_transfer"}
+        is_valuation_snapshot = cashflow_role == "valuation_snapshot"
+        is_trade_settlement = cashflow_role == "trade_settlement"
+        trade_amount_native, trade_amount_krw, _ = convert_native_to_krw(trade_amount, currency_native, fx_rate_to_krw)
+        settlement_amount_native, settlement_amount_krw, _ = convert_native_to_krw(settlement_amount, currency_native, fx_rate_to_krw)
+        fee_native, fee_krw, _ = convert_native_to_krw(fee, currency_native, fx_rate_to_krw)
+        tax_native, tax_krw, _ = convert_native_to_krw(tax, currency_native, fx_rate_to_krw)
+        evaluation_amount_native, evaluation_amount_krw, _ = convert_native_to_krw(evaluation_amount_value, currency_native, fx_rate_to_krw)
+        unrealized_pnl_native, unrealized_pnl_krw, _ = convert_native_to_krw(unrealized_pnl_value, currency_native, fx_rate_to_krw)
 
         if not any([date, ticker, name, raw_type, trade_amount, settlement_amount, evaluation_amount_value, balance_quantity_value]):
             continue
@@ -1018,11 +1265,12 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         stable = {
             "source_file_type": row_source_type, "account_type": account_type, "ticker": ticker,
             "security_name": name, "trade_date": date, "trade_time": normalize_time(raw.get(cols["trade_time"])) if cols.get("trade_time") is not None else "",
-            "transaction_type": tx_type, "quantity": quantity, "price": parse_korean_number(raw.get(cols["price"])) if cols.get("price") is not None else 0.0,
+            "transaction_type": tx_type, "quantity": quantity, "price": price,
             "trade_amount": trade_amount, "settlement_amount": settlement_amount,
-            "fee": parse_korean_number(raw.get(cols["fee"])) if cols.get("fee") is not None else 0.0,
-            "tax": parse_korean_number(raw.get(cols["tax"])) if cols.get("tax") is not None else 0.0,
+            "fee": fee, "tax": tax,
             "currency": currency, "fx_rate": fx_rate_for_stable, "raw_memo": memo,
+            "cashflow_role": cashflow_role, "amount_review_status": amount_review_status,
+            "affects_principal": affects_principal,
         }
         if principal_cashflow_import_key_needs_raw_position(stable):
             stable["source_sheet"] = sheet_name
@@ -1041,11 +1289,11 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "trade_time": stable["trade_time"],
             "transaction_type": tx_type,
             "quantity": quantity,
-            "price": stable["price"],
+            "price": price,
             "trade_amount": trade_amount,
             "settlement_amount": settlement_amount,
-            "fee": stable["fee"],
-            "tax": stable["tax"],
+            "fee": fee,
+            "tax": tax,
             "currency": currency,
             "fx_rate": fx_rate,
             "balance_quantity": balance_quantity,
@@ -1053,6 +1301,44 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "unrealized_pnl": unrealized_pnl,
             "pnl_pct": pnl_pct,
             "raw_memo": redact_sensitive(memo),
+            "quantity_unit": quantity_unit,
+            "price_unit": price_unit,
+            "price_kind": price_kind,
+            "money_unit_native": currency_native if amount_is_money else "",
+            "money_unit_krw": "KRW" if amount_is_money else "",
+            "amount_kind": amount_kind,
+            "amount_basis": amount_basis,
+            "amount_sign_convention": "raw_positive_transaction_type_sign",
+            "amount_confidence": amount_confidence,
+            "amount_review_status": amount_review_status,
+            "amount_review_reason": amount_review_reason,
+            "currency_native": currency_native,
+            "fx_rate_to_krw": fx_rate_to_krw,
+            "fx_rate_source": fx_rate_source,
+            "fx_rate_status": fx_rate_status,
+            "amount_native": amount_native if amount_is_money else pd.NA,
+            "amount_krw": amount_krw if amount_is_money else pd.NA,
+            "amount_krw_source": amount_krw_source,
+            "amount_normalization_status": amount_review_status,
+            "amount_normalization_reason": amount_review_reason,
+            "trade_amount_native": trade_amount_native,
+            "trade_amount_krw": trade_amount_krw,
+            "settlement_amount_native": settlement_amount_native,
+            "settlement_amount_krw": settlement_amount_krw,
+            "fee_native": fee_native,
+            "fee_krw": fee_krw,
+            "tax_native": tax_native,
+            "tax_krw": tax_krw,
+            "evaluation_amount_native": evaluation_amount_native if is_balance_source else pd.NA,
+            "evaluation_amount_krw": evaluation_amount_krw if is_balance_source else pd.NA,
+            "unrealized_pnl_native": unrealized_pnl_native if is_balance_source else pd.NA,
+            "unrealized_pnl_krw": unrealized_pnl_krw if is_balance_source else pd.NA,
+            "cashflow_role": cashflow_role,
+            "affects_principal": affects_principal,
+            "affects_profit": affects_profit,
+            "is_internal_transfer": is_internal_transfer,
+            "is_valuation_snapshot": is_valuation_snapshot,
+            "is_trade_settlement": is_trade_settlement,
             "_source_sheet": sheet_name,
             "_raw_row_number": int(idx) + 1,
         }
@@ -1078,7 +1364,41 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
         "unclassified_rows.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "skipped_rows.csv": pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS),
         "raw_rows_audit.csv": pd.DataFrame(columns=["import_id", "source_file", "sheet", "row_number", "raw_json"]),
+        "amount_unit_audit.csv": pd.DataFrame(columns=AMOUNT_UNIT_AUDIT_COLUMNS),
+        "unit_mismatch_audit.csv": pd.DataFrame(columns=UNIT_MISMATCH_AUDIT_COLUMNS),
     }
+
+
+def amount_unit_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=AMOUNT_UNIT_AUDIT_COLUMNS)
+    view = rows.copy()
+    rename_map = {
+        "quantity": "raw_quantity",
+        "price": "raw_price",
+        "trade_amount": "raw_trade_amount",
+        "settlement_amount": "raw_settlement_amount",
+        "fee": "raw_fee",
+        "tax": "raw_tax",
+    }
+    view = view.rename(columns=rename_map)
+    return view.reindex(columns=AMOUNT_UNIT_AUDIT_COLUMNS)
+
+
+def unit_mismatch_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=UNIT_MISMATCH_AUDIT_COLUMNS)
+    status = rows.get("amount_normalization_status", pd.Series("", index=rows.index)).fillna("").astype(str).str.lower()
+    currency = rows.get("currency_native", pd.Series("", index=rows.index)).fillna("").astype(str).str.upper()
+    role = rows.get("cashflow_role", pd.Series("", index=rows.index)).fillna("").astype(str).str.lower()
+    amount_native = pd.to_numeric(rows.get("amount_native", pd.Series(0, index=rows.index)), errors="coerce").fillna(0)
+    amount_krw = pd.to_numeric(rows.get("amount_krw", pd.Series(0, index=rows.index)), errors="coerce").fillna(0)
+    mask = (
+        status.isin({"fx_missing", "currency_ambiguous", "unit_ambiguous", "needs_review"})
+        | role.isin({"internal_fx_exchange", "income_dividend", "income_interest"})
+        | ((currency != "KRW") & (amount_native.round(6) != amount_krw.round(6)))
+    )
+    return rows.loc[mask].reindex(columns=UNIT_MISMATCH_AUDIT_COLUMNS)
 
 
 def normalize_holding_identity(row: dict[str, Any] | pd.Series) -> dict[str, str]:
@@ -1487,6 +1807,8 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
     summary.duplicate_rows_removed = before - len(combined)
     combined, helper_skipped_rows = split_skipped_broker_helper_rows(combined)
     outputs["skipped_rows.csv"] = combine_skipped_rows(adjacent_skipped_rows, helper_skipped_rows)
+    outputs["amount_unit_audit.csv"] = amount_unit_audit_rows(combined)
+    outputs["unit_mismatch_audit.csv"] = unit_mismatch_audit_rows(combined)
     summary.unclassified_rows = int((combined.get("transaction_type", pd.Series(dtype=str)) == "unknown").sum()) if not combined.empty else 0
     summary.unknown_columns = len(unknown_columns)
 

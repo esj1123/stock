@@ -163,13 +163,58 @@ def is_valid_currency_code(value: object) -> bool:
 def invalid_currency_findings(holdings: list[dict[str, str]]) -> list[str]:
     findings: list[str] = []
     for idx, row in enumerate(holdings, start=2):
-        currency = row.get("currency", "")
-        if is_blank(currency):
-            findings.append(f"row {idx} blank currency")
-        elif looks_like_fx_rate_value(currency):
-            findings.append(f"row {idx} currency looks like FX rate: {currency}")
-        elif not is_valid_currency_code(currency):
-            findings.append(f"row {idx} invalid currency={currency}")
+        for field in ["currency", "currency_native", "money_unit_native", "money_unit_krw"]:
+            if field not in row:
+                continue
+            currency = row.get(field, "")
+            if is_blank(currency):
+                if field in {"currency", "currency_native"}:
+                    findings.append(f"row {idx} blank {field}")
+                continue
+            elif looks_like_fx_rate_value(currency):
+                findings.append(f"row {idx} {field} looks like FX rate: {currency}")
+            elif not is_valid_currency_code(currency):
+                findings.append(f"row {idx} invalid {field}={currency}")
+    return findings
+
+
+def non_krw_amount_without_fx_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    broker_sources = {"broker_krw", "broker_provided_krw"}
+    fx_sources = {"fx_rate_to_krw", "derived_krw_from_fx"}
+    for idx, row in enumerate(rows, start=2):
+        currency = str(row.get("currency_native", "") or row.get("currency", "")).strip().upper()
+        if is_blank(currency) or currency == "KRW":
+            continue
+        if is_blank(row.get("amount_krw", "")):
+            continue
+        fx_rate = row.get("fx_rate_to_krw", "") or row.get("fx_rate", "")
+        amount_source = str(row.get("amount_krw_source", "") or "").strip().lower()
+        amount_basis = str(row.get("amount_basis", "") or "").strip().lower()
+        if is_blank(fx_rate) and amount_source not in broker_sources | fx_sources and amount_basis not in broker_sources:
+            findings.append(
+                f"row {idx} non-KRW native amount has amount_krw without FX or broker KRW source: "
+                f"currency_native={currency} amount_krw={row.get('amount_krw')}"
+            )
+    return findings
+
+
+def principal_unit_misuse_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        role = str(row.get("cashflow_role", "") or "").strip().lower()
+        affects_principal = str(row.get("affects_principal", "") or "").strip().lower() in {"true", "1", "yes", "y"}
+        if not (affects_principal or role in {"external_deposit", "external_withdrawal"} or is_principal_cashflow_row(row)):
+            continue
+        amount_kind = str(row.get("amount_kind", "") or "").strip().lower()
+        quantity = float(row.get("quantity") or 0)
+        price = float(row.get("price") or 0)
+        if amount_kind in {"quantity", "unit_price"} or abs(quantity) > 1e-9 or abs(price) > 1e-9:
+            findings.append(
+                f"row {idx} principal row uses quantity/unit_price: "
+                f"transaction_type={row.get('transaction_type')} amount_kind={row.get('amount_kind')} "
+                f"quantity={row.get('quantity')} price={row.get('price')}"
+            )
     return findings
 
 
@@ -390,6 +435,19 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     else:
         write_result(results, "processed_holdings currency code contract", "PASS", "currency values are 3-letter codes.")
 
+    all_normalized_rows = [*transactions, *holdings, *cashflows]
+    invalid_normalized_currencies = invalid_currency_findings(all_normalized_rows)
+    if invalid_normalized_currencies:
+        write_result(results, "normalized currency unit contract", "FAIL", "; ".join(invalid_normalized_currencies[:5]))
+    else:
+        write_result(results, "normalized currency unit contract", "PASS", "currency and currency_native values are 3-letter codes.")
+
+    non_krw_without_fx = non_krw_amount_without_fx_findings(all_normalized_rows)
+    if non_krw_without_fx:
+        write_result(results, "non-KRW amount KRW conversion provenance", "FAIL", "; ".join(non_krw_without_fx[:5]))
+    else:
+        write_result(results, "non-KRW amount KRW conversion provenance", "PASS", "non-KRW amount_krw values have FX or broker KRW source.")
+
     cash_qa_findings = cash_company_qa_findings(processed_dir, holdings)
     if cash_qa_findings:
         write_result(results, "cash assets excluded from Company QA", "FAIL", "; ".join(cash_qa_findings[:5]))
@@ -406,6 +464,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "processed_cashflows principal-only contract", "FAIL", "; ".join(bad_cashflow_rows[:5]))
     else:
         write_result(results, "processed_cashflows principal-only contract", "PASS", f"{len(cashflows)} principal cashflow rows.")
+
+    principal_unit_misuse = principal_unit_misuse_findings(cashflows)
+    if principal_unit_misuse:
+        write_result(results, "principal cashflow amount unit contract", "FAIL", "; ".join(principal_unit_misuse[:5]))
+    else:
+        write_result(results, "principal cashflow amount unit contract", "PASS", "principal cashflows do not use quantity or unit price as amount.")
 
     skip_findings = skipped_rows_findings(processed_dir, unclassified_rows)
     if skip_findings:
