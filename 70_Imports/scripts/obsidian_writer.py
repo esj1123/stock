@@ -289,7 +289,7 @@ def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: st
         "## Snapshot",
         '<div class="stock-kpi-grid">',
         snapshot_card("Holdings", metric(summary, "holding_count", "0")),
-        snapshot_card("Principal", metric(summary, "total_cost", "-"), "preliminary cost basis"),
+        snapshot_card("Portfolio Cost Basis", metric(summary, "total_cost", "-"), "preliminary; not net external principal"),
         snapshot_card("Total Value", metric(summary, "total_portfolio_value", "-")),
         snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-"), "preliminary"),
         snapshot_card("Return", metric(summary, "pnl_pct", "-"), "preliminary pnl_pct"),

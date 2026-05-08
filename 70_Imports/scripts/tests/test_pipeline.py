@@ -1144,7 +1144,8 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
 
     content = dashboard_content("Portfolio.md", processed)
 
-    assert "Principal" in content
+    assert "Portfolio Cost Basis" in content
+    assert "preliminary; not net external principal" in content
     assert "Total Value" in content
     assert "Unrealized PnL" in content
     assert "Return" in content
