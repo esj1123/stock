@@ -28,6 +28,29 @@ BLANK_VALUES = {"", "nan", "none", "na", "n/a", "<na>"}
 COMPANY_QA_EXCEPTION_IDS = {"INV-EX-03", "INV-EX-08"}
 CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 
+REQUIRED_OUTPUT_SCHEMAS = {
+    "processed_income.csv": [
+        "source_file", "source_file_type", "account_type", "market", "trade_date", "trade_time",
+        "ticker", "security_name", "income_type", "currency_native", "amount_native", "amount_krw",
+        "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
+        "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
+        "affects_profit", "raw_memo",
+    ],
+    "processed_expenses.csv": [
+        "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
+        "security_name", "expense_type", "currency_native", "amount_native", "amount_krw",
+        "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis", "amount_confidence",
+        "amount_review_status", "amount_review_reason", "affects_principal", "affects_profit",
+        "raw_memo",
+    ],
+    "processed_fx_events.csv": [
+        "fx_event_id", "source_file", "source_file_type", "account_type", "trade_date", "trade_time",
+        "leg", "from_currency", "to_currency", "currency_native", "amount_native", "amount_krw",
+        "fx_rate_to_krw", "fx_rate_source", "fx_pair_status", "cashflow_role", "affects_principal",
+        "affects_profit", "is_internal_transfer", "amount_review_status", "amount_review_reason", "raw_memo",
+    ],
+}
+
 SENSITIVE_PATTERNS = [
     re.compile(r"\b(?!20\d{2}-\d{2}-\d{2}\b)\d{2,6}-\d{2,8}-\d{2,8}\b"),
     re.compile(r"\b\d{6}-[1-4]\d{6}\b"),
@@ -56,6 +79,20 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def read_csv_header(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or [])
+
+
+def boolish(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
 
 
 def write_result(results: list[GateResult], name: str, status: str, detail: str) -> None:
@@ -180,7 +217,7 @@ def invalid_currency_findings(holdings: list[dict[str, str]]) -> list[str]:
 
 def non_krw_amount_without_fx_findings(rows: list[dict[str, str]]) -> list[str]:
     findings: list[str] = []
-    broker_sources = {"broker_krw", "broker_provided_krw"}
+    broker_sources = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
     fx_sources = {"fx_rate_to_krw", "derived_krw_from_fx"}
     for idx, row in enumerate(rows, start=2):
         currency = str(row.get("currency_native", "") or row.get("currency", "")).strip().upper()
@@ -215,6 +252,72 @@ def principal_unit_misuse_findings(rows: list[dict[str, str]]) -> list[str]:
                 f"transaction_type={row.get('transaction_type')} amount_kind={row.get('amount_kind')} "
                 f"quantity={row.get('quantity')} price={row.get('price')}"
             )
+    return findings
+
+
+def processed_output_schema_findings(processed_dir: Path) -> list[str]:
+    findings: list[str] = []
+    for name, required_columns in REQUIRED_OUTPUT_SCHEMAS.items():
+        path = processed_dir / name
+        if not path.exists():
+            findings.append(f"{name} is missing")
+            continue
+        header = read_csv_header(path)
+        missing = [col for col in required_columns if col not in header]
+        if missing:
+            findings.append(f"{name} missing required columns: {', '.join(missing)}")
+    return findings
+
+
+def money_event_contract_findings(rows: list[dict[str, str]], label: str, type_col: str, allowed_types: set[str]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        event_type = str(row.get(type_col, "") or "").strip().lower()
+        if event_type not in allowed_types:
+            findings.append(f"{label} row {idx} invalid {type_col}={row.get(type_col)}")
+        if boolish(row.get("affects_principal", "")):
+            findings.append(f"{label} row {idx} affects principal")
+        if not boolish(row.get("affects_profit", "")):
+            findings.append(f"{label} row {idx} does not affect profit")
+        status = str(row.get("amount_review_status", "") or "").strip().lower()
+        if is_blank(status):
+            findings.append(f"{label} row {idx} has blank amount_review_status")
+        currency = str(row.get("currency_native", "") or "").strip().upper()
+        amount_native = row.get("amount_native", "")
+        amount_krw = row.get("amount_krw", "")
+        if status == "ok" and not is_blank(amount_native) and is_blank(amount_krw):
+            findings.append(f"{label} row {idx} has status ok but blank amount_krw")
+        if currency and currency != "KRW" and not is_blank(amount_native) and is_blank(amount_krw) and status != "fx_missing":
+            findings.append(f"{label} row {idx} non-KRW amount without KRW conversion is not marked fx_missing")
+    return findings
+
+
+def income_contract_findings(rows: list[dict[str, str]]) -> list[str]:
+    return money_event_contract_findings(rows, "processed_income", "income_type", {"dividend", "interest", "distribution"})
+
+
+def expense_contract_findings(rows: list[dict[str, str]]) -> list[str]:
+    return money_event_contract_findings(rows, "processed_expenses", "expense_type", {"fee", "tax"})
+
+
+def fx_event_contract_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    allowed_pair_statuses = {"paired", "partial", "unpaired", "needs_review", ""}
+    for idx, row in enumerate(rows, start=2):
+        if boolish(row.get("affects_principal", "")):
+            findings.append(f"processed_fx_events row {idx} affects principal")
+        if boolish(row.get("affects_profit", "")):
+            findings.append(f"processed_fx_events row {idx} affects profit")
+        role = str(row.get("cashflow_role", "") or "").strip().lower()
+        if role != "internal_fx_exchange" and not boolish(row.get("is_internal_transfer", "")):
+            findings.append(f"processed_fx_events row {idx} is not marked as an internal FX transfer")
+        pair_status = str(row.get("fx_pair_status", "") or "").strip().lower()
+        if pair_status not in allowed_pair_statuses:
+            findings.append(f"processed_fx_events row {idx} invalid fx_pair_status={row.get('fx_pair_status')}")
+        if not is_blank(row.get("amount_native", "")) and is_blank(row.get("amount_review_status", "")):
+            findings.append(f"processed_fx_events row {idx} has amount_native but blank amount_review_status")
+        if pair_status == "paired" and is_blank(row.get("fx_event_id", "")):
+            findings.append(f"processed_fx_events row {idx} paired leg has blank fx_event_id")
     return findings
 
 
@@ -382,8 +485,17 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     transactions = read_csv_rows(processed_dir / "processed_transactions.csv")
     holdings = read_csv_rows(processed_dir / "processed_holdings.csv")
     cashflows = read_csv_rows(processed_dir / "processed_cashflows.csv")
+    income = read_csv_rows(processed_dir / "processed_income.csv")
+    expenses = read_csv_rows(processed_dir / "processed_expenses.csv")
+    fx_events = read_csv_rows(processed_dir / "processed_fx_events.csv")
     unclassified_rows = read_csv_rows(processed_dir / "unclassified_rows.csv")
     summary = summary_map(processed_dir)
+
+    output_schema_findings = processed_output_schema_findings(processed_dir)
+    if output_schema_findings:
+        write_result(results, "income/expense/FX output schema contract", "FAIL", "; ".join(output_schema_findings[:5]))
+    else:
+        write_result(results, "income/expense/FX output schema contract", "PASS", "required output files exist with expected columns.")
 
     if not source_index:
         if not raw_excel_files(raw_dir):
@@ -435,7 +547,7 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     else:
         write_result(results, "processed_holdings currency code contract", "PASS", "currency values are 3-letter codes.")
 
-    all_normalized_rows = [*transactions, *holdings, *cashflows]
+    all_normalized_rows = [*transactions, *holdings, *cashflows, *income, *expenses, *fx_events]
     invalid_normalized_currencies = invalid_currency_findings(all_normalized_rows)
     if invalid_normalized_currencies:
         write_result(results, "normalized currency unit contract", "FAIL", "; ".join(invalid_normalized_currencies[:5]))
@@ -470,6 +582,24 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "principal cashflow amount unit contract", "FAIL", "; ".join(principal_unit_misuse[:5]))
     else:
         write_result(results, "principal cashflow amount unit contract", "PASS", "principal cashflows do not use quantity or unit price as amount.")
+
+    income_findings = income_contract_findings(income)
+    if income_findings:
+        write_result(results, "processed_income non-principal contract", "FAIL", "; ".join(income_findings[:5]))
+    else:
+        write_result(results, "processed_income non-principal contract", "PASS", f"{len(income)} income rows do not affect principal.")
+
+    expense_findings = expense_contract_findings(expenses)
+    if expense_findings:
+        write_result(results, "processed_expenses non-principal contract", "FAIL", "; ".join(expense_findings[:5]))
+    else:
+        write_result(results, "processed_expenses non-principal contract", "PASS", f"{len(expenses)} expense rows do not affect principal.")
+
+    fx_findings = fx_event_contract_findings(fx_events)
+    if fx_findings:
+        write_result(results, "processed_fx_events internal-transfer contract", "FAIL", "; ".join(fx_findings[:5]))
+    else:
+        write_result(results, "processed_fx_events internal-transfer contract", "PASS", f"{len(fx_events)} FX event legs are internal transfers.")
 
     skip_findings = skipped_rows_findings(processed_dir, unclassified_rows)
     if skip_findings:

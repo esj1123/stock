@@ -38,9 +38,13 @@ from quality_gate import (
     changed_entries,
     company_note_duplicate_findings,
     duplicate_overseas_holding_findings,
+    expense_contract_findings,
+    fx_event_contract_findings,
+    income_contract_findings,
     invalid_currency_findings,
     non_krw_amount_without_fx_findings,
     principal_unit_misuse_findings,
+    processed_output_schema_findings,
     scan_generated_markdown_sensitive,
     snapshot_raw_files,
 )
@@ -866,6 +870,63 @@ def test_quality_gate_flags_non_krw_amount_krw_without_fx_or_broker_source():
     ])
     assert findings
     assert "non-KRW native amount has amount_krw without FX or broker KRW source" in findings[0]
+    assert non_krw_amount_without_fx_findings([
+        {"ticker": "AAPL", "currency_native": "USD", "amount_native": "412", "amount_krw": "600000", "fx_rate_to_krw": "", "amount_basis": "broker_krw_amount"},
+    ]) == []
+
+
+def test_quality_gate_requires_stage8_output_schemas(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+
+    findings = processed_output_schema_findings(processed)
+    assert any("processed_income.csv is missing" in finding for finding in findings)
+
+    write_stage8_output_inputs(processed)
+    assert processed_output_schema_findings(processed) == []
+
+    pd.DataFrame(columns=["income_type", "amount_native"]).to_csv(processed / "processed_income.csv", index=False)
+    findings = processed_output_schema_findings(processed)
+    assert any("processed_income.csv missing required columns" in finding for finding in findings)
+
+
+def test_quality_gate_income_expense_fx_contracts():
+    valid_income = [{
+        "income_type": "dividend",
+        "currency_native": "USD",
+        "amount_native": "12.34",
+        "amount_krw": "",
+        "amount_review_status": "fx_missing",
+        "affects_principal": "False",
+        "affects_profit": "True",
+    }]
+    valid_expense = [{
+        "expense_type": "fee",
+        "currency_native": "KRW",
+        "amount_native": "100",
+        "amount_krw": "100",
+        "amount_review_status": "ok",
+        "affects_principal": "False",
+        "affects_profit": "True",
+    }]
+    valid_fx = [{
+        "fx_event_id": "FX-1",
+        "fx_pair_status": "paired",
+        "cashflow_role": "internal_fx_exchange",
+        "is_internal_transfer": "True",
+        "amount_native": "100",
+        "amount_review_status": "ok",
+        "affects_principal": "False",
+        "affects_profit": "False",
+    }]
+
+    assert income_contract_findings(valid_income) == []
+    assert expense_contract_findings(valid_expense) == []
+    assert fx_event_contract_findings(valid_fx) == []
+
+    assert any("affects principal" in finding for finding in income_contract_findings([{**valid_income[0], "affects_principal": "True"}]))
+    assert any("affects principal" in finding for finding in expense_contract_findings([{**valid_expense[0], "affects_principal": "True"}]))
+    assert any("not marked as an internal FX transfer" in finding for finding in fx_event_contract_findings([{**valid_fx[0], "cashflow_role": "", "is_internal_transfer": "False"}]))
 
 
 def test_quality_gate_flags_quantity_or_price_in_principal_totals():
@@ -1924,10 +1985,86 @@ def test_import_review_dashboard_includes_holding_dedupe_summary(tmp_path: Path)
     assert "overseas_balance_retained_over_holdings_duplicate" in content
 
 
+def test_import_review_dashboard_surfaces_stage8_output_status(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {"metric": "raw_file_count", "value": "1"},
+        {"metric": "transaction_history_file_count", "value": "1"},
+        {"metric": "holdings_file_count", "value": "0"},
+        {"metric": "total_portfolio_value_status", "value": "unknown"},
+    ]).to_csv(processed / "portfolio_summary.csv", index=False)
+    pd.DataFrame([
+        {"transaction_type": "unknown", "amount_review_status": "unit_ambiguous"},
+    ]).to_csv(processed / "unclassified_rows.csv", index=False)
+    write_stage8_output_inputs(
+        processed,
+        income_rows=[
+            {
+                "income_type": "dividend",
+                "currency_native": "USD",
+                "amount_native": 12.34,
+                "amount_krw": "",
+                "amount_review_status": "fx_missing",
+                "affects_principal": False,
+                "affects_profit": True,
+            }
+        ],
+        expense_rows=[
+            {
+                "expense_type": "fee",
+                "currency_native": "KRW",
+                "amount_native": 100,
+                "amount_krw": 100,
+                "amount_review_status": "ok",
+                "affects_principal": False,
+                "affects_profit": True,
+            }
+        ],
+        fx_rows=[
+            {
+                "fx_event_id": "FX-1",
+                "fx_pair_status": "partial",
+                "cashflow_role": "internal_fx_exchange",
+                "is_internal_transfer": True,
+                "affects_principal": False,
+                "affects_profit": False,
+                "amount_review_status": "ok",
+            }
+        ],
+    )
+
+    content = dashboard_content("Import_Review.md", processed)
+
+    assert "## Processed Output Availability" in content
+    assert "processed_income.csv" in content
+    assert "processed_expenses.csv" in content
+    assert "processed_fx_events.csv" in content
+    assert "| processed_income.csv | True | 1 | ok |  |" in content
+    assert "| processed_expenses.csv | True | 1 | ok |  |" in content
+    assert "| processed_fx_events.csv | True | 1 | ok |  |" in content
+    assert "## Unresolved Status Counts" in content
+    assert "income_fx_missing" in content
+    assert "| fx_partial | 1 |" in content
+    assert "| unclassified_rows | 1 |" in content
+
+
 def write_cashflow_dashboard_inputs(processed: Path, cashflow_rows: list[dict[str, object]]) -> None:
     processed.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(cashflow_rows).to_csv(processed / "processed_cashflows.csv", index=False)
     pd.DataFrame(columns=["trade_date", "ticker", "security_name", "settlement_amount", "currency"]).to_csv(processed / "processed_dividends.csv", index=False)
+
+
+def write_stage8_output_inputs(
+    processed: Path,
+    income_rows: list[dict[str, object]] | None = None,
+    expense_rows: list[dict[str, object]] | None = None,
+    fx_rows: list[dict[str, object]] | None = None,
+) -> None:
+    processed.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(income_rows or [], columns=INCOME_OUTPUT_COLUMNS).to_csv(processed / "processed_income.csv", index=False)
+    pd.DataFrame(expense_rows or [], columns=EXPENSE_OUTPUT_COLUMNS).to_csv(processed / "processed_expenses.csv", index=False)
+    pd.DataFrame(fx_rows or [], columns=FX_EVENT_COLUMNS).to_csv(processed / "processed_fx_events.csv", index=False)
 
 
 def test_cashflow_dashboard_detail_displays_amount_krw_fallback(tmp_path: Path):
@@ -2080,6 +2217,125 @@ def test_cashflow_dashboard_principal_detail_excludes_non_principal_rows(tmp_pat
     assert "222" not in content
     assert "333" not in content
     assert "444" not in content
+
+
+def test_cashflow_dashboard_surfaces_income_expense_and_fx_summaries(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_cashflow_dashboard_inputs(processed, [
+        {
+            "trade_date": "2025-07-10",
+            "transaction_type": "deposit",
+            "account_type": "comprehensive",
+            "ticker": "",
+            "security_name": "",
+            "quantity": 0,
+            "price": 0,
+            "settlement_amount_krw": 777,
+            "amount_krw": 777,
+            "currency": "KRW",
+            "cashflow_role": "external_principal",
+            "affects_principal": True,
+            "amount_review_status": "ok",
+        },
+    ])
+    write_stage8_output_inputs(
+        processed,
+        income_rows=[
+            {
+                "income_type": "dividend",
+                "currency_native": "USD",
+                "amount_native": 12.34,
+                "amount_krw": "",
+                "amount_review_status": "fx_missing",
+                "affects_principal": False,
+                "affects_profit": True,
+            },
+            {
+                "income_type": "interest",
+                "currency_native": "KRW",
+                "amount_native": 1000,
+                "amount_krw": 1000,
+                "amount_review_status": "ok",
+                "affects_principal": False,
+                "affects_profit": True,
+            },
+        ],
+        expense_rows=[
+            {
+                "expense_type": "fee",
+                "currency_native": "KRW",
+                "amount_native": 12,
+                "amount_krw": 12,
+                "amount_review_status": "ok",
+                "affects_principal": False,
+                "affects_profit": True,
+            },
+            {
+                "expense_type": "tax",
+                "currency_native": "USD",
+                "amount_native": 1.5,
+                "amount_krw": "",
+                "amount_review_status": "fx_missing",
+                "affects_principal": False,
+                "affects_profit": True,
+            },
+        ],
+        fx_rows=[
+            {
+                "fx_event_id": "FX-1",
+                "leg": "KRW_OUT",
+                "currency_native": "KRW",
+                "amount_native": 140000,
+                "amount_krw": 140000,
+                "fx_pair_status": "paired",
+                "cashflow_role": "internal_fx_exchange",
+                "is_internal_transfer": True,
+                "affects_principal": False,
+                "affects_profit": False,
+                "amount_review_status": "ok",
+            },
+            {
+                "fx_event_id": "FX-1",
+                "leg": "USD_IN",
+                "currency_native": "USD",
+                "amount_native": 100,
+                "amount_krw": 140000,
+                "fx_rate_to_krw": 1400,
+                "fx_pair_status": "paired",
+                "cashflow_role": "internal_fx_exchange",
+                "is_internal_transfer": True,
+                "affects_principal": False,
+                "affects_profit": False,
+                "amount_review_status": "ok",
+            },
+            {
+                "fx_event_id": "FX-2",
+                "leg": "PARTIAL",
+                "currency_native": "KRW",
+                "amount_native": 70000,
+                "amount_krw": 70000,
+                "fx_pair_status": "partial",
+                "cashflow_role": "internal_fx_exchange",
+                "is_internal_transfer": True,
+                "affects_principal": False,
+                "affects_profit": False,
+                "amount_review_status": "ok",
+            },
+        ],
+    )
+
+    content = dashboard_content("Cashflows.md", processed)
+
+    assert "| net_principal | 777.0 |" in content
+    assert "## Income summary" in content
+    assert "## Expense summary" in content
+    assert "## FX Events" in content
+    assert "fx_missing: 1" in content
+    assert "| interest | 1 | 1000.0 | KRW | 1000.0 | 0 | ok: 1 |" in content
+    assert "| fee | 1 | 12.0 | 0 | ok: 1 |" in content
+    assert "| paired_events | 1 |" in content
+    assert "| partial_events | 1 |" in content
+    assert "| internal_transfer_rows | 3 |" in content
 
 
 def test_cashflow_dashboard_monthly_activity_sorts_by_month_and_shows_principal(tmp_path: Path):
