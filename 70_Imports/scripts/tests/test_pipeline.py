@@ -890,6 +890,22 @@ def test_quality_gate_requires_stage8_output_schemas(tmp_path: Path):
     assert any("processed_income.csv missing required columns" in finding for finding in findings)
 
 
+def fx_gate_row(**overrides) -> dict[str, str]:
+    row = {
+        "fx_event_id": "FX-1",
+        "fx_pair_status": "paired",
+        "cashflow_role": "internal_fx_exchange",
+        "is_internal_transfer": "True",
+        "currency_native": "KRW",
+        "amount_native": "100",
+        "amount_review_status": "ok",
+        "affects_principal": "False",
+        "affects_profit": "False",
+    }
+    row.update(overrides)
+    return row
+
+
 def test_quality_gate_income_expense_fx_contracts():
     valid_income = [{
         "income_type": "dividend",
@@ -909,16 +925,10 @@ def test_quality_gate_income_expense_fx_contracts():
         "affects_principal": "False",
         "affects_profit": "True",
     }]
-    valid_fx = [{
-        "fx_event_id": "FX-1",
-        "fx_pair_status": "paired",
-        "cashflow_role": "internal_fx_exchange",
-        "is_internal_transfer": "True",
-        "amount_native": "100",
-        "amount_review_status": "ok",
-        "affects_principal": "False",
-        "affects_profit": "False",
-    }]
+    valid_fx = [
+        fx_gate_row(currency_native="KRW"),
+        fx_gate_row(currency_native="USD"),
+    ]
 
     assert income_contract_findings(valid_income) == []
     assert expense_contract_findings(valid_expense) == []
@@ -927,6 +937,53 @@ def test_quality_gate_income_expense_fx_contracts():
     assert any("affects principal" in finding for finding in income_contract_findings([{**valid_income[0], "affects_principal": "True"}]))
     assert any("affects principal" in finding for finding in expense_contract_findings([{**valid_expense[0], "affects_principal": "True"}]))
     assert any("not marked as an internal FX transfer" in finding for finding in fx_event_contract_findings([{**valid_fx[0], "cashflow_role": "", "is_internal_transfer": "False"}]))
+
+
+def test_quality_gate_valid_paired_krw_usd_fx_event_passes():
+    rows = [
+        fx_gate_row(currency_native="KRW"),
+        fx_gate_row(currency_native="USD"),
+    ]
+
+    assert fx_event_contract_findings(rows) == []
+
+
+def test_quality_gate_paired_fx_event_with_one_leg_fails():
+    findings = fx_event_contract_findings([fx_gate_row(currency_native="USD")])
+
+    assert any("has 1 rows; expected exactly 2 rows" in finding for finding in findings)
+
+
+def test_quality_gate_paired_fx_event_with_two_krw_legs_fails():
+    findings = fx_event_contract_findings([
+        fx_gate_row(currency_native="KRW"),
+        fx_gate_row(currency_native="KRW"),
+    ])
+
+    assert any("must have one KRW leg and one non-KRW leg" in finding for finding in findings)
+
+
+def test_quality_gate_paired_fx_event_with_three_rows_fails():
+    findings = fx_event_contract_findings([
+        fx_gate_row(currency_native="KRW"),
+        fx_gate_row(currency_native="USD"),
+        fx_gate_row(currency_native="USD"),
+    ])
+
+    assert any("has 3 rows; expected exactly 2 rows" in finding for finding in findings)
+
+
+def test_quality_gate_valid_partial_fx_event_passes():
+    rows = [
+        fx_gate_row(
+            fx_event_id="FX-2",
+            fx_pair_status="partial",
+            currency_native="KRW",
+            amount_review_reason="only one FX leg detected",
+        )
+    ]
+
+    assert fx_event_contract_findings(rows) == []
 
 
 def test_quality_gate_flags_quantity_or_price_in_principal_totals():

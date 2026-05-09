@@ -303,6 +303,7 @@ def expense_contract_findings(rows: list[dict[str, str]]) -> list[str]:
 def fx_event_contract_findings(rows: list[dict[str, str]]) -> list[str]:
     findings: list[str] = []
     allowed_pair_statuses = {"paired", "partial", "unpaired", "needs_review", ""}
+    paired_groups: dict[str, list[tuple[int, dict[str, str]]]] = {}
     for idx, row in enumerate(rows, start=2):
         if boolish(row.get("affects_principal", "")):
             findings.append(f"processed_fx_events row {idx} affects principal")
@@ -318,6 +319,28 @@ def fx_event_contract_findings(rows: list[dict[str, str]]) -> list[str]:
             findings.append(f"processed_fx_events row {idx} has amount_native but blank amount_review_status")
         if pair_status == "paired" and is_blank(row.get("fx_event_id", "")):
             findings.append(f"processed_fx_events row {idx} paired leg has blank fx_event_id")
+        if pair_status == "paired":
+            event_id = str(row.get("fx_event_id", "") or "").strip()
+            paired_groups.setdefault(event_id, []).append((idx, row))
+    for event_id, group in sorted(paired_groups.items()):
+        label = event_id or "<blank>"
+        row_numbers = ", ".join(str(idx) for idx, _ in group)
+        if len(group) != 2:
+            findings.append(f"processed_fx_events paired fx_event_id={label} has {len(group)} rows; expected exactly 2 rows (rows {row_numbers})")
+        currencies = [str(row.get("currency_native", "") or "").strip().upper() for _, row in group]
+        krw_count = sum(1 for currency in currencies if currency == "KRW")
+        non_krw_count = sum(1 for currency in currencies if currency and currency != "KRW")
+        if krw_count != 1 or non_krw_count != 1:
+            findings.append(f"processed_fx_events paired fx_event_id={label} must have one KRW leg and one non-KRW leg; currencies={currencies}")
+        for idx, row in group:
+            if str(row.get("cashflow_role", "") or "").strip().lower() != "internal_fx_exchange":
+                findings.append(f"processed_fx_events paired fx_event_id={label} row {idx} cashflow_role is not internal_fx_exchange")
+            if not boolish(row.get("is_internal_transfer", "")):
+                findings.append(f"processed_fx_events paired fx_event_id={label} row {idx} is_internal_transfer is not true")
+            if boolish(row.get("affects_principal", "")):
+                findings.append(f"processed_fx_events paired fx_event_id={label} row {idx} affects principal")
+            if boolish(row.get("affects_profit", "")):
+                findings.append(f"processed_fx_events paired fx_event_id={label} row {idx} affects profit")
     return findings
 
 
