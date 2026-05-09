@@ -3104,6 +3104,167 @@ def test_qa_exception_cards_export_for_live_qa_checker():
     assert "[[20_Companies/AEHR/Company\\|AEHR]]" in content
 
 
+def write_reconciliation_qa_inputs(
+    processed: Path,
+    amount_rows: list[dict[str, object]] | None = None,
+    unit_mismatch_rows: list[dict[str, object]] | None = None,
+    cashflow_rows: list[dict[str, object]] | None = None,
+    income_rows: list[dict[str, object]] | None = None,
+    fx_rows: list[dict[str, object]] | None = None,
+    reconciliation_rows: list[dict[str, object]] | None = None,
+) -> None:
+    processed.mkdir(parents=True, exist_ok=True)
+    if amount_rows is not None:
+        pd.DataFrame(amount_rows).to_csv(processed / "amount_unit_audit.csv", index=False)
+    if unit_mismatch_rows is not None:
+        pd.DataFrame(unit_mismatch_rows).to_csv(processed / "unit_mismatch_audit.csv", index=False)
+    if cashflow_rows is not None:
+        pd.DataFrame(cashflow_rows).to_csv(processed / "processed_cashflows.csv", index=False)
+    if income_rows is not None:
+        pd.DataFrame(income_rows).to_csv(processed / "processed_income.csv", index=False)
+    if fx_rows is not None:
+        pd.DataFrame(fx_rows).to_csv(processed / "processed_fx_events.csv", index=False)
+    if reconciliation_rows is not None:
+        pd.DataFrame(reconciliation_rows).to_csv(processed / "reconciliation_summary.csv", index=False)
+
+
+def qa_for_processed(vault: Path) -> pd.DataFrame:
+    return run_qa(vault, vault / "70_Imports" / "processed", dry_run=True)
+
+
+def test_qa_reconciliation_fx_missing_row_creates_exception(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, amount_rows=[
+        {"amount_review_status": "fx_missing", "currency_native": "USD", "amount_native": 12.34, "amount_krw": "", "cashflow_role": "trade_settlement"},
+    ])
+
+    qa = qa_for_processed(tmp_path)
+
+    assert "REC-EX-01" in set(qa["exception_id"])
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-01"), "severity"]) == {"blocking"}
+
+
+def test_qa_reconciliation_currency_ambiguous_row_creates_exception(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, amount_rows=[
+        {"amount_review_status": "currency_ambiguous", "currency_native": "", "amount_native": 412, "amount_krw": "", "cashflow_role": "external_principal"},
+    ])
+
+    qa = qa_for_processed(tmp_path)
+
+    assert "REC-EX-02" in set(qa["exception_id"])
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-02"), "severity"]) == {"blocking"}
+
+
+def test_qa_reconciliation_unit_ambiguous_row_creates_exception(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, amount_rows=[
+        {"amount_review_status": "unit_ambiguous", "currency_native": "KRW", "amount_native": 412, "amount_krw": "", "cashflow_role": "external_principal"},
+    ])
+
+    qa = qa_for_processed(tmp_path)
+
+    assert "REC-EX-03" in set(qa["exception_id"])
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-03"), "severity"]) == {"blocking"}
+
+
+def test_qa_reconciliation_normal_krw_principal_row_creates_no_exception(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(
+        processed,
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "currency_native": "KRW", "settlement_amount_krw": 1000, "amount_krw": 1000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+        amount_rows=[
+            {"amount_review_status": "ok", "currency_native": "KRW", "amount_native": 1000, "amount_krw": 1000, "cashflow_role": "external_principal"},
+        ],
+    )
+
+    qa = qa_for_processed(tmp_path)
+
+    assert not set(qa["exception_id"]).intersection({f"REC-EX-{idx:02d}" for idx in range(1, 10)})
+
+
+def test_qa_reconciliation_income_excluded_from_principal_is_advisory(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, income_rows=[
+        {"income_type": "dividend", "currency_native": "KRW", "amount_native": 1000, "amount_krw": 1000, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+    ])
+
+    qa = qa_for_processed(tmp_path)
+    severities = set(qa.loc[qa["exception_id"].eq("REC-EX-05"), "severity"])
+
+    assert severities == {"advisory"}
+
+
+def test_qa_reconciliation_exchange_excluded_from_principal_is_advisory(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, fx_rows=[
+        {"fx_event_id": "FX-1", "fx_pair_status": "partial", "cashflow_role": "internal_fx_exchange", "is_internal_transfer": True, "amount_review_status": "ok", "affects_principal": False},
+    ])
+
+    qa = qa_for_processed(tmp_path)
+    severities = set(qa.loc[qa["exception_id"].eq("REC-EX-04"), "severity"])
+
+    assert severities == {"advisory"}
+
+
+def test_qa_reconciliation_quantity_price_in_principal_candidate_is_blocking(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, cashflow_rows=[
+        {"transaction_type": "deposit", "cashflow_role": "external_principal", "quantity": 8, "price": 51.5, "amount_kind": "quantity", "amount_review_status": "unit_ambiguous", "affects_principal": True},
+    ])
+
+    qa = qa_for_processed(tmp_path)
+    severities = set(qa.loc[qa["exception_id"].eq("REC-EX-09"), "severity"])
+
+    assert severities == {"blocking"}
+
+
+def test_qa_reconciliation_total_return_unavailable_creates_exception(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, reconciliation_rows=valid_reconciliation_summary_rows(
+        total_assets_krw="",
+        total_assets_status="fx_missing",
+        total_return_krw="",
+        total_return_status="fx_missing",
+        residual_krw="",
+        residual_status="unavailable",
+    ))
+
+    qa = qa_for_processed(tmp_path)
+    severities = set(qa.loc[qa["exception_id"].eq("REC-EX-06"), "severity"])
+
+    assert severities == {"blocking"}
+
+
+def test_qa_reconciliation_residual_threshold_creates_advisory(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, reconciliation_rows=valid_reconciliation_summary_rows(
+        total_return_krw="20000",
+        explained_profit_krw="18000",
+        residual_krw="2000",
+        residual_status="available",
+    ))
+
+    qa = qa_for_processed(tmp_path)
+    severities = set(qa.loc[qa["exception_id"].eq("REC-EX-07"), "severity"])
+
+    assert severities == {"advisory"}
+
+
+def test_qa_reconciliation_non_krw_amount_without_provenance_creates_exception(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, amount_rows=[
+        {"amount_review_status": "ok", "currency_native": "USD", "amount_native": 100, "amount_krw": 140000, "fx_rate_to_krw": "", "amount_krw_source": "", "amount_basis": "raw_native"},
+    ])
+
+    qa = qa_for_processed(tmp_path)
+    severities = set(qa.loc[qa["exception_id"].eq("REC-EX-08"), "severity"])
+
+    assert severities == {"blocking"}
+
+
 def test_generate_qa_exception_for_missing_thesis(tmp_path: Path):
     vault = tmp_path
     company = vault / "20_Companies" / "A"
