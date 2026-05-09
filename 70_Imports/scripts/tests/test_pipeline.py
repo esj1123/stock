@@ -200,19 +200,27 @@ AMOUNT_UNIT_AUDIT_COLUMNS = [
     "raw_price",
     "raw_trade_amount",
     "raw_settlement_amount",
+    "raw_fee",
+    "raw_tax",
     "quantity_unit",
     "price_unit",
     "currency_native",
     "money_unit_native",
+    "money_unit_krw",
     "fx_rate_to_krw",
+    "fx_rate_source",
+    "fx_rate_status",
     "amount_kind",
     "amount_basis",
     "amount_native",
     "amount_krw",
+    "amount_krw_source",
     "cashflow_role",
     "affects_principal",
     "affects_profit",
     "is_internal_transfer",
+    "is_trade_settlement",
+    "is_valuation_snapshot",
     "amount_confidence",
     "amount_review_status",
     "amount_review_reason",
@@ -223,12 +231,27 @@ UNIT_MISMATCH_AUDIT_COLUMNS = [
     "source_file_type",
     "account_type",
     "market",
+    "trade_date",
     "transaction_type",
     "ticker",
+    "security_name",
+    "quantity",
+    "price",
+    "raw_trade_amount",
+    "raw_settlement_amount",
+    "currency",
     "currency_native",
+    "fx_rate_to_krw",
+    "trade_amount_native",
+    "trade_amount_krw",
+    "settlement_amount_native",
+    "settlement_amount_krw",
     "amount_normalization_status",
     "amount_normalization_reason",
     "cashflow_role",
+    "affects_principal",
+    "affects_profit",
+    "is_internal_transfer",
 ]
 
 FX_EVENT_COLUMNS = [
@@ -834,6 +857,94 @@ def test_amount_unit_audit_includes_income_and_expense_rows(tmp_path: Path):
     assert_columns_present(audit, AMOUNT_UNIT_AUDIT_COLUMNS)
     assert {"income_dividend", "income_interest", "expense_fee", "expense_tax"}.issubset(set(audit["cashflow_role"]))
     assert {"dividend", "interest", "fee", "tax"}.issubset(set(audit["amount_kind"]))
+
+
+def test_usd_buy_without_fx_appears_in_unit_mismatch_audit(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [synthetic_transaction_row()])
+
+    amount_audit = read_processed_csv(processed, "amount_unit_audit.csv")
+    mismatch = read_processed_csv(processed, "unit_mismatch_audit.csv")
+
+    assert_columns_present(amount_audit, AMOUNT_UNIT_AUDIT_COLUMNS)
+    assert_columns_present(mismatch, UNIT_MISMATCH_AUDIT_COLUMNS)
+    buy_audit = amount_audit[amount_audit["transaction_type"].eq("buy")].iloc[0]
+    buy_mismatch = mismatch[mismatch["transaction_type"].eq("buy")].iloc[0]
+    assert buy_audit["currency_native"] == "USD"
+    assert buy_audit["amount_review_status"] == "fx_missing"
+    assert buy_audit["money_unit_native"] == "USD"
+    assert buy_audit["money_unit_krw"] == "KRW"
+    assert buy_mismatch["amount_normalization_status"] == "fx_missing"
+    assert is_blank_or_na(buy_mismatch["trade_amount_krw"])
+
+
+def test_isa_krw_buy_has_ok_status_in_amount_unit_audit(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            ticker="005930",
+            security_name="Samsung Electronics",
+            quantity=10,
+            price=70000,
+            trade_amount=700000,
+        )
+    ], file_name="isa_transaction_history.xlsx")
+
+    amount_audit = read_processed_csv(processed, "amount_unit_audit.csv")
+    row = amount_audit[amount_audit["transaction_type"].eq("buy")].iloc[0]
+
+    assert row["currency_native"] == "KRW"
+    assert row["amount_review_status"] == "ok"
+    assert row["amount_native"] == 700000
+    assert row["amount_krw"] == 700000
+    assert row["amount_krw_source"] == "raw_native"
+
+
+def test_fx_exchange_and_dividend_are_visible_in_audit_outputs(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(transaction_raw="exchange", ticker="", security_name="", quantity=0, price=0, trade_amount=100000, currency="KRW"),
+        synthetic_transaction_row(transaction_raw="dividend", ticker="AAPL", security_name="Apple", quantity=0, price=0, trade_amount=12.34, currency="USD"),
+    ])
+
+    amount_audit = read_processed_csv(processed, "amount_unit_audit.csv")
+    mismatch = read_processed_csv(processed, "unit_mismatch_audit.csv")
+
+    exchange = amount_audit[amount_audit["transaction_type"].eq("exchange")].iloc[0]
+    dividend = amount_audit[amount_audit["transaction_type"].eq("dividend")].iloc[0]
+    assert exchange["cashflow_role"] == "internal_fx_exchange"
+    assert boolish(exchange["is_internal_transfer"])
+    assert not boolish(exchange["affects_principal"])
+    assert dividend["cashflow_role"] == "income_dividend"
+    assert boolish(dividend["affects_profit"])
+    assert {"internal_fx_exchange", "income_dividend"}.issubset(set(mismatch["cashflow_role"]))
+
+
+def test_audit_outputs_have_expected_headers_with_no_rows(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    import_raw_dir(tmp_path)
+
+    amount_audit = pd.read_csv(processed / "amount_unit_audit.csv")
+    mismatch = pd.read_csv(processed / "unit_mismatch_audit.csv")
+
+    assert list(amount_audit.columns) == AMOUNT_UNIT_AUDIT_COLUMNS
+    assert list(mismatch.columns) == UNIT_MISMATCH_AUDIT_COLUMNS
+    assert amount_audit.empty
+    assert mismatch.empty
+
+
+def test_quantity_and_price_are_visible_as_units_not_principal(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(transaction_raw="buy", ticker="AAPL", security_name="Apple", quantity=8, price=51.5, trade_amount=0, currency="USD")
+    ])
+
+    amount_audit = read_processed_csv(processed, "amount_unit_audit.csv")
+    row = amount_audit.iloc[0]
+
+    assert row["raw_quantity"] == 8
+    assert row["raw_price"] == 51.5
+    assert row["quantity_unit"] == "shares"
+    assert str(row["price_unit"]).endswith("/share")
+    assert row["amount_kind"] == "unit_price"
+    assert row["amount_basis"] == "not_money"
+    assert not boolish(row["affects_principal"])
 
 
 def test_amount_unit_audit_exists_after_import(tmp_path: Path):

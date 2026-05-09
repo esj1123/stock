@@ -55,14 +55,20 @@ AMOUNT_UNIT_AUDIT_COLUMNS = [
     "source_file", "source_file_type", "account_type", "market", "trade_date", "transaction_type",
     "ticker", "security_name", "raw_quantity", "raw_price", "raw_trade_amount", "raw_settlement_amount",
     "raw_fee", "raw_tax", "quantity_unit", "price_unit", "currency_native", "money_unit_native",
-    "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis", "amount_native", "amount_krw",
+    "money_unit_krw", "fx_rate_to_krw", "fx_rate_source", "fx_rate_status",
+    "amount_kind", "amount_basis", "amount_native", "amount_krw", "amount_krw_source",
     "cashflow_role", "affects_principal", "affects_profit", "is_internal_transfer",
+    "is_trade_settlement", "is_valuation_snapshot",
     "amount_confidence", "amount_review_status", "amount_review_reason",
 ]
 
 UNIT_MISMATCH_AUDIT_COLUMNS = [
-    "source_file", "source_file_type", "account_type", "market", "transaction_type", "ticker",
-    "currency_native", "amount_normalization_status", "amount_normalization_reason", "cashflow_role",
+    "source_file", "source_file_type", "account_type", "market", "trade_date", "transaction_type",
+    "ticker", "security_name", "quantity", "price", "raw_trade_amount", "raw_settlement_amount",
+    "currency", "currency_native", "fx_rate_to_krw", "trade_amount_native", "trade_amount_krw",
+    "settlement_amount_native", "settlement_amount_krw", "amount_normalization_status",
+    "amount_normalization_reason", "cashflow_role", "affects_principal", "affects_profit",
+    "is_internal_transfer",
 ]
 
 FX_EVENT_COLUMNS = [
@@ -1934,17 +1940,37 @@ def amount_unit_audit_rows(rows: pd.DataFrame, extra_rows: pd.DataFrame | None =
 def unit_mismatch_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
     if rows.empty:
         return pd.DataFrame(columns=UNIT_MISMATCH_AUDIT_COLUMNS)
-    status = rows.get("amount_normalization_status", pd.Series("", index=rows.index)).fillna("").astype(str).str.lower()
-    currency = rows.get("currency_native", pd.Series("", index=rows.index)).fillna("").astype(str).str.upper()
-    role = rows.get("cashflow_role", pd.Series("", index=rows.index)).fillna("").astype(str).str.lower()
-    amount_native = pd.to_numeric(rows.get("amount_native", pd.Series(0, index=rows.index)), errors="coerce").fillna(0)
-    amount_krw = pd.to_numeric(rows.get("amount_krw", pd.Series(0, index=rows.index)), errors="coerce").fillna(0)
-    mask = (
-        status.isin({"fx_missing", "currency_ambiguous", "unit_ambiguous", "needs_review"})
-        | role.isin({"internal_fx_exchange", "income_dividend", "income_interest"})
-        | ((currency != "KRW") & (amount_native.round(6) != amount_krw.round(6)))
+    view = rows.copy()
+    status = view.get("amount_normalization_status", pd.Series("", index=view.index)).fillna("").astype(str).str.lower()
+    currency = view.get("currency_native", pd.Series("", index=view.index)).fillna("").astype(str).str.upper()
+    role = view.get("cashflow_role", pd.Series("", index=view.index)).fillna("").astype(str).str.lower()
+    tx_type = view.get("transaction_type", pd.Series("", index=view.index)).fillna("").astype(str).str.lower()
+    amount_native_raw = view.get("amount_native", pd.Series(pd.NA, index=view.index))
+    amount_krw_raw = view.get("amount_krw", pd.Series(pd.NA, index=view.index))
+    amount_native = pd.to_numeric(amount_native_raw, errors="coerce")
+    amount_krw = pd.to_numeric(amount_krw_raw, errors="coerce")
+    principal_excluded = view.apply(
+        lambda row: str(_row_value(row, "transaction_type") or "").strip().lower() in {"deposit", "withdrawal"}
+        and not is_principal_cashflow_row(row),
+        axis=1,
     )
-    return rows.loc[mask].reindex(columns=UNIT_MISMATCH_AUDIT_COLUMNS)
+    mask = (
+        currency.ne("KRW")
+        | status.isin({"fx_missing", "currency_ambiguous", "unit_ambiguous", "needs_review"})
+        | role.isin({"internal_fx_exchange", "income_dividend", "income_interest"})
+        | tx_type.isin({"exchange", "dividend", "interest"})
+        | principal_excluded
+        | (
+            amount_native.notna()
+            & (
+                amount_krw.isna()
+                | (amount_native.round(6) != amount_krw.round(6))
+            )
+        )
+    )
+    view["raw_trade_amount"] = view.get("trade_amount", pd.Series(pd.NA, index=view.index))
+    view["raw_settlement_amount"] = view.get("settlement_amount", pd.Series(pd.NA, index=view.index))
+    return view.loc[mask].reindex(columns=UNIT_MISMATCH_AUDIT_COLUMNS)
 
 
 def money_event_amount_fields(
@@ -1981,12 +2007,19 @@ def money_event_amount_fields(
     fx_rate_source = _row_value(row, "fx_rate_source")
     if is_blank_text(fx_rate_source) and normalized_fx_rate_value(fx_rate_to_krw) is not None:
         fx_rate_source = "raw"
+    fx_rate_status = (
+        "available"
+        if normalized_fx_rate_value(fx_rate_to_krw) is not None
+        else ("not_required" if str(currency_native).upper() == "KRW" else "missing")
+    )
     return {
         "currency_native": currency_native,
         "amount_native": amount_native,
         "amount_krw": amount_krw,
+        "amount_krw_source": amount_krw_source,
         "fx_rate_to_krw": fx_rate_to_krw,
         "fx_rate_source": "" if is_blank_text(fx_rate_source) else fx_rate_source,
+        "fx_rate_status": fx_rate_status,
         "amount_kind": amount_kind,
         "amount_basis": amount_basis,
         "amount_confidence": amount_confidence,
@@ -2112,6 +2145,8 @@ def expense_event_records(rows: pd.DataFrame, tolerance: float = 1e-9) -> list[d
                 "_source_transaction_type": source_transaction_type,
                 "_raw_fee": native_amount if expense_type == "fee" else "",
                 "_raw_tax": native_amount if expense_type == "tax" else "",
+                "_amount_krw_source": amount_fields["amount_krw_source"],
+                "_fx_rate_status": amount_fields["fx_rate_status"],
             })
     return records
 
@@ -2144,16 +2179,21 @@ def attached_expense_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
             "price_unit": "",
             "currency_native": record.get("currency_native", ""),
             "money_unit_native": record.get("currency_native", ""),
+            "money_unit_krw": "KRW",
             "fx_rate_to_krw": record.get("fx_rate_to_krw", ""),
             "fx_rate_source": record.get("fx_rate_source", ""),
+            "fx_rate_status": record.get("_fx_rate_status", ""),
             "amount_kind": record.get("amount_kind", ""),
             "amount_basis": record.get("amount_basis", ""),
             "amount_native": record.get("amount_native", pd.NA),
             "amount_krw": record.get("amount_krw", pd.NA),
+            "amount_krw_source": record.get("_amount_krw_source", ""),
             "cashflow_role": record.get("cashflow_role", ""),
             "affects_principal": record.get("affects_principal", False),
             "affects_profit": record.get("affects_profit", True),
             "is_internal_transfer": False,
+            "is_trade_settlement": False,
+            "is_valuation_snapshot": False,
             "amount_confidence": record.get("amount_confidence", ""),
             "amount_review_status": record.get("amount_review_status", ""),
             "amount_review_reason": record.get("amount_review_reason", ""),
