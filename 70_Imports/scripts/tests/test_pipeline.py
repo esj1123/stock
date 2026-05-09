@@ -2499,6 +2499,47 @@ def test_import_review_dashboard_surfaces_stage8_output_status(tmp_path: Path):
     assert "| unclassified_rows | 1 |" in content
 
 
+def test_import_review_dashboard_surfaces_amount_unit_audit_summary(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {"metric": "raw_file_count", "value": "1"},
+        {"metric": "transaction_history_file_count", "value": "1"},
+        {"metric": "holdings_file_count", "value": "1"},
+        {"metric": "total_portfolio_value_status", "value": "available"},
+    ]).to_csv(processed / "portfolio_summary.csv", index=False)
+    write_stage8_output_inputs(
+        processed,
+        income_rows=[
+            {"income_type": "dividend", "currency_native": "KRW", "amount_native": 1000, "amount_krw": 1000, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+        ],
+        fx_rows=[
+            {"fx_event_id": "FX-1", "fx_pair_status": "paired", "cashflow_role": "internal_fx_exchange", "is_internal_transfer": True, "amount_review_status": "ok"},
+            {"fx_event_id": "FX-1", "fx_pair_status": "paired", "cashflow_role": "internal_fx_exchange", "is_internal_transfer": True, "amount_review_status": "ok"},
+        ],
+    )
+    pd.DataFrame([
+        {"amount_review_status": "fx_missing", "cashflow_role": "trade_settlement", "amount_kind": "trade_amount", "amount_krw": "", "quantity_unit": "", "price_unit": ""},
+        {"amount_review_status": "currency_ambiguous", "cashflow_role": "income_dividend", "amount_kind": "cash_amount", "amount_krw": "", "quantity_unit": "", "price_unit": ""},
+        {"amount_review_status": "unit_ambiguous", "cashflow_role": "internal_fx_exchange", "amount_kind": "quantity", "amount_krw": "", "quantity_unit": "shares", "price_unit": ""},
+    ], columns=AMOUNT_UNIT_AUDIT_COLUMNS).to_csv(processed / "amount_unit_audit.csv", index=False)
+    pd.DataFrame([
+        {"amount_normalization_status": "fx_missing", "cashflow_role": "trade_settlement", "amount_krw": ""},
+    ], columns=UNIT_MISMATCH_AUDIT_COLUMNS).to_csv(processed / "unit_mismatch_audit.csv", index=False)
+
+    content = dashboard_content("Import_Review.md", processed)
+
+    assert "## Amount/Unit Audit Summary" in content
+    assert "| fx_missing_count | 1 |" in content
+    assert "| currency_ambiguous_count | 1 |" in content
+    assert "| unit_ambiguous_count | 1 |" in content
+    assert "| internal_fx_events | 2 |" in content
+    assert "| income_excluded_from_principal | 1 |" in content
+    assert "| trade_settlements_excluded_from_principal | 1 |" in content
+    assert "| raw_amount_rows_not_official_krw | 3 |" in content
+    assert "| quantity_price_not_aggregated_as_money | 1 |" in content
+
+
 def write_cashflow_dashboard_inputs(processed: Path, cashflow_rows: list[dict[str, object]]) -> None:
     processed.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(cashflow_rows).to_csv(processed / "processed_cashflows.csv", index=False)
@@ -2658,11 +2699,11 @@ def test_cashflow_dashboard_principal_detail_excludes_non_principal_rows(tmp_pat
     content = dashboard_content("Cashflows.md", processed)
 
     assert "| net_principal | 777.0 |" in content
-    assert "income_dividend" not in content
-    assert "income_interest" not in content
-    assert "internal_fx_exchange" not in content
-    assert "trade_settlement" not in content
-    assert "fx_missing" not in content
+    assert "## Principal exclusions and unresolved amounts" in content
+    assert "| income_rows_excluded_from_principal | 2 |" in content
+    assert "| fx_exchange_rows_excluded_from_principal | 1 |" in content
+    assert "| trade_settlement_rows_excluded_from_principal | 1 |" in content
+    assert "| fx_missing_rows | 1 |" in content
     assert "111" not in content
     assert "222" not in content
     assert "333" not in content
@@ -2788,6 +2829,34 @@ def test_cashflow_dashboard_surfaces_income_expense_and_fx_summaries(tmp_path: P
     assert "| internal_transfer_rows | 3 |" in content
 
 
+def test_reconciliation_dashboard_surfaces_unit_aware_summary(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame(valid_reconciliation_summary_rows(
+        total_assets_krw="120000",
+        net_external_principal_krw="100000",
+        total_return_krw="20000",
+        total_return_status="available",
+        residual_krw="0",
+        residual_status="available",
+        fx_missing_row_count="1",
+        unit_ambiguous_row_count="2",
+    )).to_csv(processed / "reconciliation_summary.csv", index=False)
+
+    content = dashboard_content("Reconciliation.md", processed)
+
+    assert "## Reconciliation Summary" in content
+    assert "total_assets_krw" in content
+    assert "net_external_principal_krw" in content
+    assert "total_return_krw" in content
+    assert "## Income and Expense Breakdown" in content
+    assert "distribution_income_krw" in content
+    assert "## Residual" in content
+    assert "## Unresolved Status Counts" in content
+    assert "| fx_missing_row_count | 1 |" in content
+    assert "| unit_ambiguous_row_count | 2 |" in content
+
+
 def test_cashflow_dashboard_monthly_activity_sorts_by_month_and_shows_principal(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     write_cashflow_dashboard_inputs(processed, [
@@ -2872,6 +2941,40 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "<strong>1800</strong>" in content
     assert "<strong>300</strong>" in content
     assert "<strong>20</strong>" in content
+
+
+def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposure(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {"metric": "holding_count", "value": "2"},
+        {"metric": "total_cost", "value": "1500"},
+        {"metric": "total_portfolio_value", "value": "1800"},
+        {"metric": "total_portfolio_value_status", "value": "available"},
+        {"metric": "balance_data_available", "value": "True"},
+    ]).to_csv(processed / "portfolio_summary.csv", index=False)
+    pd.DataFrame(valid_reconciliation_summary_rows(
+        total_assets_krw="",
+        total_assets_status="fx_missing",
+        total_return_krw="",
+        total_return_status="fx_missing",
+        residual_krw="",
+        residual_status="unavailable",
+        fx_missing_row_count="1",
+    )).to_csv(processed / "reconciliation_summary.csv", index=False)
+    pd.DataFrame([
+        {"ticker": "AAA", "security_name": "AAA", "account_type": "ISA", "asset_type": "stock", "currency": "KRW", "currency_native": "KRW", "evaluation_amount": 1000, "evaluation_amount_krw": 1000, "unrealized_pnl": 100, "pnl_pct": 11.11, "weight_pct": 55.56},
+        {"ticker": "AAPL", "security_name": "Apple", "account_type": "overseas", "asset_type": "stock", "currency": "USD", "currency_native": "USD", "evaluation_amount": 100, "evaluation_amount_krw": "", "amount_review_status": "fx_missing", "weight_pct": 44.44},
+    ]).to_csv(processed / "processed_holdings.csv", index=False)
+
+    content = dashboard_content("Portfolio.md", processed)
+
+    assert "Unit-aware Value Status" in content
+    assert "fx_missing" in content
+    assert "Total Return Status" in content
+    assert "not official" in content
+    assert "## Normalized Currency Exposure" in content
+    assert "| USD | 1 |  | 1 | 44.44 |" in content
 
 
 
