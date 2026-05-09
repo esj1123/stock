@@ -18,7 +18,9 @@ HISTORY_COLUMNS = [
 RISK_COLUMNS = ["ticker", "security_name", "account_type", "risk_flags", "pnl_pct", "weight_pct", "suggested_action"]
 REVIEW_COLUMNS = ["ticker", "security_name", "reason", "severity", "suggested_action"]
 SUMMARY_COLUMNS = ["metric", "value"]
+RECONCILIATION_SUMMARY_COLUMNS = ["metric", "value"]
 BALANCE_SOURCE_TYPES = {"holdings", "overseas_balance"}
+REVIEW_NEEDED_STATUSES = {"fx_missing", "partial", "needs_review", "currency_ambiguous", "unit_ambiguous", "unclassified"}
 CURRENCY_NORMALIZATION_STATUS = "pending"
 AMOUNT_UNIT_CLASSIFICATION_STATUS = "pending"
 PROFIT_RESULT_STATUS = "preliminary"
@@ -235,6 +237,322 @@ def holding_dedupe_metrics(holdings: pd.DataFrame) -> dict[str, Any]:
     }
 
 
+def blank_value(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except (TypeError, ValueError):
+        pass
+    text = str(value).strip()
+    return text == "" or text.lower() in {"nan", "none", "nat"}
+
+
+def text_value(value: Any) -> str:
+    return "" if blank_value(value) else str(value).strip()
+
+
+def number_value(value: Any) -> float | None:
+    if blank_value(value):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def first_number(row: pd.Series, fields: list[str]) -> float | None:
+    for field in fields:
+        if field in row.index:
+            value = number_value(row.get(field))
+            if value is not None:
+                return value
+    return None
+
+
+def truthy_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = text_value(value).lower()
+    return text in {"true", "1", "yes", "y"}
+
+
+def row_currency(row: pd.Series) -> str:
+    for field in ["currency_native", "currency"]:
+        if field in row.index:
+            value = text_value(row.get(field)).upper()
+            if value:
+                return value
+    return ""
+
+
+def row_review_status(row: pd.Series) -> str:
+    for field in ["amount_review_status", "amount_normalization_status", "fx_rate_status"]:
+        if field in row.index:
+            value = text_value(row.get(field)).lower()
+            if value:
+                return value
+    return ""
+
+
+def status_from_list(statuses: list[str], default: str = "available") -> str:
+    cleaned = [status for status in statuses if status and status != "available"]
+    if not cleaned:
+        return default
+    for status in ["currency_ambiguous", "unit_ambiguous", "fx_missing", "balance_missing", "currency_normalization_pending"]:
+        if status in cleaned:
+            return status
+    return cleaned[0]
+
+
+def metric_value(value: Any) -> Any:
+    return "" if value is None else value
+
+
+def summary_metric_rows(values: dict[str, Any]) -> pd.DataFrame:
+    return pd.DataFrame(
+        [{"metric": metric, "value": metric_value(value)} for metric, value in values.items()],
+        columns=RECONCILIATION_SUMMARY_COLUMNS,
+    )
+
+
+def preferred_krw_series(df: pd.DataFrame, krw_field: str, native_field: str) -> pd.Series:
+    if df.empty:
+        return pd.Series(dtype=float)
+    krw_field_present = krw_field in df.columns
+
+    def amount(row: pd.Series) -> float:
+        krw_amount = first_number(row, [krw_field])
+        if krw_amount is not None:
+            return krw_amount
+        if krw_field_present and row_currency(row) != "KRW":
+            return 0.0
+        native_amount = first_number(row, [native_field])
+        return native_amount if native_amount is not None else 0.0
+
+    return df.apply(amount, axis=1)
+
+
+def holding_asset_krw(row: pd.Series) -> tuple[float | None, str]:
+    krw_amount = first_number(row, ["evaluation_amount_krw", "amount_krw"])
+    if krw_amount is not None:
+        return krw_amount, "available"
+
+    currency = row_currency(row)
+    native_amount = first_number(row, ["evaluation_amount"])
+    quantity = first_number(row, ["balance_quantity", "quantity"])
+    price = first_number(row, ["price"])
+    if native_amount == 0 and quantity not in {None, 0.0} and price is not None:
+        return None, "unit_ambiguous"
+    if currency == "KRW" and native_amount is not None:
+        return native_amount, "available"
+    if not currency or len(currency) != 3 or not currency.isalpha():
+        return None, "currency_ambiguous"
+
+    row_status = row_review_status(row)
+    if row_status in {"currency_ambiguous", "unit_ambiguous", "fx_missing"}:
+        return None, row_status
+    if currency != "KRW" and native_amount is not None:
+        return None, "fx_missing"
+    return None, "unit_ambiguous"
+
+
+def total_assets_krw(holdings: pd.DataFrame) -> tuple[float | None, str, dict[str, int]]:
+    status_counts = {"fx_missing": 0, "currency_ambiguous": 0, "unit_ambiguous": 0, "amount_review_needed": 0}
+    if holdings.empty:
+        return None, "balance_missing", status_counts
+
+    total = 0.0
+    available_rows = 0
+    blocking_statuses: list[str] = []
+    for _, row in holdings.iterrows():
+        amount, status = holding_asset_krw(row)
+        if status == "available" and amount is not None:
+            total += amount
+            available_rows += 1
+            continue
+        blocking_statuses.append(status)
+        explicit_status = row_review_status(row)
+        if explicit_status not in REVIEW_NEEDED_STATUSES and explicit_status not in status_counts:
+            if status in status_counts:
+                status_counts[status] += 1
+            if status in REVIEW_NEEDED_STATUSES:
+                status_counts["amount_review_needed"] += 1
+
+    if blocking_statuses:
+        return None, status_from_list(blocking_statuses), status_counts
+    if available_rows == 0:
+        return None, "balance_missing", status_counts
+    return total, "available", status_counts
+
+
+def principal_direction(row: pd.Series) -> str:
+    tx_type = text_value(row.get("transaction_type")).lower()
+    if tx_type in {"deposit", "withdrawal"}:
+        return tx_type
+    return ""
+
+
+def net_external_principal_krw(cashflows: pd.DataFrame, source_available: bool = True) -> tuple[float | None, float | None, float | None, str, dict[str, int]]:
+    status_counts = {"fx_missing": 0, "currency_ambiguous": 0, "unit_ambiguous": 0, "amount_review_needed": 0}
+    if cashflows.empty:
+        if not source_available:
+            return None, None, None, "balance_missing", status_counts
+        return 0.0, 0.0, 0.0, "available", status_counts
+
+    deposits = 0.0
+    withdrawals = 0.0
+    blocking_statuses: list[str] = []
+    candidate_rows = 0
+    included_rows = 0
+
+    for _, row in cashflows.iterrows():
+        direction = principal_direction(row)
+        if not direction:
+            continue
+        candidate_rows += 1
+        role = text_value(row.get("cashflow_role")).lower()
+        review_status = row_review_status(row) or "ok"
+        amount = first_number(row, ["settlement_amount_krw", "amount_krw"])
+        affects_principal = truthy_value(row.get("affects_principal"))
+        if role != "external_principal" or not affects_principal or review_status != "ok" or amount is None:
+            status = review_status if review_status != "ok" else "unit_ambiguous"
+            blocking_statuses.append(status)
+            explicit_status = row_review_status(row)
+            if explicit_status not in REVIEW_NEEDED_STATUSES and explicit_status not in status_counts:
+                if status in status_counts:
+                    status_counts[status] += 1
+                if status in REVIEW_NEEDED_STATUSES:
+                    status_counts["amount_review_needed"] += 1
+            continue
+        if direction == "deposit":
+            deposits += abs(amount)
+        else:
+            withdrawals += abs(amount)
+        included_rows += 1
+
+    if blocking_statuses:
+        return (deposits if included_rows else None), (withdrawals if included_rows else None), None, status_from_list(blocking_statuses), status_counts
+    if candidate_rows == 0:
+        return 0.0, 0.0, 0.0, "available", status_counts
+    return deposits, withdrawals, deposits - withdrawals, "available", status_counts
+
+
+def ok_amount_sum(df: pd.DataFrame, type_col: str, accepted_types: set[str]) -> float:
+    if df.empty or type_col not in df.columns:
+        return 0.0
+    total = 0.0
+    for _, row in df.iterrows():
+        row_type = text_value(row.get(type_col)).lower()
+        if row_type not in accepted_types:
+            continue
+        if (row_review_status(row) or "ok") != "ok":
+            continue
+        amount = first_number(row, ["amount_krw", "settlement_amount_krw"])
+        if amount is not None:
+            total += abs(amount)
+    return total
+
+
+def unrealized_pnl_krw(holdings: pd.DataFrame) -> float:
+    if holdings.empty:
+        return 0.0
+    total = 0.0
+    krw_field_present = "unrealized_pnl_krw" in holdings.columns
+    for _, row in holdings.iterrows():
+        amount = first_number(row, ["unrealized_pnl_krw"])
+        if amount is None and (not krw_field_present or row_currency(row) == "KRW"):
+            amount = first_number(row, ["unrealized_pnl"])
+        if amount is not None:
+            total += amount
+    return total
+
+
+def review_status_counts(dfs: list[pd.DataFrame], seed_counts: dict[str, int] | None = None) -> dict[str, int]:
+    counts = {
+        "fx_missing": 0,
+        "currency_ambiguous": 0,
+        "unit_ambiguous": 0,
+        "amount_review_needed": 0,
+    }
+    if seed_counts:
+        for key, value in seed_counts.items():
+            counts[key] = counts.get(key, 0) + int(value or 0)
+    for df in dfs:
+        if df.empty:
+            continue
+        for _, row in df.iterrows():
+            status = row_review_status(row)
+            if status in counts:
+                counts[status] += 1
+            if status in REVIEW_NEEDED_STATUSES:
+                counts["amount_review_needed"] += 1
+    return counts
+
+
+def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) -> pd.DataFrame:
+    cashflows_path = processed_dir / "processed_cashflows.csv"
+    cashflows = load_csv(cashflows_path)
+    income = load_csv(processed_dir / "processed_income.csv")
+    expenses = load_csv(processed_dir / "processed_expenses.csv")
+
+    asset_total, asset_status, asset_status_counts = total_assets_krw(holdings)
+    deposits, withdrawals, net_principal, principal_status, principal_status_counts = net_external_principal_krw(cashflows, source_available=cashflows_path.exists())
+
+    total_return = None
+    if asset_status == "available" and principal_status == "available" and asset_total is not None and net_principal is not None:
+        total_return = asset_total - net_principal
+        total_return_status = "available"
+    elif asset_status != "available":
+        total_return_status = asset_status
+    else:
+        total_return_status = principal_status
+
+    unrealized = unrealized_pnl_krw(holdings)
+    dividend_income = ok_amount_sum(income, "income_type", {"dividend"})
+    interest_income = ok_amount_sum(income, "income_type", {"interest"})
+    fee_expense = ok_amount_sum(expenses, "expense_type", {"fee"})
+    tax_expense = ok_amount_sum(expenses, "expense_type", {"tax"})
+    explained_profit = unrealized + dividend_income + interest_income - fee_expense - tax_expense
+
+    residual = None
+    residual_status = "unavailable"
+    if total_return is not None:
+        residual = total_return - explained_profit
+        residual_status = "available"
+
+    seeded_counts = asset_status_counts.copy()
+    for key, value in principal_status_counts.items():
+        seeded_counts[key] = seeded_counts.get(key, 0) + int(value or 0)
+    counts = review_status_counts([holdings, cashflows, income, expenses], seeded_counts)
+
+    return summary_metric_rows({
+        "total_assets_krw": asset_total,
+        "total_assets_status": asset_status,
+        "external_deposit_krw": deposits,
+        "external_withdrawal_krw": withdrawals,
+        "net_external_principal_krw": net_principal,
+        "net_external_principal_status": principal_status,
+        "total_return_krw": total_return,
+        "total_return_status": total_return_status,
+        "unrealized_pnl_krw": unrealized,
+        "dividend_income_krw": dividend_income,
+        "interest_income_krw": interest_income,
+        "fee_expense_krw": fee_expense,
+        "tax_expense_krw": tax_expense,
+        "realized_pnl_status": "unavailable",
+        "fx_pnl_status": "unavailable",
+        "explained_profit_krw": explained_profit,
+        "residual_krw": residual,
+        "residual_status": residual_status,
+        "fx_missing_row_count": counts["fx_missing"],
+        "currency_ambiguous_row_count": counts["currency_ambiguous"],
+        "unit_ambiguous_row_count": counts["unit_ambiguous"],
+        "amount_review_needed_row_count": counts["amount_review_needed"],
+    })
+
+
 def portfolio_summary_rows(
     total_value: Any,
     holding_count: int,
@@ -366,14 +684,16 @@ def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.D
         transaction_history = build_transaction_history_candidates(transactions, current_holdings, history_queue)
         if not transaction_history.empty:
             history_queue = pd.concat([history_queue, transaction_history], ignore_index=True).drop_duplicates(subset=["account_type", "ticker"], keep="first")
-    total_value = float(current_holdings["evaluation_amount"].sum()) if "evaluation_amount" in current_holdings and not current_holdings.empty else 0.0
+    portfolio_values = preferred_krw_series(current_holdings, "evaluation_amount_krw", "evaluation_amount")
+    total_value = float(portfolio_values.sum()) if not current_holdings.empty else 0.0
     if current_holdings.empty:
         current_holdings["weight_pct"] = pd.Series(dtype=float)
         current_holdings["is_leveraged"] = pd.Series(dtype=bool)
     else:
-        current_holdings["weight_pct"] = current_holdings["evaluation_amount"].apply(lambda v: round(float(v) / total_value * 100, 4) if total_value else 0)
+        current_holdings["weight_pct"] = portfolio_values.apply(lambda v: round(float(v) / total_value * 100, 4) if total_value else 0)
         current_holdings["is_leveraged"] = current_holdings.apply(lambda r: is_leveraged_etf_name(r.get("security_name", ""), r.get("ticker", "")), axis=1)
-    total_unrealized_pnl = float(current_holdings["unrealized_pnl"].sum()) if "unrealized_pnl" in current_holdings and not current_holdings.empty else ""
+    unrealized_values = preferred_krw_series(current_holdings, "unrealized_pnl_krw", "unrealized_pnl")
+    total_unrealized_pnl = float(unrealized_values.sum()) if not current_holdings.empty else ""
     total_cost = float(total_value - total_unrealized_pnl) if total_unrealized_pnl != "" else ""
     portfolio_pnl_pct = round(total_unrealized_pnl / total_cost * 100, 4) if total_cost not in {"", 0.0} else ""
     leveraged_weight = (
@@ -449,13 +769,29 @@ def build_portfolio(processed_dir: Path, vault_root: Path) -> tuple[pd.DataFrame
 def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = False) -> dict[str, int]:
     processed_dir = processed_dir or vault_root / "70_Imports" / "processed"
     summary, holdings, risk, review, history = build_portfolio_outputs(processed_dir, vault_root)
+    reconciliation = build_reconciliation_summary(processed_dir, holdings)
     if dry_run:
-        return {"summary_rows": len(summary), "holding_rows": len(holdings), "history_rows": len(history), "risk_rows": len(risk), "review_rows": len(review)}
+        return {
+            "summary_rows": len(summary),
+            "holding_rows": len(holdings),
+            "history_rows": len(history),
+            "risk_rows": len(risk),
+            "review_rows": len(review),
+            "reconciliation_rows": len(reconciliation),
+        }
     processed_dir.mkdir(parents=True, exist_ok=True)
     summary.to_csv(processed_dir / "portfolio_summary.csv", index=False, encoding="utf-8-sig")
+    reconciliation.to_csv(processed_dir / "reconciliation_summary.csv", index=False, encoding="utf-8-sig")
     holdings.to_csv(processed_dir / "processed_holdings.csv", index=False, encoding="utf-8-sig")
     risk.to_csv(processed_dir / "risk_watchlist.csv", index=False, encoding="utf-8-sig")
     review.to_csv(processed_dir / "review_queue.csv", index=False, encoding="utf-8-sig")
     history.to_csv(processed_dir / "history_queue.csv", index=False, encoding="utf-8-sig")
     history.to_csv(processed_dir / "post_mortem_candidates.csv", index=False, encoding="utf-8-sig")
-    return {"summary_rows": len(summary), "holding_rows": len(holdings), "history_rows": len(history), "risk_rows": len(risk), "review_rows": len(review)}
+    return {
+        "summary_rows": len(summary),
+        "holding_rows": len(holdings),
+        "history_rows": len(history),
+        "risk_rows": len(risk),
+        "review_rows": len(review),
+        "reconciliation_rows": len(reconciliation),
+    }
