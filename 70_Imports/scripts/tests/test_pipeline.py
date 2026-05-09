@@ -296,11 +296,12 @@ def paired_header(first: str, second: str) -> str:
     return f"{first}{MULTIINDEX_COLUMN_SEPARATOR}{second}"
 
 
-def paired_namoo_transaction_rows() -> list[dict[str, object]]:
+def paired_namoo_transaction_rows(transaction_header: str | None = None) -> list[dict[str, object]]:
+    transaction_header = transaction_header or COLUMN_ALIASES["transaction_raw"][0]
     return [
         {
             COLUMN_ALIASES["trade_date"][0]: "2026-01-10",
-            COLUMN_ALIASES["transaction_raw"][0]: "buy",
+            transaction_header: "buy",
             COLUMN_ALIASES["ticker"][0]: "AAPL",
             COLUMN_ALIASES["security_name"][0]: "Apple",
             paired_header(COLUMN_ALIASES["quantity"][0], COLUMN_ALIASES["price"][0]): "8",
@@ -311,7 +312,7 @@ def paired_namoo_transaction_rows() -> list[dict[str, object]]:
         },
         {
             COLUMN_ALIASES["trade_date"][0]: "",
-            COLUMN_ALIASES["transaction_raw"][0]: "",
+            transaction_header: "",
             COLUMN_ALIASES["ticker"][0]: "",
             COLUMN_ALIASES["security_name"][0]: "",
             paired_header(COLUMN_ALIASES["quantity"][0], COLUMN_ALIASES["price"][0]): "51.5",
@@ -1305,6 +1306,20 @@ def test_paired_namoo_transaction_rows_collapse_before_unit_normalization(tmp_pa
     assert row["_source_sheet"] == "table_0"
     assert row["_raw_row_number"] == "1-2"
     assert raw_audit["row_number"].iloc[0] == "1-2"
+    assert "row one memo" in row["raw_memo"]
+    assert "row two memo" in row["raw_memo"]
+
+
+def test_paired_namoo_transaction_rows_support_noncanonical_transaction_alias(tmp_path: Path):
+    df = pd.DataFrame(paired_namoo_transaction_rows(transaction_header=COLUMN_ALIASES["transaction_raw"][1]))
+    normalized, _, _ = normalize_dataframe(df, tmp_path / "transaction_history.xlsx", "table_0")
+
+    assert len(normalized) == 1
+    row = normalized.iloc[0]
+    assert row["transaction_type"] == "buy"
+    assert row["quantity"] == 8
+    assert row["price"] == 51.5
+    assert row["_raw_row_number"] == "1-2"
     assert "row one memo" in row["raw_memo"]
     assert "row two memo" in row["raw_memo"]
 

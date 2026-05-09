@@ -294,7 +294,7 @@ def collapse_namoo_transaction_pair_rows(df: pd.DataFrame, source_file: str = ""
         find_column(non_pair_columns, "ticker"),
         find_column(non_pair_columns, "security_name"),
     ]
-    transaction_col = find_column(non_pair_columns, "transaction_raw")
+    identity_transaction_col = find_column(non_pair_columns, "transaction_raw")
 
     collapsed_rows: list[dict[Any, Any]] = []
     records = list(df.reset_index(drop=True).iterrows())
@@ -318,7 +318,10 @@ def collapse_namoo_transaction_pair_rows(df: pd.DataFrame, source_file: str = ""
             col is not None and not is_blank_text(right.get(col, ""))
             for col in identity_cols
         )
-        right_has_transaction_marker = transaction_col is not None and not is_blank_text(right.get(transaction_col, ""))
+        right_has_transaction_marker = (
+            identity_transaction_col is not None
+            and not is_blank_text(right.get(identity_transaction_col, ""))
+        )
         right_starts_new_transaction = right_has_identity and right_has_transaction_marker
         should_collapse = (
             left_has_pair_values
@@ -341,14 +344,24 @@ def collapse_namoo_transaction_pair_rows(df: pd.DataFrame, source_file: str = ""
             if is_blank_text(merged[col]):
                 merged[col] = right.get(col, "")
 
-        memo_col = canonical_output_column("memo")
-        transaction_col = canonical_output_column("transaction_raw")
+        output_memo_col = canonical_output_column("memo")
+        output_transaction_col = canonical_output_column("transaction_raw")
         for col, (left_target, right_target) in pair_map.items():
             for target, value in [(left_target, left.get(col, "")), (right_target, right.get(col, ""))]:
                 if target in {"transaction_raw", "memo"}:
-                    if target == "transaction_raw" and is_blank_text(merged.get(transaction_col, "")):
-                        merge_cell_value(merged, transaction_col, value)
-                    merge_cell_value(merged, memo_col, value, append=True)
+                    existing_output_transaction_col = find_column(list(merged.keys()), "transaction_raw")
+                    existing_output_transaction_value = (
+                        merged.get(existing_output_transaction_col, "")
+                        if existing_output_transaction_col is not None
+                        else ""
+                    )
+                    if (
+                        target == "transaction_raw"
+                        and is_blank_text(existing_output_transaction_value)
+                        and is_blank_text(merged.get(output_transaction_col, ""))
+                    ):
+                        merge_cell_value(merged, output_transaction_col, value)
+                    merge_cell_value(merged, output_memo_col, value, append=True)
                     continue
                 merge_cell_value(merged, canonical_output_column(target), value)
 
