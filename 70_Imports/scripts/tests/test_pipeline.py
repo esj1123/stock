@@ -425,12 +425,13 @@ def test_krw_interest_is_income_not_external_principal(tmp_path: Path):
         )
     ])
     transactions = read_processed_csv(processed, "processed_transactions.csv")
-    assert_columns_present(transactions, ["cashflow_role", "affects_principal"])
+    assert_columns_present(transactions, ["cashflow_role", "affects_principal", "affects_profit"])
     row = transactions.iloc[0]
 
     assert row["transaction_type"] == "interest"
     assert row["cashflow_role"] == "income_interest"
     assert not boolish(row["affects_principal"])
+    assert boolish(row["affects_profit"])
     assert read_processed_csv(processed, "processed_cashflows.csv").empty
 
 
@@ -474,7 +475,61 @@ def test_processed_cashflows_contains_external_principal_only(tmp_path: Path):
 
     assert set(cashflows["transaction_type"]) == {"deposit", "withdrawal"}
     assert len(cashflows) == 2
+    assert set(cashflows["cashflow_role"]) == {"external_principal"}
+    assert cashflows["affects_principal"].map(boolish).all()
+    assert not cashflows["affects_profit"].map(boolish).any()
+    assert cashflows["amount_review_status"].eq("ok").all()
+    assert not cashflows["settlement_amount_krw"].map(is_blank_or_na).any()
     assert not set(cashflows["transaction_type"]).intersection({"dividend", "interest", "exchange", "buy", "sell"})
+
+
+def test_external_principal_requires_krw_normalized_amount(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="deposit",
+            ticker="",
+            security_name="",
+            quantity=0,
+            price=0,
+            trade_amount=100,
+            currency="USD",
+        )
+    ])
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    row = transactions.iloc[0]
+
+    assert row["transaction_type"] == "deposit"
+    assert row["cashflow_role"] == "external_principal"
+    assert row["amount_review_status"] == "fx_missing"
+    assert is_blank_or_na(row["settlement_amount_krw"])
+    assert not boolish(row["affects_principal"])
+    assert read_processed_csv(processed, "processed_cashflows.csv").empty
+
+
+@pytest.mark.parametrize(
+    ("transaction_raw", "expected_role"),
+    [("fee", "expense_fee"), ("tax", "expense_tax")],
+)
+def test_standalone_fee_tax_are_profit_expense_not_external_principal(tmp_path: Path, transaction_raw: str, expected_role: str):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw=transaction_raw,
+            ticker="",
+            security_name="",
+            quantity=0,
+            price=0,
+            trade_amount=1000,
+            currency="KRW",
+        )
+    ])
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    row = transactions.iloc[0]
+
+    assert row["transaction_type"] == transaction_raw
+    assert row["cashflow_role"] == expected_role
+    assert not boolish(row["affects_principal"])
+    assert boolish(row["affects_profit"])
+    assert read_processed_csv(processed, "processed_cashflows.csv").empty
 
 
 def test_amount_unit_audit_exists_after_import(tmp_path: Path):
@@ -515,8 +570,8 @@ def test_quality_gate_flags_non_krw_amount_krw_without_fx_or_broker_source():
 
 def test_quality_gate_flags_quantity_or_price_in_principal_totals():
     findings = principal_unit_misuse_findings([
-        {"transaction_type": "deposit", "cashflow_role": "external_deposit", "affects_principal": "True", "amount_kind": "quantity", "quantity": "8", "price": "0"},
-        {"transaction_type": "withdrawal", "cashflow_role": "external_withdrawal", "affects_principal": "True", "amount_kind": "unit_price", "quantity": "0", "price": "51.5"},
+        {"transaction_type": "deposit", "cashflow_role": "external_principal", "affects_principal": "True", "amount_kind": "quantity", "quantity": "8", "price": "0"},
+        {"transaction_type": "withdrawal", "cashflow_role": "external_principal", "affects_principal": "True", "amount_kind": "unit_price", "quantity": "0", "price": "51.5"},
     ])
     assert len(findings) == 2
     assert all("principal row uses quantity/unit_price" in finding for finding in findings)
@@ -1573,11 +1628,31 @@ def test_cashflow_dashboard_monthly_activity_sorts_by_month_and_shows_principal(
     processed = tmp_path / "70_Imports" / "processed"
     processed.mkdir(parents=True)
     pd.DataFrame([
-        {"trade_date": "2025-07-10", "transaction_type": "deposit", "account_type": "comprehensive", "settlement_amount": 1000, "currency": "KRW"},
-        {"trade_date": "2025-09-02", "transaction_type": "deposit", "account_type": "comprehensive", "settlement_amount": 2000, "currency": "KRW"},
-        {"trade_date": "2025-09-03", "transaction_type": "deposit", "account_type": "comprehensive", "ticker": "AAPL", "quantity": 1, "settlement_amount": 999, "currency": "KRW"},
-        {"trade_date": "2025-08-01", "transaction_type": "withdrawal", "account_type": "comprehensive", "settlement_amount": 500, "currency": "KRW"},
-        {"trade_date": "2025-08-15", "transaction_type": "exchange", "account_type": "comprehensive", "settlement_amount": 300, "currency": "KRW"},
+        {
+            "trade_date": "2025-07-10", "transaction_type": "deposit", "account_type": "comprehensive",
+            "settlement_amount": 1000, "settlement_amount_krw": 1000, "amount_krw": 1000, "currency": "KRW",
+            "cashflow_role": "external_principal", "affects_principal": True, "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-09-02", "transaction_type": "deposit", "account_type": "comprehensive",
+            "settlement_amount": 2000, "settlement_amount_krw": 2000, "amount_krw": 2000, "currency": "KRW",
+            "cashflow_role": "external_principal", "affects_principal": True, "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-09-03", "transaction_type": "deposit", "account_type": "comprehensive",
+            "ticker": "AAPL", "quantity": 1, "settlement_amount": 999, "settlement_amount_krw": 999, "amount_krw": 999, "currency": "KRW",
+            "cashflow_role": "external_principal", "affects_principal": True, "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-08-01", "transaction_type": "withdrawal", "account_type": "comprehensive",
+            "settlement_amount": 500, "settlement_amount_krw": 500, "amount_krw": 500, "currency": "KRW",
+            "cashflow_role": "external_principal", "affects_principal": True, "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-08-15", "transaction_type": "exchange", "account_type": "comprehensive",
+            "settlement_amount": 300, "settlement_amount_krw": 300, "amount_krw": 300, "currency": "KRW",
+            "cashflow_role": "internal_fx_exchange", "affects_principal": False, "amount_review_status": "ok",
+        },
     ]).to_csv(processed / "processed_cashflows.csv", index=False)
     pd.DataFrame(columns=["trade_date", "ticker", "security_name", "settlement_amount", "currency"]).to_csv(processed / "processed_dividends.csv", index=False)
 

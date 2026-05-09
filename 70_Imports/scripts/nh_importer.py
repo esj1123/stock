@@ -550,14 +550,11 @@ def money_status(currency_native: str, fx_rate_to_krw: Any, amount: float) -> tu
 def cashflow_role_for(tx_type: str, source_type: str, asset_type: str = "") -> str:
     tx = str(tx_type or "").strip().lower()
     source = str(source_type or "").strip().lower()
-    asset = str(asset_type or "").strip().lower()
     if source in BALANCE_SOURCE_TYPES:
         return "valuation_snapshot"
-    if asset == "cash" and tx == "unknown":
-        return "cash_balance"
     return {
-        "deposit": "external_deposit",
-        "withdrawal": "external_withdrawal",
+        "deposit": "external_principal",
+        "withdrawal": "external_principal",
         "dividend": "income_dividend",
         "interest": "income_interest",
         "exchange": "internal_fx_exchange",
@@ -566,7 +563,7 @@ def cashflow_role_for(tx_type: str, source_type: str, asset_type: str = "") -> s
         "fee": "expense_fee",
         "tax": "expense_tax",
         "transfer": "internal_transfer",
-    }.get(tx, "unknown")
+    }.get(tx, "unclassified")
 
 
 def classify_cashflow_role(row: dict[str, Any] | pd.Series) -> str:
@@ -757,8 +754,8 @@ def normalize_amount_fields(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
     )
     fx_rate_source = "raw" if fx_rate_status == "available" else ""
     cashflow_role = classify_cashflow_role({**dict(row), "asset_type": asset_type, "transaction_type": tx_type, "source_file_type": source_type})
-    affects_principal = cashflow_role in {"external_deposit", "external_withdrawal"} and amount_review_status == "ok"
-    affects_profit = cashflow_role in {"income_dividend", "income_interest"} or amount_kind == "unrealized_pnl"
+    affects_principal = cashflow_role == "external_principal" and amount_review_status == "ok"
+    affects_profit = cashflow_role in {"income_dividend", "income_interest", "expense_fee", "expense_tax"} or amount_kind == "unrealized_pnl"
     is_internal_transfer = cashflow_role in {"internal_fx_exchange", "internal_transfer"}
     is_valuation_snapshot = cashflow_role == "valuation_snapshot"
     is_trade_settlement = cashflow_role == "trade_settlement"
@@ -933,27 +930,39 @@ def boolish_text(value: Any) -> bool:
     return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
 
 
+def principal_cashflow_krw_amount(row: dict[str, Any] | pd.Series, tolerance: float = 1e-9) -> float | None:
+    for field in ["settlement_amount_krw", "amount_krw"]:
+        value = _row_value(row, field)
+        if is_blank_text(value):
+            continue
+        amount = parse_korean_number(value)
+        if abs(amount) > tolerance:
+            return amount
+    return None
+
+
 def is_principal_cashflow_row(row: dict[str, Any] | pd.Series, tolerance: float = 1e-9) -> bool:
     tx_type = str(_row_value(row, "transaction_type") or "").strip().lower()
     if tx_type not in {"deposit", "withdrawal"}:
         return False
     role = str(_row_value(row, "cashflow_role") or "").strip().lower()
-    if role:
-        expected_role = "external_deposit" if tx_type == "deposit" else "external_withdrawal"
-        if role != expected_role:
-            return False
-        if not boolish_text(_row_value(row, "affects_principal")):
-            return False
-        if str(_row_value(row, "amount_review_status") or "").strip().lower() != "ok":
-            return False
+    if role != "external_principal":
+        return False
+    if not boolish_text(_row_value(row, "affects_principal")):
+        return False
+    if str(_row_value(row, "amount_review_status") or "").strip().lower() != "ok":
+        return False
     if not is_valid_normalized_date(_row_value(row, "trade_date")):
         return False
     if not is_blank_text(_row_value(row, "ticker")):
         return False
+    if not is_blank_text(_row_value(row, "security_name")):
+        return False
     if not is_zero_or_blank_amount(_row_value(row, "quantity"), tolerance=tolerance):
         return False
-    settlement_amount = parse_korean_number(_row_value(row, "settlement_amount"))
-    return abs(settlement_amount) > tolerance
+    if not is_zero_or_blank_amount(_row_value(row, "price"), tolerance=tolerance):
+        return False
+    return principal_cashflow_krw_amount(row, tolerance=tolerance) is not None
 
 
 def is_position_snapshot_row(row: dict[str, Any] | pd.Series, tolerance: float = 1e-9) -> bool:
@@ -1016,8 +1025,26 @@ def raw_row_end_order_value(value: Any) -> float:
     return parse_korean_number(text)
 
 
-def principal_cashflow_import_key_needs_raw_position(row: dict[str, Any]) -> bool:
-    return is_principal_cashflow_row(row)
+def principal_cashflow_import_key_needs_raw_position(row: dict[str, Any], tolerance: float = 1e-9) -> bool:
+    tx_type = str(_row_value(row, "transaction_type") or "").strip().lower()
+    if tx_type not in {"deposit", "withdrawal"}:
+        return False
+    role = str(_row_value(row, "cashflow_role") or "").strip().lower()
+    if role and role != "external_principal":
+        return False
+    if not is_valid_normalized_date(_row_value(row, "trade_date")):
+        return False
+    if not is_blank_text(_row_value(row, "ticker")):
+        return False
+    if not is_blank_text(_row_value(row, "security_name")):
+        return False
+    if not is_zero_or_blank_amount(_row_value(row, "quantity"), tolerance=tolerance):
+        return False
+    if not is_zero_or_blank_amount(_row_value(row, "price"), tolerance=tolerance):
+        return False
+    settlement_amount = parse_korean_number(_row_value(row, "settlement_amount"))
+    trade_amount = parse_korean_number(_row_value(row, "trade_amount"))
+    return abs(settlement_amount or trade_amount) > tolerance
 
 
 def adjacent_principal_cashflow_duplicate(left: pd.Series, right: pd.Series, tolerance: float = 1e-9) -> bool:
@@ -1627,8 +1654,8 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         )
         fx_rate_source = "raw" if fx_rate_status == "available" else ""
         cashflow_role = cashflow_role_for(tx_type, row_source_type, asset_type)
-        affects_principal = cashflow_role in {"external_deposit", "external_withdrawal"} and amount_review_status == "ok"
-        affects_profit = cashflow_role in {"income_dividend", "income_interest"} or amount_kind == "unrealized_pnl"
+        affects_principal = cashflow_role == "external_principal" and amount_review_status == "ok"
+        affects_profit = cashflow_role in {"income_dividend", "income_interest", "expense_fee", "expense_tax"} or amount_kind == "unrealized_pnl"
         is_internal_transfer = cashflow_role in {"internal_fx_exchange", "internal_transfer"}
         is_valuation_snapshot = cashflow_role == "valuation_snapshot"
         is_trade_settlement = cashflow_role == "trade_settlement"

@@ -204,7 +204,7 @@ def principal_unit_misuse_findings(rows: list[dict[str, str]]) -> list[str]:
     for idx, row in enumerate(rows, start=2):
         role = str(row.get("cashflow_role", "") or "").strip().lower()
         affects_principal = str(row.get("affects_principal", "") or "").strip().lower() in {"true", "1", "yes", "y"}
-        if not (affects_principal or role in {"external_deposit", "external_withdrawal"} or is_principal_cashflow_row(row)):
+        if not (affects_principal or role == "external_principal" or is_principal_cashflow_row(row)):
             continue
         amount_kind = str(row.get("amount_kind", "") or "").strip().lower()
         quantity = float(row.get("quantity") or 0)

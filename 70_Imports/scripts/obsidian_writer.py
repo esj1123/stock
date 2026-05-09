@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from nh_importer import canonical_overseas_position_key, is_principal_cashflow_row
+from nh_importer import canonical_overseas_position_key, is_principal_cashflow_row, principal_cashflow_krw_amount
 from portfolio_model import (
     AMOUNT_UNIT_CLASSIFICATION_STATUS,
     CURRENCY_NORMALIZATION_STATUS,
@@ -635,10 +635,10 @@ def principal_cashflow_rows(cash: pd.DataFrame) -> pd.DataFrame:
 
 def cashflow_principal_totals(cash: pd.DataFrame) -> dict[str, float]:
     view = principal_cashflow_rows(cash)
-    if view.empty or "transaction_type" not in view.columns or "settlement_amount" not in view.columns:
+    if view.empty or "transaction_type" not in view.columns:
         return {"deposits": 0.0, "withdrawals": 0.0, "net_principal": 0.0}
     tx = view["transaction_type"].fillna("").astype(str).str.lower()
-    amounts = view["settlement_amount"].apply(number_value)
+    amounts = view.apply(lambda row: principal_cashflow_krw_amount(row) or 0.0, axis=1)
     deposits = float(amounts[tx == "deposit"].sum())
     withdrawals = float(amounts[tx == "withdrawal"].sum())
     return {
@@ -658,7 +658,7 @@ def cashflow_principal_summary_table(cash: pd.DataFrame) -> str:
 
 
 def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
-    required = {"trade_date", "transaction_type", "settlement_amount"}
+    required = {"trade_date", "transaction_type"}
     view = principal_cashflow_rows(cash)
     if view.empty or not required.issubset(set(view.columns)):
         return EMPTY_DATA
@@ -667,7 +667,7 @@ def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
     if view.empty:
         return EMPTY_DATA
     view["_transaction_type"] = view["transaction_type"].fillna("").astype(str).str.lower()
-    view["_amount"] = view["settlement_amount"].apply(number_value)
+    view["_amount"] = view.apply(lambda row: principal_cashflow_krw_amount(row) or 0.0, axis=1)
     view["_deposit"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "deposit" else 0.0, axis=1)
     view["_withdrawal"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "withdrawal" else 0.0, axis=1)
     view["_net_principal"] = view["_deposit"] - view["_withdrawal"]
@@ -695,7 +695,7 @@ def cashflow_detail_table(cash: pd.DataFrame, limit: int | None = None) -> str:
             sort_cols.append("_sort_time")
             ascending.append(False)
         view = view.sort_values(sort_cols, ascending=ascending, na_position="last").drop(columns=["_sort_date", "_sort_time"], errors="ignore")
-    return markdown_table(view, ["trade_date", "transaction_type", "account_type", "ticker", "security_name", "settlement_amount", "currency"], limit)
+    return markdown_table(view, ["trade_date", "transaction_type", "account_type", "ticker", "security_name", "settlement_amount_krw", "currency"], limit)
 
 
 def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame, summary: pd.DataFrame | None = None) -> str:
@@ -714,7 +714,7 @@ def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame, summary: pd.Da
             snapshot_card("Dividend Rows", len(dividends)),
             snapshot_card("Months", months),
             snapshot_card("Types", tx_types),
-            snapshot_card("Net Principal", principal_totals["net_principal"], "preliminary deposits - withdrawals"),
+            snapshot_card("Net Principal", principal_totals["net_principal"], "preliminary KRW-normalized deposits - withdrawals"),
             snapshot_card("Recon Status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)),
         ]),
         "## Principal summary",
