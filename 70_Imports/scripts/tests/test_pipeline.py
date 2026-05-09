@@ -1058,6 +1058,19 @@ def test_quality_gate_requires_reconciliation_summary_metrics():
     assert any("total_return_krw formula mismatch" in finding for finding in findings)
 
 
+def test_quality_gate_reconciliation_status_consistency():
+    assert reconciliation_summary_findings(valid_reconciliation_summary_rows()) == []
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(total_assets_status="fx_missing"))
+    assert any("total_return_status is available but total_assets_status is not available" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(net_external_principal_status="fx_missing"))
+    assert any("total_return_status is available but net_external_principal_status is not available" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(total_return_status="fx_missing", residual_status="available"))
+    assert any("residual_status must not be available when total_return_status is not available" in finding for finding in findings)
+
+
 def fx_gate_row(**overrides) -> dict[str, str]:
     row = {
         "fx_event_id": "FX-1",

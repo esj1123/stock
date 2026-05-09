@@ -367,11 +367,21 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
     assets = optional_float(metrics.get("total_assets_krw"))
     principal = optional_float(metrics.get("net_external_principal_krw"))
     total_return = optional_float(metrics.get("total_return_krw"))
-    if str(metrics.get("total_return_status", "")).strip().lower() == "available":
+    total_assets_status = str(metrics.get("total_assets_status", "")).strip().lower()
+    principal_status = str(metrics.get("net_external_principal_status", "")).strip().lower()
+    total_return_status = str(metrics.get("total_return_status", "")).strip().lower()
+    residual_status = str(metrics.get("residual_status", "")).strip().lower()
+    if total_return_status == "available":
+        if total_assets_status != "available":
+            findings.append("reconciliation_summary.csv total_return_status is available but total_assets_status is not available")
+        if principal_status != "available":
+            findings.append("reconciliation_summary.csv total_return_status is available but net_external_principal_status is not available")
         if assets is None or principal is None or total_return is None:
             findings.append("reconciliation_summary.csv total_return_status is available but required KRW values are blank")
         elif abs(total_return - (assets - principal)) > 0.0001:
             findings.append("reconciliation_summary.csv total_return_krw formula mismatch")
+    elif residual_status == "available":
+        findings.append("reconciliation_summary.csv residual_status must not be available when total_return_status is not available")
 
     explained_inputs = [
         "unrealized_pnl_krw",
@@ -396,7 +406,9 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
             findings.append("reconciliation_summary.csv explained_profit_krw formula mismatch")
 
     residual = optional_float(metrics.get("residual_krw"))
-    if str(metrics.get("residual_status", "")).strip().lower() == "available":
+    if residual_status == "available":
+        if total_return_status != "available":
+            findings.append("reconciliation_summary.csv residual_status is available but total_return_status is not available")
         if total_return is None or explained is None or residual is None:
             findings.append("reconciliation_summary.csv residual_status is available but required KRW values are blank")
         elif abs(residual - (total_return - explained)) > 0.0001:
