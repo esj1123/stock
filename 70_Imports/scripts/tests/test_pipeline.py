@@ -1624,10 +1624,167 @@ def test_import_review_dashboard_includes_holding_dedupe_summary(tmp_path: Path)
     assert "overseas_balance_retained_over_holdings_duplicate" in content
 
 
+def write_cashflow_dashboard_inputs(processed: Path, cashflow_rows: list[dict[str, object]]) -> None:
+    processed.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame(cashflow_rows).to_csv(processed / "processed_cashflows.csv", index=False)
+    pd.DataFrame(columns=["trade_date", "ticker", "security_name", "settlement_amount", "currency"]).to_csv(processed / "processed_dividends.csv", index=False)
+
+
+def test_cashflow_dashboard_detail_displays_amount_krw_fallback(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_cashflow_dashboard_inputs(processed, [
+        {
+            "trade_date": "2025-07-10",
+            "transaction_type": "deposit",
+            "account_type": "comprehensive",
+            "ticker": "",
+            "security_name": "",
+            "quantity": 0,
+            "price": 0,
+            "settlement_amount_krw": "",
+            "amount_krw": 1234,
+            "currency": "KRW",
+            "cashflow_role": "external_principal",
+            "affects_principal": True,
+            "amount_review_status": "ok",
+        },
+    ])
+
+    content = dashboard_content("Cashflows.md", processed)
+
+    assert "principal_amount_krw" in content
+    assert "1234" in content
+    assert "| net_principal | 1234.0 |" in content
+
+
+def test_cashflow_dashboard_principal_amount_prefers_settlement_amount_krw(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_cashflow_dashboard_inputs(processed, [
+        {
+            "trade_date": "2025-07-10",
+            "transaction_type": "deposit",
+            "account_type": "comprehensive",
+            "ticker": "",
+            "security_name": "",
+            "quantity": 0,
+            "price": 0,
+            "settlement_amount_krw": 1000,
+            "amount_krw": 999,
+            "currency": "KRW",
+            "cashflow_role": "external_principal",
+            "affects_principal": True,
+            "amount_review_status": "ok",
+        },
+    ])
+
+    content = dashboard_content("Cashflows.md", processed)
+    recent = content.split("## Recent Cashflows", 1)[1].split("## Details", 1)[0]
+
+    assert "principal_amount_krw" in recent
+    assert "1000.0" in recent
+    assert "| net_principal | 1000.0 |" in content
+
+
+def test_cashflow_dashboard_principal_detail_excludes_non_principal_rows(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_cashflow_dashboard_inputs(processed, [
+        {
+            "trade_date": "2025-07-10",
+            "transaction_type": "deposit",
+            "account_type": "comprehensive",
+            "ticker": "",
+            "security_name": "",
+            "quantity": 0,
+            "price": 0,
+            "settlement_amount_krw": 777,
+            "amount_krw": 777,
+            "currency": "KRW",
+            "cashflow_role": "external_principal",
+            "affects_principal": True,
+            "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-07-11",
+            "transaction_type": "dividend",
+            "account_type": "comprehensive",
+            "settlement_amount_krw": 111,
+            "amount_krw": 111,
+            "currency": "KRW",
+            "cashflow_role": "income_dividend",
+            "affects_principal": False,
+            "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-07-12",
+            "transaction_type": "interest",
+            "account_type": "comprehensive",
+            "settlement_amount_krw": 222,
+            "amount_krw": 222,
+            "currency": "KRW",
+            "cashflow_role": "income_interest",
+            "affects_principal": False,
+            "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-07-13",
+            "transaction_type": "exchange",
+            "account_type": "comprehensive",
+            "settlement_amount_krw": 333,
+            "amount_krw": 333,
+            "currency": "KRW",
+            "cashflow_role": "internal_fx_exchange",
+            "affects_principal": False,
+            "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-07-14",
+            "transaction_type": "buy",
+            "account_type": "comprehensive",
+            "ticker": "AAPL",
+            "security_name": "Apple",
+            "quantity": 1,
+            "price": 10,
+            "settlement_amount_krw": 444,
+            "amount_krw": 444,
+            "currency": "KRW",
+            "cashflow_role": "trade_settlement",
+            "affects_principal": False,
+            "amount_review_status": "ok",
+        },
+        {
+            "trade_date": "2025-07-15",
+            "transaction_type": "deposit",
+            "account_type": "comprehensive",
+            "ticker": "",
+            "security_name": "",
+            "quantity": 0,
+            "price": 0,
+            "settlement_amount_krw": "",
+            "amount_krw": "",
+            "currency": "USD",
+            "cashflow_role": "external_principal",
+            "affects_principal": False,
+            "amount_review_status": "fx_missing",
+        },
+    ])
+
+    content = dashboard_content("Cashflows.md", processed)
+
+    assert "| net_principal | 777.0 |" in content
+    assert "income_dividend" not in content
+    assert "income_interest" not in content
+    assert "internal_fx_exchange" not in content
+    assert "trade_settlement" not in content
+    assert "fx_missing" not in content
+    assert "111" not in content
+    assert "222" not in content
+    assert "333" not in content
+    assert "444" not in content
+
+
 def test_cashflow_dashboard_monthly_activity_sorts_by_month_and_shows_principal(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
-    processed.mkdir(parents=True)
-    pd.DataFrame([
+    write_cashflow_dashboard_inputs(processed, [
         {
             "trade_date": "2025-07-10", "transaction_type": "deposit", "account_type": "comprehensive",
             "settlement_amount": 1000, "settlement_amount_krw": 1000, "amount_krw": 1000, "currency": "KRW",
@@ -1653,18 +1810,20 @@ def test_cashflow_dashboard_monthly_activity_sorts_by_month_and_shows_principal(
             "settlement_amount": 300, "settlement_amount_krw": 300, "amount_krw": 300, "currency": "KRW",
             "cashflow_role": "internal_fx_exchange", "affects_principal": False, "amount_review_status": "ok",
         },
-    ]).to_csv(processed / "processed_cashflows.csv", index=False)
-    pd.DataFrame(columns=["trade_date", "ticker", "security_name", "settlement_amount", "currency"]).to_csv(processed / "processed_dividends.csv", index=False)
+    ])
 
     content = dashboard_content("Cashflows.md", processed)
     monthly = content.split("## Monthly activity", 1)[1].split("## Type summary", 1)[0]
+    recent = content.split("## Recent Cashflows", 1)[1].split("## Details", 1)[0]
 
     assert "Net Principal" in content
+    assert "preliminary KRW-normalized deposits - withdrawals" in content
     assert "Preliminary profit and reconciliation" in content
     assert "Portfolio/Cashflows differences are not official reconciliation yet." in content
     assert "Raw numeric values may mix KRW and USD." in content
     assert "quantity, unit price, total amount, fee, tax, FX rate, dividend, interest, and internal FX transfer" in content
     assert "reconciliation_status=currency_normalization_pending" in content
+    assert "principal_amount_krw" in recent
     assert "| net_principal | 2500.0 |" in content
     assert "weight_pct" not in monthly
     assert "exchange" not in monthly

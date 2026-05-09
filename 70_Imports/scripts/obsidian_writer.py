@@ -633,12 +633,21 @@ def principal_cashflow_rows(cash: pd.DataFrame) -> pd.DataFrame:
     return cash[cash.apply(is_principal_cashflow_row, axis=1)].copy()
 
 
-def cashflow_principal_totals(cash: pd.DataFrame) -> dict[str, float]:
+def cashflow_principal_view(cash: pd.DataFrame) -> pd.DataFrame:
     view = principal_cashflow_rows(cash)
+    if view.empty:
+        return view
+    view = view.copy()
+    view["principal_amount_krw"] = view.apply(lambda row: principal_cashflow_krw_amount(row) or 0.0, axis=1)
+    return view
+
+
+def cashflow_principal_totals(cash: pd.DataFrame) -> dict[str, float]:
+    view = cashflow_principal_view(cash)
     if view.empty or "transaction_type" not in view.columns:
         return {"deposits": 0.0, "withdrawals": 0.0, "net_principal": 0.0}
     tx = view["transaction_type"].fillna("").astype(str).str.lower()
-    amounts = view.apply(lambda row: principal_cashflow_krw_amount(row) or 0.0, axis=1)
+    amounts = view["principal_amount_krw"].apply(number_value)
     deposits = float(amounts[tx == "deposit"].sum())
     withdrawals = float(amounts[tx == "withdrawal"].sum())
     return {
@@ -659,7 +668,7 @@ def cashflow_principal_summary_table(cash: pd.DataFrame) -> str:
 
 def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
     required = {"trade_date", "transaction_type"}
-    view = principal_cashflow_rows(cash)
+    view = cashflow_principal_view(cash)
     if view.empty or not required.issubset(set(view.columns)):
         return EMPTY_DATA
     view["month"] = view["trade_date"].fillna("").astype(str).str.slice(0, 7)
@@ -667,7 +676,7 @@ def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
     if view.empty:
         return EMPTY_DATA
     view["_transaction_type"] = view["transaction_type"].fillna("").astype(str).str.lower()
-    view["_amount"] = view.apply(lambda row: principal_cashflow_krw_amount(row) or 0.0, axis=1)
+    view["_amount"] = view["principal_amount_krw"].apply(number_value)
     view["_deposit"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "deposit" else 0.0, axis=1)
     view["_withdrawal"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "withdrawal" else 0.0, axis=1)
     view["_net_principal"] = view["_deposit"] - view["_withdrawal"]
@@ -685,7 +694,7 @@ def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
 
 
 def cashflow_detail_table(cash: pd.DataFrame, limit: int | None = None) -> str:
-    view = cash.copy()
+    view = cashflow_principal_view(cash)
     if not view.empty and "trade_date" in view.columns:
         view["_sort_date"] = pd.to_datetime(view["trade_date"], errors="coerce")
         sort_cols = ["_sort_date"]
@@ -695,12 +704,26 @@ def cashflow_detail_table(cash: pd.DataFrame, limit: int | None = None) -> str:
             sort_cols.append("_sort_time")
             ascending.append(False)
         view = view.sort_values(sort_cols, ascending=ascending, na_position="last").drop(columns=["_sort_date", "_sort_time"], errors="ignore")
-    return markdown_table(view, ["trade_date", "transaction_type", "account_type", "ticker", "security_name", "settlement_amount_krw", "currency"], limit)
+    return markdown_table(
+        view,
+        [
+            "trade_date",
+            "transaction_type",
+            "account_type",
+            "principal_amount_krw",
+            "settlement_amount_krw",
+            "amount_krw",
+            "currency",
+            "cashflow_role",
+            "amount_review_status",
+        ],
+        limit,
+    )
 
 
 def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame, summary: pd.DataFrame | None = None) -> str:
     summary = summary if summary is not None else pd.DataFrame()
-    principal_cash = principal_cashflow_rows(cash)
+    principal_cash = cashflow_principal_view(cash)
     months = 0
     if not principal_cash.empty and "trade_date" in principal_cash.columns:
         months = principal_cash["trade_date"].fillna("").astype(str).str.slice(0, 7).loc[lambda s: s.str.len() == 7].nunique()
