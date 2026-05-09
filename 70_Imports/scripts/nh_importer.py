@@ -90,6 +90,57 @@ FX_EVENT_COLUMNS = [
     "raw_memo",
 ]
 
+INCOME_COLUMNS = [
+    "source_file",
+    "source_file_type",
+    "account_type",
+    "market",
+    "trade_date",
+    "trade_time",
+    "ticker",
+    "security_name",
+    "income_type",
+    "currency_native",
+    "amount_native",
+    "amount_krw",
+    "tax_native",
+    "tax_krw",
+    "fx_rate_to_krw",
+    "fx_rate_source",
+    "amount_kind",
+    "amount_basis",
+    "amount_confidence",
+    "amount_review_status",
+    "amount_review_reason",
+    "affects_principal",
+    "affects_profit",
+    "raw_memo",
+]
+
+EXPENSE_COLUMNS = [
+    "source_file",
+    "source_file_type",
+    "account_type",
+    "market",
+    "trade_date",
+    "ticker",
+    "security_name",
+    "expense_type",
+    "currency_native",
+    "amount_native",
+    "amount_krw",
+    "fx_rate_to_krw",
+    "fx_rate_source",
+    "amount_kind",
+    "amount_basis",
+    "amount_confidence",
+    "amount_review_status",
+    "amount_review_reason",
+    "affects_principal",
+    "affects_profit",
+    "raw_memo",
+]
+
 HOLDING_SOURCE_PRIORITY = {
     "overseas_balance": 0,
     "holdings": 10,
@@ -695,8 +746,8 @@ def primary_amount_for_kind(
     return {
         "trade_amount": trade_amount,
         "settlement_amount": settlement_amount,
-        "fee": fee,
-        "tax": tax,
+        "fee": fee or settlement_amount or trade_amount,
+        "tax": tax or settlement_amount or trade_amount,
         "dividend": settlement_amount or trade_amount,
         "interest": settlement_amount or trade_amount,
         "evaluation_amount": evaluation_amount,
@@ -875,7 +926,7 @@ def classify_transaction_type(text: Any) -> str:
         ("deposit", ["deposit"]),
         ("withdrawal", ["withdrawal", "withdraw"]),
         ("exchange", ["exchange"]),
-        ("dividend", ["dividend", "div"]),
+        ("dividend", ["dividend", "div", "distribution", "dist"]),
         ("interest", ["interest"]),
         ("fee", ["fee"]),
         ("tax", ["tax"]),
@@ -1840,6 +1891,8 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
         "processed_holdings.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS + HOLDING_DEDUPE_COLUMNS),
         "processed_cashflows.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "processed_fx_events.csv": pd.DataFrame(columns=FX_EVENT_COLUMNS),
+        "processed_income.csv": pd.DataFrame(columns=INCOME_COLUMNS),
+        "processed_expenses.csv": pd.DataFrame(columns=EXPENSE_COLUMNS),
         "processed_dividends.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "portfolio_summary.csv": pd.DataFrame(columns=["metric", "value"]),
         "risk_watchlist.csv": pd.DataFrame(columns=["ticker", "security_name", "account_type", "risk_flags", "pnl_pct", "weight_pct", "suggested_action"]),
@@ -1856,9 +1909,12 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
     }
 
 
-def amount_unit_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
+def amount_unit_audit_rows(rows: pd.DataFrame, extra_rows: pd.DataFrame | None = None) -> pd.DataFrame:
     if rows.empty:
-        return pd.DataFrame(columns=AMOUNT_UNIT_AUDIT_COLUMNS)
+        base = pd.DataFrame(columns=AMOUNT_UNIT_AUDIT_COLUMNS)
+        if extra_rows is None or extra_rows.empty:
+            return base
+        return extra_rows.reindex(columns=AMOUNT_UNIT_AUDIT_COLUMNS)
     view = rows.copy()
     rename_map = {
         "quantity": "raw_quantity",
@@ -1869,7 +1925,10 @@ def amount_unit_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
         "tax": "raw_tax",
     }
     view = view.rename(columns=rename_map)
-    return view.reindex(columns=AMOUNT_UNIT_AUDIT_COLUMNS)
+    base = view.reindex(columns=AMOUNT_UNIT_AUDIT_COLUMNS)
+    if extra_rows is None or extra_rows.empty:
+        return base
+    return pd.concat([base, extra_rows.reindex(columns=AMOUNT_UNIT_AUDIT_COLUMNS)], ignore_index=True)
 
 
 def unit_mismatch_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
@@ -1886,6 +1945,220 @@ def unit_mismatch_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
         | ((currency != "KRW") & (amount_native.round(6) != amount_krw.round(6)))
     )
     return rows.loc[mask].reindex(columns=UNIT_MISMATCH_AUDIT_COLUMNS)
+
+
+def money_event_amount_fields(
+    row: dict[str, Any] | pd.Series,
+    amount_kind: str,
+    native_amount: float,
+    broker_krw_amount: Any = pd.NA,
+) -> dict[str, Any]:
+    currency_native = (
+        currency_code_from_text(_row_value(row, "currency_native"))
+        or infer_amount_currency(row, amount_kind)
+    )
+    fx_rate_to_krw = _row_value(row, "fx_rate_to_krw")
+    if is_blank_text(fx_rate_to_krw):
+        fx_rate_to_krw = _row_value(row, "fx_rate")
+    amount_native, amount_krw, amount_krw_source = convert_native_to_krw(native_amount, currency_native, fx_rate_to_krw)
+    broker_krw = parse_optional_korean_number(broker_krw_amount)
+    if is_blank_text(amount_krw) and broker_krw is not None:
+        amount_krw = broker_krw
+        amount_krw_source = "broker_krw_amount"
+    amount_review_status, amount_review_reason = money_status(currency_native, fx_rate_to_krw, native_amount)
+    if amount_review_status == "fx_missing" and not is_blank_text(amount_krw):
+        amount_review_status = "ok"
+        amount_review_reason = ""
+    if amount_review_status == "ok" and str(currency_native).upper() == "KRW":
+        amount_basis = "raw_native"
+        amount_confidence = "official_raw"
+    elif amount_review_status == "ok":
+        amount_basis = amount_krw_source or "derived_krw_from_fx"
+        amount_confidence = "derived"
+    else:
+        amount_basis = "raw_native"
+        amount_confidence = "unavailable"
+    fx_rate_source = _row_value(row, "fx_rate_source")
+    if is_blank_text(fx_rate_source) and normalized_fx_rate_value(fx_rate_to_krw) is not None:
+        fx_rate_source = "raw"
+    return {
+        "currency_native": currency_native,
+        "amount_native": amount_native,
+        "amount_krw": amount_krw,
+        "fx_rate_to_krw": fx_rate_to_krw,
+        "fx_rate_source": "" if is_blank_text(fx_rate_source) else fx_rate_source,
+        "amount_kind": amount_kind,
+        "amount_basis": amount_basis,
+        "amount_confidence": amount_confidence,
+        "amount_review_status": amount_review_status,
+        "amount_review_reason": amount_review_reason,
+    }
+
+
+def income_type_for_row(row: dict[str, Any] | pd.Series) -> str:
+    text = " ".join(
+        str(_row_value(row, field) or "")
+        for field in ["transaction_type", "raw_memo", "security_name"]
+    ).lower()
+    tokens = set(re.findall(r"[a-z]+", text))
+    if tokens.intersection({"distribution", "dist"}):
+        return "distribution"
+    tx_type = str(_row_value(row, "transaction_type") or "").strip().lower()
+    if tx_type in {"dividend", "interest"}:
+        return tx_type
+    role = str(_row_value(row, "cashflow_role") or "").strip().lower()
+    if role == "income_dividend":
+        return "dividend"
+    if role == "income_interest":
+        return "interest"
+    return ""
+
+
+def income_event_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=INCOME_COLUMNS)
+    records: list[dict[str, Any]] = []
+    for _, row in rows.iterrows():
+        income_type = income_type_for_row(row)
+        if not income_type:
+            continue
+        native_amount = parse_optional_korean_number(_row_value(row, "amount_native"))
+        if native_amount is None:
+            native_amount = parse_korean_number(_row_value(row, "settlement_amount")) or parse_korean_number(_row_value(row, "trade_amount"))
+        amount_kind = str(_row_value(row, "amount_kind") or "").strip() or income_type
+        amount_fields = money_event_amount_fields(row, amount_kind, native_amount, _row_value(row, "amount_krw"))
+        tax_native = parse_korean_number(_row_value(row, "tax"))
+        if abs(tax_native) <= 1e-9:
+            tax_native = parse_korean_number(_row_value(row, "tax_native"))
+        tax_fields = money_event_amount_fields(row, "tax", tax_native, _row_value(row, "tax_krw"))
+        records.append({
+            "source_file": _row_value(row, "source_file"),
+            "source_file_type": _row_value(row, "source_file_type"),
+            "account_type": _row_value(row, "account_type"),
+            "market": _row_value(row, "market"),
+            "trade_date": _row_value(row, "trade_date"),
+            "trade_time": _row_value(row, "trade_time"),
+            "ticker": _row_value(row, "ticker"),
+            "security_name": _row_value(row, "security_name"),
+            "income_type": income_type,
+            "currency_native": amount_fields["currency_native"],
+            "amount_native": amount_fields["amount_native"],
+            "amount_krw": amount_fields["amount_krw"],
+            "tax_native": tax_fields["amount_native"],
+            "tax_krw": tax_fields["amount_krw"],
+            "fx_rate_to_krw": amount_fields["fx_rate_to_krw"],
+            "fx_rate_source": amount_fields["fx_rate_source"],
+            "amount_kind": amount_fields["amount_kind"],
+            "amount_basis": amount_fields["amount_basis"],
+            "amount_confidence": amount_fields["amount_confidence"],
+            "amount_review_status": amount_fields["amount_review_status"],
+            "amount_review_reason": amount_fields["amount_review_reason"],
+            "affects_principal": False,
+            "affects_profit": True,
+            "raw_memo": _row_value(row, "raw_memo"),
+        })
+    return pd.DataFrame(records).reindex(columns=INCOME_COLUMNS)
+
+
+def expense_native_amount_for(row: dict[str, Any] | pd.Series, expense_type: str, tolerance: float = 1e-9) -> float:
+    direct_amount = parse_korean_number(_row_value(row, expense_type))
+    if abs(direct_amount) > tolerance:
+        return direct_amount
+    tx_type = str(_row_value(row, "transaction_type") or "").strip().lower()
+    role = str(_row_value(row, "cashflow_role") or "").strip().lower()
+    if tx_type != expense_type and role != f"expense_{expense_type}":
+        return 0.0
+    for field in ["amount_native", "settlement_amount", "trade_amount"]:
+        fallback = parse_optional_korean_number(_row_value(row, field))
+        if fallback is not None and abs(fallback) > tolerance:
+            return fallback
+    return 0.0
+
+
+def expense_event_records(rows: pd.DataFrame, tolerance: float = 1e-9) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if rows.empty:
+        return records
+    for _, row in rows.iterrows():
+        source_transaction_type = str(_row_value(row, "transaction_type") or "").strip().lower()
+        for expense_type in ["fee", "tax"]:
+            native_amount = expense_native_amount_for(row, expense_type, tolerance=tolerance)
+            if abs(native_amount) <= tolerance:
+                continue
+            amount_fields = money_event_amount_fields(row, expense_type, native_amount, _row_value(row, f"{expense_type}_krw"))
+            records.append({
+                "source_file": _row_value(row, "source_file"),
+                "source_file_type": _row_value(row, "source_file_type"),
+                "account_type": _row_value(row, "account_type"),
+                "market": _row_value(row, "market"),
+                "trade_date": _row_value(row, "trade_date"),
+                "ticker": _row_value(row, "ticker"),
+                "security_name": _row_value(row, "security_name"),
+                "expense_type": expense_type,
+                "currency_native": amount_fields["currency_native"],
+                "amount_native": amount_fields["amount_native"],
+                "amount_krw": amount_fields["amount_krw"],
+                "fx_rate_to_krw": amount_fields["fx_rate_to_krw"],
+                "fx_rate_source": amount_fields["fx_rate_source"],
+                "amount_kind": amount_fields["amount_kind"],
+                "amount_basis": amount_fields["amount_basis"],
+                "amount_confidence": amount_fields["amount_confidence"],
+                "amount_review_status": amount_fields["amount_review_status"],
+                "amount_review_reason": amount_fields["amount_review_reason"],
+                "affects_principal": False,
+                "affects_profit": True,
+                "raw_memo": _row_value(row, "raw_memo"),
+                "cashflow_role": f"expense_{expense_type}",
+                "_source_transaction_type": source_transaction_type,
+                "_raw_fee": native_amount if expense_type == "fee" else "",
+                "_raw_tax": native_amount if expense_type == "tax" else "",
+            })
+    return records
+
+
+def expense_event_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    return pd.DataFrame(expense_event_records(rows)).reindex(columns=EXPENSE_COLUMNS)
+
+
+def attached_expense_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    audit_records: list[dict[str, Any]] = []
+    for record in expense_event_records(rows):
+        if record.get("_source_transaction_type") in {"fee", "tax"}:
+            continue
+        audit_records.append({
+            "source_file": record.get("source_file", ""),
+            "source_file_type": record.get("source_file_type", ""),
+            "account_type": record.get("account_type", ""),
+            "market": record.get("market", ""),
+            "trade_date": record.get("trade_date", ""),
+            "transaction_type": record.get("expense_type", ""),
+            "ticker": record.get("ticker", ""),
+            "security_name": record.get("security_name", ""),
+            "raw_quantity": "",
+            "raw_price": "",
+            "raw_trade_amount": "",
+            "raw_settlement_amount": "",
+            "raw_fee": record.get("_raw_fee", ""),
+            "raw_tax": record.get("_raw_tax", ""),
+            "quantity_unit": "",
+            "price_unit": "",
+            "currency_native": record.get("currency_native", ""),
+            "money_unit_native": record.get("currency_native", ""),
+            "fx_rate_to_krw": record.get("fx_rate_to_krw", ""),
+            "fx_rate_source": record.get("fx_rate_source", ""),
+            "amount_kind": record.get("amount_kind", ""),
+            "amount_basis": record.get("amount_basis", ""),
+            "amount_native": record.get("amount_native", pd.NA),
+            "amount_krw": record.get("amount_krw", pd.NA),
+            "cashflow_role": record.get("cashflow_role", ""),
+            "affects_principal": record.get("affects_principal", False),
+            "affects_profit": record.get("affects_profit", True),
+            "is_internal_transfer": False,
+            "amount_confidence": record.get("amount_confidence", ""),
+            "amount_review_status": record.get("amount_review_status", ""),
+            "amount_review_reason": record.get("amount_review_reason", ""),
+        })
+    return pd.DataFrame(audit_records).reindex(columns=AMOUNT_UNIT_AUDIT_COLUMNS)
 
 
 def fx_event_id_for_row(row: dict[str, Any] | pd.Series) -> str:
@@ -2478,7 +2751,6 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
     combined = normalize_amount_dataframe(combined)
     combined = apply_fx_pair_status(combined)
     outputs["processed_fx_events.csv"] = fx_event_rows(combined)
-    outputs["amount_unit_audit.csv"] = amount_unit_audit_rows(combined)
     outputs["unit_mismatch_audit.csv"] = unit_mismatch_audit_rows(combined)
     summary.unclassified_rows = int((combined.get("transaction_type", pd.Series(dtype=str)) == "unknown").sum()) if not combined.empty else 0
     summary.unknown_columns = len(unknown_columns)
@@ -2493,6 +2765,9 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
     tx_rows = outputs["processed_transactions.csv"]
     principal_cashflows = tx_rows[tx_rows.apply(is_principal_cashflow_row, axis=1)].copy() if not tx_rows.empty else outputs["processed_cashflows.csv"]
     outputs["processed_cashflows.csv"] = dedupe_principal_cashflow_view(principal_cashflows, context_rows=tx_rows)
+    outputs["processed_income.csv"] = income_event_rows(tx_rows)
+    outputs["processed_expenses.csv"] = expense_event_rows(tx_rows)
+    outputs["amount_unit_audit.csv"] = amount_unit_audit_rows(combined, extra_rows=attached_expense_audit_rows(tx_rows))
     outputs["processed_dividends.csv"] = tx_rows[tx_rows["transaction_type"].eq("dividend")].copy() if not tx_rows.empty else outputs["processed_dividends.csv"]
     outputs["unclassified_rows.csv"] = tx_rows[tx_rows["transaction_type"].eq("unknown")].copy() if not tx_rows.empty else outputs["unclassified_rows.csv"]
     source_index_columns = list(outputs["source_file_index.csv"].columns)

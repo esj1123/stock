@@ -285,7 +285,10 @@ def synthetic_transaction_row(
     price: str | int | float = 51.5,
     trade_amount: str | int | float = 412,
     settlement_amount: str | int | float | None = None,
+    fee: str | int | float | None = None,
+    tax: str | int | float | None = None,
     currency: str | None = None,
+    fx_rate: str | int | float | None = None,
 ) -> dict[str, object]:
     row: dict[str, object] = {
         COLUMN_ALIASES["trade_date"][0]: trade_date,
@@ -298,8 +301,14 @@ def synthetic_transaction_row(
     }
     if settlement_amount is not None:
         row[COLUMN_ALIASES["settlement_amount"][0]] = settlement_amount
+    if fee is not None:
+        row[COLUMN_ALIASES["fee"][0]] = fee
+    if tax is not None:
+        row[COLUMN_ALIASES["tax"][0]] = tax
     if currency is not None:
         row[COLUMN_ALIASES["currency"][0]] = currency
+    if fx_rate is not None:
+        row[COLUMN_ALIASES["exchange_rate"][0]] = fx_rate
     return row
 
 
@@ -353,6 +362,24 @@ def read_processed_csv(processed: Path, name: str) -> pd.DataFrame:
     path = processed / name
     assert path.exists(), f"missing processed output: {name}"
     return pd.read_csv(path, dtype={"ticker": str})
+
+
+INCOME_OUTPUT_COLUMNS = [
+    "source_file", "source_file_type", "account_type", "market", "trade_date", "trade_time",
+    "ticker", "security_name", "income_type", "currency_native", "amount_native", "amount_krw",
+    "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
+    "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
+    "affects_profit", "raw_memo",
+]
+
+
+EXPENSE_OUTPUT_COLUMNS = [
+    "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
+    "security_name", "expense_type", "currency_native", "amount_native", "amount_krw",
+    "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis", "amount_confidence",
+    "amount_review_status", "amount_review_reason", "affects_principal", "affects_profit",
+    "raw_memo",
+]
 
 
 def test_quantity_is_not_money_amount(tmp_path: Path):
@@ -458,6 +485,91 @@ def test_krw_interest_is_income_not_external_principal(tmp_path: Path):
     assert not boolish(row["affects_principal"])
     assert boolish(row["affects_profit"])
     assert read_processed_csv(processed, "processed_cashflows.csv").empty
+
+
+def test_foreign_dividend_lands_in_processed_income_only(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="foreign dividend",
+            ticker="AAPL",
+            security_name="Apple",
+            quantity=0,
+            price=0,
+            trade_amount=12.34,
+            currency="USD",
+        )
+    ])
+
+    income = read_processed_csv(processed, "processed_income.csv")
+    expenses = read_processed_csv(processed, "processed_expenses.csv")
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+
+    assert_columns_present(income, INCOME_OUTPUT_COLUMNS)
+    assert_columns_present(expenses, EXPENSE_OUTPUT_COLUMNS)
+    assert len(income) == 1
+    row = income.iloc[0]
+    assert row["income_type"] == "dividend"
+    assert row["currency_native"] == "USD"
+    assert row["amount_native"] == 12.34
+    assert is_blank_or_na(row["amount_krw"])
+    assert row["tax_native"] == 0
+    assert row["tax_krw"] == 0
+    assert row["amount_review_status"] == "fx_missing"
+    assert not boolish(row["affects_principal"])
+    assert boolish(row["affects_profit"])
+    assert expenses.empty
+    assert cashflows.empty
+
+
+def test_krw_interest_lands_in_processed_income_only(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="interest",
+            ticker="",
+            security_name="",
+            quantity=0,
+            price=0,
+            trade_amount=1200,
+            currency="KRW",
+        )
+    ])
+
+    income = read_processed_csv(processed, "processed_income.csv")
+    expenses = read_processed_csv(processed, "processed_expenses.csv")
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+
+    assert_columns_present(income, INCOME_OUTPUT_COLUMNS)
+    assert len(income) == 1
+    row = income.iloc[0]
+    assert row["income_type"] == "interest"
+    assert row["currency_native"] == "KRW"
+    assert row["amount_native"] == 1200
+    assert row["amount_krw"] == 1200
+    assert row["amount_review_status"] == "ok"
+    assert not boolish(row["affects_principal"])
+    assert boolish(row["affects_profit"])
+    assert expenses.empty
+    assert cashflows.empty
+
+
+def test_distribution_lands_in_processed_income_when_detected(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="cash distribution",
+            ticker="QQQI",
+            security_name="ETF",
+            quantity=0,
+            price=0,
+            trade_amount=3.5,
+            currency="USD",
+        )
+    ])
+
+    income = read_processed_csv(processed, "processed_income.csv")
+
+    assert len(income) == 1
+    assert income.iloc[0]["income_type"] == "distribution"
+    assert income.iloc[0]["amount_review_status"] == "fx_missing"
 
 
 def test_fx_exchange_is_internal_transfer_not_principal_cashflow(tmp_path: Path):
@@ -640,6 +752,84 @@ def test_standalone_fee_tax_are_profit_expense_not_external_principal(tmp_path: 
     assert not boolish(row["affects_principal"])
     assert boolish(row["affects_profit"])
     assert read_processed_csv(processed, "processed_cashflows.csv").empty
+
+
+def test_attached_trade_fee_tax_lands_in_processed_expenses(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="buy",
+            ticker="005930",
+            security_name="Samsung Electronics",
+            quantity=10,
+            price=70000,
+            trade_amount=700000,
+            fee=150,
+            tax=50,
+            currency="KRW",
+        )
+    ])
+
+    expenses = read_processed_csv(processed, "processed_expenses.csv")
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+
+    assert_columns_present(expenses, EXPENSE_OUTPUT_COLUMNS)
+    assert set(expenses["expense_type"]) == {"fee", "tax"}
+    assert set(expenses["amount_kind"]) == {"fee", "tax"}
+    assert not expenses["affects_principal"].map(boolish).any()
+    assert expenses["affects_profit"].map(boolish).all()
+    fee_row = expenses[expenses["expense_type"].eq("fee")].iloc[0]
+    tax_row = expenses[expenses["expense_type"].eq("tax")].iloc[0]
+    assert fee_row["amount_native"] == 150
+    assert fee_row["amount_krw"] == 150
+    assert fee_row["amount_review_status"] == "ok"
+    assert tax_row["amount_native"] == 50
+    assert tax_row["amount_krw"] == 50
+    assert cashflows.empty
+
+
+def test_income_and_expense_rows_do_not_appear_in_processed_cashflows(tmp_path: Path):
+    rows = [
+        synthetic_transaction_row(transaction_raw="deposit", ticker="", security_name="", quantity=0, price=0, trade_amount=1000, currency="KRW"),
+        synthetic_transaction_row(transaction_raw="dividend", quantity=0, price=0, trade_amount=10, currency="KRW"),
+        synthetic_transaction_row(transaction_raw="interest", ticker="", security_name="", quantity=0, price=0, trade_amount=5, currency="KRW"),
+        synthetic_transaction_row(transaction_raw="fee", ticker="", security_name="", quantity=0, price=0, trade_amount=3, currency="KRW"),
+        synthetic_transaction_row(transaction_raw="tax", ticker="", security_name="", quantity=0, price=0, trade_amount=2, currency="KRW"),
+        synthetic_transaction_row(transaction_raw="buy", ticker="005930", security_name="Samsung Electronics", quantity=1, price=70000, trade_amount=70000, fee=1, tax=1, currency="KRW"),
+    ]
+    processed = import_synthetic_transactions(tmp_path, rows)
+
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+    income = read_processed_csv(processed, "processed_income.csv")
+    expenses = read_processed_csv(processed, "processed_expenses.csv")
+
+    assert set(income["income_type"]) == {"dividend", "interest"}
+    assert set(expenses["expense_type"]) == {"fee", "tax"}
+    assert set(cashflows["transaction_type"]) == {"deposit"}
+    assert not set(cashflows["transaction_type"]).intersection({"dividend", "interest", "fee", "tax"})
+
+
+def test_amount_unit_audit_includes_income_and_expense_rows(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(transaction_raw="dividend", quantity=0, price=0, trade_amount=10, currency="KRW"),
+        synthetic_transaction_row(transaction_raw="interest", ticker="", security_name="", quantity=0, price=0, trade_amount=5, currency="KRW"),
+        synthetic_transaction_row(
+            transaction_raw="buy",
+            ticker="005930",
+            security_name="Samsung Electronics",
+            quantity=1,
+            price=70000,
+            trade_amount=70000,
+            fee=1,
+            tax=2,
+            currency="KRW",
+        ),
+    ])
+
+    audit = read_processed_csv(processed, "amount_unit_audit.csv")
+
+    assert_columns_present(audit, AMOUNT_UNIT_AUDIT_COLUMNS)
+    assert {"income_dividend", "income_interest", "expense_fee", "expense_tax"}.issubset(set(audit["cashflow_role"]))
+    assert {"dividend", "interest", "fee", "tax"}.issubset(set(audit["amount_kind"]))
 
 
 def test_amount_unit_audit_exists_after_import(tmp_path: Path):
