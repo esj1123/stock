@@ -1324,6 +1324,61 @@ def test_paired_namoo_transaction_rows_support_noncanonical_transaction_alias(tm
     assert "row two memo" in row["raw_memo"]
 
 
+def test_back_to_back_paired_namoo_transactions_collapse_to_two_logical_rows(tmp_path: Path):
+    tsla_rows = paired_namoo_transaction_rows()
+    tsla_rows[0].update({
+        COLUMN_ALIASES["trade_date"][0]: "2026-01-11",
+        COLUMN_ALIASES["ticker"][0]: "TSLA",
+        COLUMN_ALIASES["security_name"][0]: "Tesla",
+        paired_header(COLUMN_ALIASES["quantity"][0], COLUMN_ALIASES["price"][0]): "2",
+        paired_header(COLUMN_ALIASES["trade_amount"][0], COLUMN_ALIASES["settlement_amount"][0]): "200",
+        paired_header(COLUMN_ALIASES["fee"][0], COLUMN_ALIASES["tax"][0]): "0.5",
+    })
+    tsla_rows[1].update({
+        paired_header(COLUMN_ALIASES["quantity"][0], COLUMN_ALIASES["price"][0]): "100",
+        paired_header(COLUMN_ALIASES["trade_amount"][0], COLUMN_ALIASES["settlement_amount"][0]): "198",
+        paired_header(COLUMN_ALIASES["fee"][0], COLUMN_ALIASES["tax"][0]): "1.0",
+    })
+    df = pd.DataFrame(paired_namoo_transaction_rows() + tsla_rows)
+    normalized, _, _ = normalize_dataframe(df, tmp_path / "transaction_history.xlsx", "table_0")
+
+    assert len(normalized) == 2
+    assert list(normalized["_raw_row_number"]) == ["1-2", "3-4"]
+    assert list(normalized["ticker"]) == ["AAPL", "TSLA"]
+    assert list(normalized["cashflow_role"]) == ["trade_settlement", "trade_settlement"]
+    assert list(normalized["quantity"]) == [8, 2]
+    assert list(normalized["price"]) == [51.5, 100]
+    assert list(normalized["trade_amount"]) == [412, 200]
+    assert list(normalized["settlement_amount"]) == [410, 198]
+    assert list(normalized["fee"]) == [1.25, 0.5]
+    assert list(normalized["tax"]) == [2.5, 1.0]
+    for _, row in normalized.iterrows():
+        assert row["quantity_unit"] == "shares"
+        assert row["price_kind"] == "unit_price"
+        assert row["currency_native"] == "USD"
+        assert row["amount_review_status"] == "fx_missing"
+
+
+def test_adjacent_new_transaction_row_does_not_pair_collapse(tmp_path: Path):
+    first_row = paired_namoo_transaction_rows()[0]
+    second_row = paired_namoo_transaction_rows()[0]
+    second_row.update({
+        COLUMN_ALIASES["trade_date"][0]: "2026-01-11",
+        COLUMN_ALIASES["transaction_raw"][0]: "sell",
+        COLUMN_ALIASES["ticker"][0]: "TSLA",
+        COLUMN_ALIASES["security_name"][0]: "Tesla",
+        paired_header(COLUMN_ALIASES["quantity"][0], COLUMN_ALIASES["price"][0]): "2",
+        paired_header(COLUMN_ALIASES["trade_amount"][0], COLUMN_ALIASES["settlement_amount"][0]): "200",
+        paired_header(COLUMN_ALIASES["fee"][0], COLUMN_ALIASES["tax"][0]): "0.5",
+    })
+    normalized, _, _ = normalize_dataframe(pd.DataFrame([first_row, second_row]), tmp_path / "transaction_history.xlsx", "table_0")
+
+    assert len(normalized) == 2
+    assert "1-2" not in set(normalized["_raw_row_number"])
+    assert list(normalized["_raw_row_number"]) == ["1", "2"]
+    assert list(normalized["transaction_type"]) == ["buy", "sell"]
+
+
 def test_import_paired_namoo_transaction_rows_does_not_create_holdings(tmp_path: Path):
     vault = tmp_path
     raw = vault / "70_Imports" / "raw"
