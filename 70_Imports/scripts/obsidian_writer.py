@@ -8,7 +8,14 @@ from typing import Any
 
 import pandas as pd
 
-from nh_importer import canonical_overseas_position_key, is_principal_cashflow_row
+from nh_importer import canonical_overseas_position_key, is_principal_cashflow_row, principal_cashflow_krw_amount
+from portfolio_model import (
+    AMOUNT_UNIT_CLASSIFICATION_STATUS,
+    CURRENCY_NORMALIZATION_STATUS,
+    PRELIMINARY_RECONCILIATION_WARNING,
+    PROFIT_RESULT_STATUS,
+    RECONCILIATION_STATUS,
+)
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
 AUTO_END = "<!-- AUTO-GENERATED:END -->"
@@ -111,6 +118,23 @@ def number_value(value: Any, default: float = 0.0) -> float:
         return default
 
 
+def optional_number_value(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    text = str(value).replace(",", "").strip()
+    if text.lower() in {"", "nan", "none", "na", "n/a", "<na>", "-", "--"}:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
 def percent_bar(value: Any, width: int = 20) -> str:
     pct = max(0.0, min(100.0, number_value(value)))
     filled = int(round(pct / 100 * width))
@@ -146,6 +170,32 @@ def weight_summary_table(holdings: pd.DataFrame, group_col: str) -> str:
         weight = sum(number_value(v) for v in group["weight_pct"])
         label = str(name).strip() if str(name).strip() and str(name).lower() != "nan" else "(blank)"
         rows.append({"bucket": label, "count": len(group), "weight_pct": round(weight, 2), "bar": progress_bar(weight)})
+    return markdown_table(pd.DataFrame(rows).sort_values("weight_pct", ascending=False))
+
+
+def normalized_currency_exposure_table(holdings: pd.DataFrame) -> str:
+    view = current_holding_positions(holdings)
+    if view.empty:
+        return "_No allocation data._"
+    currency_col = "currency_native" if "currency_native" in view.columns else "currency"
+    if currency_col not in view.columns:
+        return "_No allocation data._"
+    rows = []
+    for currency, group in view.groupby(currency_col, dropna=False):
+        label = str(currency).strip().upper()
+        if not label or label == "NAN":
+            label = "(blank)"
+        krw_values = [optional_number_value(value) for value in group["evaluation_amount_krw"]] if "evaluation_amount_krw" in group.columns else []
+        krw_total = sum(value for value in krw_values if value is not None)
+        missing_krw = sum(1 for value in krw_values if value is None) if "evaluation_amount_krw" in group.columns else 0
+        weight = sum(number_value(value) for value in group["weight_pct"]) if "weight_pct" in group.columns else 0.0
+        rows.append({
+            "currency": label,
+            "count": len(group),
+            "evaluation_amount_krw_total": round(krw_total, 2) if krw_values and any(value is not None for value in krw_values) else "",
+            "missing_krw_count": missing_krw,
+            "weight_pct": round(weight, 2),
+        })
     return markdown_table(pd.DataFrame(rows).sort_values("weight_pct", ascending=False))
 
 
@@ -253,19 +303,46 @@ def cashflow_monthly_summary(cash: pd.DataFrame) -> str:
     return markdown_table(pd.DataFrame(rows).sort_values(["month", "transaction_type"]))
 
 
-def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: str) -> str:
+def preliminary_reconciliation_warning(summary: pd.DataFrame | None = None) -> str:
+    summary = summary if summary is not None else pd.DataFrame()
+    warning = metric(summary, "preliminary_reconciliation_warning", PRELIMINARY_RECONCILIATION_WARNING)
+    statuses = [
+        ("currency_normalization_status", metric(summary, "currency_normalization_status", CURRENCY_NORMALIZATION_STATUS)),
+        ("amount_unit_classification_status", metric(summary, "amount_unit_classification_status", AMOUNT_UNIT_CLASSIFICATION_STATUS)),
+        ("profit_result_status", metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)),
+        ("reconciliation_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)),
+    ]
+    status_text = "; ".join(f"`{name}={markdown_cell(value)}`" for name, value in statuses)
+    return "\n".join([
+        "> [!warning] Preliminary profit and reconciliation",
+        f"> {markdown_cell(warning)}",
+        f"> Status: {status_text}",
+    ])
+
+
+def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: str, reconciliation: pd.DataFrame | None = None) -> str:
+    reconciliation = reconciliation if reconciliation is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
+    parts.append(preliminary_reconciliation_warning(summary))
     value_status = metric(summary, "total_portfolio_value_status", "unknown")
+    unit_value_status = metric(reconciliation, "total_assets_status", value_status)
+    total_return_status = metric(reconciliation, "total_return_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS))
+    profit_status = metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)
+    reconciliation_status = metric(summary, "reconciliation_status", RECONCILIATION_STATUS)
     snapshot = [
         "## Snapshot",
         '<div class="stock-kpi-grid">',
         snapshot_card("Holdings", metric(summary, "holding_count", "0")),
-        snapshot_card("Principal", metric(summary, "total_cost", "-"), "cost basis"),
+        snapshot_card("Portfolio Cost Basis", metric(summary, "total_cost", "-"), "preliminary; not net external principal"),
         snapshot_card("Total Value", metric(summary, "total_portfolio_value", "-")),
-        snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-")),
-        snapshot_card("Return", metric(summary, "pnl_pct", "-"), "pnl_pct"),
+        snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-"), "preliminary"),
+        snapshot_card("Return", metric(summary, "pnl_pct", "-"), "preliminary pnl_pct"),
+        snapshot_card("Profit Status", profit_status),
+        snapshot_card("Recon Status", reconciliation_status),
+        snapshot_card("Unit-aware Value Status", unit_value_status),
+        snapshot_card("Total Return Status", total_return_status),
         snapshot_card("Loss Review", metric(summary, "loss_review_required_count", "0"), "candidate count"),
         snapshot_card("Leveraged ETF", metric(summary, "leveraged_etf_count", "0")),
         snapshot_card("Largest Position", largest_position_label(holdings)),
@@ -275,6 +352,12 @@ def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: st
     parts.append("\n".join(snapshot))
     if value_status.lower() == "unknown":
         parts.append("> [!warning] Portfolio value status\n> Total portfolio value status is `unknown`. Add current balance files before relying on value-based summaries.")
+    if unit_value_status.lower() != "available" or total_return_status.lower() != "available":
+        parts.append(
+            "> [!warning] Unit-aware reconciliation not official\n"
+            f"> Total assets status is `{markdown_cell(unit_value_status)}` and total return status is `{markdown_cell(total_return_status)}`. "
+            "Portfolio value and return are not official until FX, currency, and unit issues are resolved."
+        )
     data_warning = metric(summary, "data_quality_warning")
     if data_warning:
         parts.append(f"> [!warning] Data quality\n> {markdown_cell(data_warning)}")
@@ -286,6 +369,8 @@ def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: st
         weight_summary_table(holdings, "asset_type"),
         "### Currency allocation",
         weight_summary_table(holdings, "currency"),
+        "## Normalized Currency Exposure",
+        normalized_currency_exposure_table(holdings),
         "## Concentration",
         "### Top positions by weight",
         top_weight_table(holdings),
@@ -604,12 +689,21 @@ def principal_cashflow_rows(cash: pd.DataFrame) -> pd.DataFrame:
     return cash[cash.apply(is_principal_cashflow_row, axis=1)].copy()
 
 
-def cashflow_principal_totals(cash: pd.DataFrame) -> dict[str, float]:
+def cashflow_principal_view(cash: pd.DataFrame) -> pd.DataFrame:
     view = principal_cashflow_rows(cash)
-    if view.empty or "transaction_type" not in view.columns or "settlement_amount" not in view.columns:
+    if view.empty:
+        return view
+    view = view.copy()
+    view["principal_amount_krw"] = view.apply(lambda row: principal_cashflow_krw_amount(row) or 0.0, axis=1)
+    return view
+
+
+def cashflow_principal_totals(cash: pd.DataFrame) -> dict[str, float]:
+    view = cashflow_principal_view(cash)
+    if view.empty or "transaction_type" not in view.columns:
         return {"deposits": 0.0, "withdrawals": 0.0, "net_principal": 0.0}
     tx = view["transaction_type"].fillna("").astype(str).str.lower()
-    amounts = view["settlement_amount"].apply(number_value)
+    amounts = view["principal_amount_krw"].apply(number_value)
     deposits = float(amounts[tx == "deposit"].sum())
     withdrawals = float(amounts[tx == "withdrawal"].sum())
     return {
@@ -628,9 +722,36 @@ def cashflow_principal_summary_table(cash: pd.DataFrame) -> str:
     ]))
 
 
+def lower_column(df: pd.DataFrame, column: str) -> pd.Series:
+    if df.empty or column not in df.columns:
+        return pd.Series(dtype=str)
+    return df[column].fillna("").astype(str).str.strip().str.lower()
+
+
+def status_count_across(frames: list[pd.DataFrame], status: str) -> int:
+    return sum(int(lower_column(frame, "amount_review_status").eq(status).sum()) for frame in frames)
+
+
+def cashflow_exclusion_status_table(cash: pd.DataFrame, income: pd.DataFrame, expenses: pd.DataFrame, fx_events: pd.DataFrame) -> str:
+    cash_roles = lower_column(cash, "cashflow_role")
+    cash_tx = lower_column(cash, "transaction_type")
+    income_in_cash = int(cash_roles.str.startswith("income_").sum()) if not cash_roles.empty else 0
+    fx_in_cash = int(cash_roles.eq("internal_fx_exchange").sum()) if not cash_roles.empty else 0
+    trade_settlements = int((cash_roles.eq("trade_settlement") | cash_tx.isin({"buy", "sell"})).sum()) if not cash.empty else 0
+    records = [
+        {"item": "income_rows_excluded_from_principal", "count": len(income) if not income.empty else income_in_cash},
+        {"item": "fx_exchange_rows_excluded_from_principal", "count": len(fx_events) if not fx_events.empty else fx_in_cash},
+        {"item": "trade_settlement_rows_excluded_from_principal", "count": trade_settlements},
+        {"item": "fx_missing_rows", "count": status_count_across([cash, income, expenses, fx_events], "fx_missing")},
+        {"item": "currency_ambiguous_rows", "count": status_count_across([cash, income, expenses, fx_events], "currency_ambiguous")},
+        {"item": "unit_ambiguous_rows", "count": status_count_across([cash, income, expenses, fx_events], "unit_ambiguous")},
+    ]
+    return markdown_table(pd.DataFrame(records))
+
+
 def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
-    required = {"trade_date", "transaction_type", "settlement_amount"}
-    view = principal_cashflow_rows(cash)
+    required = {"trade_date", "transaction_type"}
+    view = cashflow_principal_view(cash)
     if view.empty or not required.issubset(set(view.columns)):
         return EMPTY_DATA
     view["month"] = view["trade_date"].fillna("").astype(str).str.slice(0, 7)
@@ -638,7 +759,7 @@ def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
     if view.empty:
         return EMPTY_DATA
     view["_transaction_type"] = view["transaction_type"].fillna("").astype(str).str.lower()
-    view["_amount"] = view["settlement_amount"].apply(number_value)
+    view["_amount"] = view["principal_amount_krw"].apply(number_value)
     view["_deposit"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "deposit" else 0.0, axis=1)
     view["_withdrawal"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "withdrawal" else 0.0, axis=1)
     view["_net_principal"] = view["_deposit"] - view["_withdrawal"]
@@ -656,7 +777,7 @@ def cashflow_monthly_activity_table(cash: pd.DataFrame) -> str:
 
 
 def cashflow_detail_table(cash: pd.DataFrame, limit: int | None = None) -> str:
-    view = cash.copy()
+    view = cashflow_principal_view(cash)
     if not view.empty and "trade_date" in view.columns:
         view["_sort_date"] = pd.to_datetime(view["trade_date"], errors="coerce")
         sort_cols = ["_sort_date"]
@@ -666,27 +787,286 @@ def cashflow_detail_table(cash: pd.DataFrame, limit: int | None = None) -> str:
             sort_cols.append("_sort_time")
             ascending.append(False)
         view = view.sort_values(sort_cols, ascending=ascending, na_position="last").drop(columns=["_sort_date", "_sort_time"], errors="ignore")
-    return markdown_table(view, ["trade_date", "transaction_type", "account_type", "ticker", "security_name", "settlement_amount", "currency"], limit)
+    return markdown_table(
+        view,
+        [
+            "trade_date",
+            "transaction_type",
+            "account_type",
+            "principal_amount_krw",
+            "settlement_amount_krw",
+            "amount_krw",
+            "currency",
+            "cashflow_role",
+            "amount_review_status",
+        ],
+        limit,
+    )
 
 
-def cashflow_content(cash: pd.DataFrame, dividends: pd.DataFrame) -> str:
-    principal_cash = principal_cashflow_rows(cash)
+def status_count_table(df: pd.DataFrame, status_col: str, label: str) -> str:
+    if df.empty or status_col not in df.columns:
+        return EMPTY_DATA
+    statuses = df[status_col].fillna("").astype(str).str.strip()
+    statuses = statuses[statuses != ""]
+    if statuses.empty:
+        return EMPTY_DATA
+    view = statuses.value_counts(dropna=False).rename_axis(status_col).reset_index(name="count")
+    view.insert(0, "scope", label)
+    return markdown_table(view)
+
+
+def status_counts_text(df: pd.DataFrame, status_col: str) -> str:
+    if df.empty or status_col not in df.columns:
+        return ""
+    statuses = df[status_col].fillna("").astype(str).str.strip()
+    statuses = statuses[statuses != ""]
+    if statuses.empty:
+        return ""
+    counts = statuses.value_counts(dropna=False).sort_index()
+    return "; ".join(f"{status}: {int(count)}" for status, count in counts.items())
+
+
+def ok_amount_krw_total(view: pd.DataFrame) -> Any:
+    if view.empty or "amount_review_status" not in view.columns or "amount_krw" not in view.columns:
+        return ""
+    ok = view[view["amount_review_status"].fillna("").astype(str).str.lower().eq("ok")]
+    values = [optional_number_value(value) for value in ok["amount_krw"]]
+    values = [value for value in values if value is not None]
+    return round(sum(values), 2) if values else ""
+
+
+def native_amount_total_if_single_currency(view: pd.DataFrame) -> tuple[str, Any]:
+    if view.empty or "currency_native" not in view.columns or "amount_native" not in view.columns:
+        return "", ""
+    currencies = sorted({
+        str(value).strip().upper()
+        for value in view["currency_native"].fillna("")
+        if str(value).strip()
+    })
+    if len(currencies) != 1:
+        return ("mixed" if len(currencies) > 1 else ""), ""
+    values = [optional_number_value(value) for value in view["amount_native"]]
+    values = [value for value in values if value is not None]
+    return currencies[0], (round(sum(values), 6) if values else "")
+
+
+def income_summary_table(income: pd.DataFrame) -> str:
+    if income.empty or "income_type" not in income.columns:
+        return EMPTY_DATA
+    records = []
+    for income_type, group in income.groupby("income_type", dropna=False, sort=True):
+        currency, native_total = native_amount_total_if_single_currency(group)
+        status_counts = status_counts_text(group, "amount_review_status")
+        status = group["amount_review_status"].fillna("").astype(str).str.lower() if "amount_review_status" in group.columns else pd.Series("", index=group.index)
+        records.append({
+            "income_type": income_type,
+            "count": len(group),
+            "amount_krw_ok_total": ok_amount_krw_total(group),
+            "native_currency": currency,
+            "amount_native_total": native_total,
+            "fx_missing_count": int((status == "fx_missing").sum()),
+            "amount_review_status_counts": status_counts,
+        })
+    return markdown_table(pd.DataFrame(records))
+
+
+def expense_summary_table(expenses: pd.DataFrame) -> str:
+    if expenses.empty or "expense_type" not in expenses.columns:
+        return EMPTY_DATA
+    records = []
+    for expense_type, group in expenses.groupby("expense_type", dropna=False, sort=True):
+        status_counts = status_counts_text(group, "amount_review_status")
+        status = group["amount_review_status"].fillna("").astype(str).str.lower() if "amount_review_status" in group.columns else pd.Series("", index=group.index)
+        records.append({
+            "expense_type": expense_type,
+            "count": len(group),
+            "amount_krw_ok_total": ok_amount_krw_total(group),
+            "fx_missing_count": int((status == "fx_missing").sum()),
+            "amount_review_status_counts": status_counts,
+        })
+    return markdown_table(pd.DataFrame(records))
+
+
+def fx_event_count_for_status(fx_events: pd.DataFrame, statuses: set[str]) -> int:
+    if fx_events.empty or "fx_pair_status" not in fx_events.columns:
+        return 0
+    mask = fx_events["fx_pair_status"].fillna("").astype(str).str.lower().isin(statuses)
+    view = fx_events[mask]
+    if view.empty:
+        return 0
+    if "fx_event_id" in view.columns:
+        ids = {
+            str(value).strip()
+            for value in view["fx_event_id"].fillna("")
+            if str(value).strip()
+        }
+        if ids:
+            return len(ids)
+    return len(view)
+
+
+def fx_event_summary_table(fx_events: pd.DataFrame) -> str:
+    if fx_events.empty:
+        return EMPTY_DATA
+    event_ids = set()
+    if "fx_event_id" in fx_events.columns:
+        event_ids = {
+            str(value).strip()
+            for value in fx_events["fx_event_id"].fillna("")
+            if str(value).strip()
+        }
+    role = fx_events["cashflow_role"].fillna("").astype(str).str.lower() if "cashflow_role" in fx_events.columns else pd.Series("", index=fx_events.index)
+    internal_flag = fx_events["is_internal_transfer"].apply(bool_value) if "is_internal_transfer" in fx_events.columns else pd.Series(False, index=fx_events.index)
+    needs_review = 0
+    if "amount_review_status" in fx_events.columns:
+        needs_review += int(fx_events["amount_review_status"].fillna("").astype(str).str.lower().eq("needs_review").sum())
+    if "fx_pair_status" in fx_events.columns:
+        needs_review += int(fx_events["fx_pair_status"].fillna("").astype(str).str.lower().isin({"unpaired", "needs_review"}).sum())
+    records = [
+        {"metric": "total_event_ids", "value": len(event_ids) if event_ids else len(fx_events)},
+        {"metric": "total_legs", "value": len(fx_events)},
+        {"metric": "paired_events", "value": fx_event_count_for_status(fx_events, {"paired"})},
+        {"metric": "partial_events", "value": fx_event_count_for_status(fx_events, {"partial"})},
+        {"metric": "unpaired_or_needs_review_rows", "value": needs_review},
+        {"metric": "internal_transfer_rows", "value": int((role.eq("internal_fx_exchange") | internal_flag).sum())},
+    ]
+    return markdown_table(pd.DataFrame(records))
+
+
+def reconciliation_metric_table(reconciliation: pd.DataFrame, metrics: list[str]) -> str:
+    if reconciliation.empty:
+        return EMPTY_DATA
+    records = [{"metric": name, "value": metric(reconciliation, name)} for name in metrics]
+    return markdown_table(pd.DataFrame(records))
+
+
+def reconciliation_status_warning(reconciliation: pd.DataFrame) -> str:
+    total_assets_status = metric(reconciliation, "total_assets_status", "unknown")
+    principal_status = metric(reconciliation, "net_external_principal_status", "unknown")
+    return_status = metric(reconciliation, "total_return_status", "unknown")
+    if total_assets_status == "available" and principal_status == "available" and return_status == "available":
+        return ""
+    return (
+        "> [!warning] Reconciliation not official\n"
+        f"> total_assets_status=`{markdown_cell(total_assets_status)}`, "
+        f"net_external_principal_status=`{markdown_cell(principal_status)}`, "
+        f"total_return_status=`{markdown_cell(return_status)}`. "
+        "Do not treat total return as official until unresolved FX, currency, and unit statuses are cleared."
+    )
+
+
+def reconciliation_content(reconciliation: pd.DataFrame, summary: pd.DataFrame | None = None) -> str:
+    summary = summary if summary is not None else pd.DataFrame()
+    parts = []
+    warning = reconciliation_status_warning(reconciliation)
+    if warning:
+        parts.append(warning)
+    parts.extend([
+        "## Reconciliation Summary",
+        reconciliation_metric_table(reconciliation, [
+            "total_assets_krw",
+            "total_assets_status",
+            "net_external_principal_krw",
+            "net_external_principal_status",
+            "total_return_krw",
+            "total_return_status",
+        ]),
+        "## Income and Expense Breakdown",
+        reconciliation_metric_table(reconciliation, [
+            "unrealized_pnl_krw",
+            "dividend_income_krw",
+            "interest_income_krw",
+            "distribution_income_krw",
+            "fee_expense_krw",
+            "tax_expense_krw",
+            "realized_pnl_status",
+            "fx_pnl_status",
+            "explained_profit_krw",
+        ]),
+        "## Residual",
+        reconciliation_metric_table(reconciliation, ["residual_krw", "residual_status"]),
+        "## Unresolved Status Counts",
+        reconciliation_metric_table(reconciliation, [
+            "fx_missing_row_count",
+            "currency_ambiguous_row_count",
+            "unit_ambiguous_row_count",
+            "amount_review_needed_row_count",
+        ]),
+        "## FX Event Counts",
+        reconciliation_metric_table(reconciliation, [
+            "fx_event_id_count",
+            "fx_event_leg_count",
+            "fx_paired_event_count",
+            "fx_partial_event_count",
+            "fx_unpaired_event_count",
+            "fx_needs_review_event_count",
+            "fx_unpaired_or_needs_review_row_count",
+            "fx_internal_transfer_row_count",
+        ]),
+    ])
+    if summary.empty:
+        return "\n\n".join(parts).strip()
+    parts.extend([
+        "## Portfolio Summary Status",
+        reconciliation_metric_table(summary, [
+            "currency_normalization_status",
+            "amount_unit_classification_status",
+            "profit_result_status",
+            "reconciliation_status",
+        ]),
+    ])
+    return "\n\n".join(parts).strip()
+
+
+def cashflow_content(
+    cash: pd.DataFrame,
+    dividends: pd.DataFrame,
+    summary: pd.DataFrame | None = None,
+    income: pd.DataFrame | None = None,
+    expenses: pd.DataFrame | None = None,
+    fx_events: pd.DataFrame | None = None,
+) -> str:
+    summary = summary if summary is not None else pd.DataFrame()
+    income = income if income is not None else pd.DataFrame()
+    expenses = expenses if expenses is not None else pd.DataFrame()
+    fx_events = fx_events if fx_events is not None else pd.DataFrame()
+    principal_cash = cashflow_principal_view(cash)
     months = 0
     if not principal_cash.empty and "trade_date" in principal_cash.columns:
         months = principal_cash["trade_date"].fillna("").astype(str).str.slice(0, 7).loc[lambda s: s.str.len() == 7].nunique()
     tx_types = int(principal_cash["transaction_type"].nunique()) if not principal_cash.empty and "transaction_type" in principal_cash.columns else 0
     principal_totals = cashflow_principal_totals(principal_cash)
     parts = [
+        preliminary_reconciliation_warning(summary),
         "## Snapshot",
         dashboard_kpi_grid([
             snapshot_card("Cashflow Rows", len(principal_cash)),
+            snapshot_card("Income Rows", len(income)),
+            snapshot_card("Expense Rows", len(expenses)),
+            snapshot_card("FX Legs", len(fx_events)),
             snapshot_card("Dividend Rows", len(dividends)),
             snapshot_card("Months", months),
             snapshot_card("Types", tx_types),
-            snapshot_card("Net Principal", principal_totals["net_principal"], "deposits - withdrawals"),
+            snapshot_card("Net Principal", principal_totals["net_principal"], "preliminary KRW-normalized deposits - withdrawals"),
+            snapshot_card("Recon Status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)),
         ]),
         "## Principal summary",
         cashflow_principal_summary_table(principal_cash),
+        "## Principal exclusions and unresolved amounts",
+        cashflow_exclusion_status_table(cash, income, expenses, fx_events),
+        "## Income summary",
+        income_summary_table(income),
+        "### Income status counts",
+        status_count_table(income, "amount_review_status", "income"),
+        "## Expense summary",
+        expense_summary_table(expenses),
+        "### Expense status counts",
+        status_count_table(expenses, "amount_review_status", "expense"),
+        "## FX Events",
+        fx_event_summary_table(fx_events),
+        "### FX event status counts",
+        status_count_table(fx_events, "fx_pair_status", "fx_event"),
         "## Monthly activity",
         cashflow_monthly_activity_table(principal_cash),
         "## Type summary",
@@ -723,6 +1103,93 @@ def holding_dedupe_summary_table(holdings: pd.DataFrame | None) -> str:
     return markdown_table(view.drop(columns=["_excluded"], errors="ignore"), columns, 50)
 
 
+REQUIRED_OUTPUT_COLUMNS = {
+    "processed_income.csv": [
+        "source_file", "source_file_type", "account_type", "market", "trade_date", "trade_time",
+        "ticker", "security_name", "income_type", "currency_native", "amount_native", "amount_krw",
+        "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
+        "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
+        "affects_profit", "raw_memo",
+    ],
+    "processed_expenses.csv": [
+        "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
+        "security_name", "expense_type", "currency_native", "amount_native", "amount_krw",
+        "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis", "amount_confidence",
+        "amount_review_status", "amount_review_reason", "affects_principal", "affects_profit",
+        "raw_memo",
+    ],
+    "processed_fx_events.csv": [
+        "fx_event_id", "source_file", "source_file_type", "account_type", "trade_date", "trade_time",
+        "leg", "from_currency", "to_currency", "currency_native", "amount_native", "amount_krw",
+        "fx_rate_to_krw", "fx_rate_source", "fx_pair_status", "cashflow_role", "affects_principal",
+        "affects_profit", "is_internal_transfer", "amount_review_status", "amount_review_reason", "raw_memo",
+    ],
+}
+
+
+def output_availability_table(processed_dir: Path) -> str:
+    records = []
+    for name, required_columns in REQUIRED_OUTPUT_COLUMNS.items():
+        path = processed_dir / name
+        df = read_csv(path)
+        missing = [col for col in required_columns if col not in df.columns]
+        records.append({
+            "output": name,
+            "exists": path.exists(),
+            "rows": len(df),
+            "schema": "ok" if not missing else "missing_columns",
+            "missing_columns": ", ".join(missing),
+        })
+    return markdown_table(pd.DataFrame(records))
+
+
+def unresolved_status_count_table(income: pd.DataFrame, expenses: pd.DataFrame, fx_events: pd.DataFrame, unclassified: pd.DataFrame) -> str:
+    records = []
+    income_status = income["amount_review_status"].fillna("").astype(str).str.lower() if "amount_review_status" in income.columns else pd.Series(dtype=str)
+    expense_status = expenses["amount_review_status"].fillna("").astype(str).str.lower() if "amount_review_status" in expenses.columns else pd.Series(dtype=str)
+    fx_pair_status = fx_events["fx_pair_status"].fillna("").astype(str).str.lower() if "fx_pair_status" in fx_events.columns else pd.Series(dtype=str)
+    fx_amount_status = fx_events["amount_review_status"].fillna("").astype(str).str.lower() if "amount_review_status" in fx_events.columns else pd.Series(dtype=str)
+    records.extend([
+        {"status": "income_fx_missing", "count": int(income_status.eq("fx_missing").sum())},
+        {"status": "expense_fx_missing", "count": int(expense_status.eq("fx_missing").sum())},
+        {"status": "fx_partial", "count": int(fx_pair_status.eq("partial").sum())},
+        {"status": "fx_unpaired_or_needs_review", "count": int(fx_pair_status.isin({"unpaired", "needs_review"}).sum() + fx_amount_status.eq("needs_review").sum())},
+        {"status": "unclassified_rows", "count": len(unclassified)},
+    ])
+    return markdown_table(pd.DataFrame(records))
+
+
+def amount_unit_audit_summary_table(amount_audit: pd.DataFrame, unit_mismatch: pd.DataFrame, income: pd.DataFrame, fx_events: pd.DataFrame) -> str:
+    audit_status = lower_column(amount_audit, "amount_review_status")
+    if audit_status.empty:
+        audit_status = lower_column(unit_mismatch, "amount_normalization_status")
+    audit_roles = lower_column(amount_audit, "cashflow_role")
+    mismatch_status = lower_column(unit_mismatch, "amount_normalization_status")
+    amount_krw = amount_audit["amount_krw"] if "amount_krw" in amount_audit.columns else pd.Series([""] * len(amount_audit), index=amount_audit.index)
+    amount_kind = lower_column(amount_audit, "amount_kind")
+    quantity_unit = amount_audit["quantity_unit"].fillna("").astype(str).str.strip() if "quantity_unit" in amount_audit.columns else pd.Series([""] * len(amount_audit), index=amount_audit.index)
+    price_unit = amount_audit["price_unit"].fillna("").astype(str).str.strip() if "price_unit" in amount_audit.columns else pd.Series([""] * len(amount_audit), index=amount_audit.index)
+    raw_not_official = 0
+    if not amount_audit.empty:
+        raw_not_official = int((audit_status.ne("ok") | amount_krw.fillna("").astype(str).str.strip().eq("")).sum())
+    elif not unit_mismatch.empty:
+        raw_not_official = len(unit_mismatch)
+    records = [
+        {"item": "fx_missing_count", "count": int(audit_status.eq("fx_missing").sum() or mismatch_status.eq("fx_missing").sum())},
+        {"item": "currency_ambiguous_count", "count": int(audit_status.eq("currency_ambiguous").sum() or mismatch_status.eq("currency_ambiguous").sum())},
+        {"item": "unit_ambiguous_count", "count": int(audit_status.eq("unit_ambiguous").sum() or mismatch_status.eq("unit_ambiguous").sum())},
+        {"item": "internal_fx_events", "count": len(fx_events) if not fx_events.empty else int(audit_roles.eq("internal_fx_exchange").sum())},
+        {"item": "income_excluded_from_principal", "count": len(income) if not income.empty else int(audit_roles.str.startswith("income_").sum())},
+        {"item": "trade_settlements_excluded_from_principal", "count": int(audit_roles.eq("trade_settlement").sum())},
+        {"item": "raw_amount_rows_not_official_krw", "count": raw_not_official},
+        {
+            "item": "quantity_price_not_aggregated_as_money",
+            "count": int((amount_kind.isin({"quantity", "unit_price"}) | quantity_unit.ne("") | price_unit.ne("")).sum()) if not amount_audit.empty else 0,
+        },
+    ]
+    return markdown_table(pd.DataFrame(records))
+
+
 def import_review_content(
     summary: pd.DataFrame,
     sources: pd.DataFrame,
@@ -730,7 +1197,18 @@ def import_review_content(
     unclassified: pd.DataFrame,
     warning: str,
     holdings: pd.DataFrame | None = None,
+    income: pd.DataFrame | None = None,
+    expenses: pd.DataFrame | None = None,
+    fx_events: pd.DataFrame | None = None,
+    amount_audit: pd.DataFrame | None = None,
+    unit_mismatch: pd.DataFrame | None = None,
+    processed_dir: Path | None = None,
 ) -> str:
+    income = income if income is not None else pd.DataFrame()
+    expenses = expenses if expenses is not None else pd.DataFrame()
+    fx_events = fx_events if fx_events is not None else pd.DataFrame()
+    amount_audit = amount_audit if amount_audit is not None else pd.DataFrame()
+    unit_mismatch = unit_mismatch if unit_mismatch is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
@@ -742,6 +1220,7 @@ def import_review_content(
     dedupe_retained = int(number_value(metric(summary, "holding_dedupe_retained_rows", "0")))
     dedupe_candidates = int(number_value(metric(summary, "holding_dedupe_candidate_rows", "0")))
     dedupe_excluded_value = metric(summary, "holding_dedupe_excluded_evaluation_amount", "0")
+    fx_partial_count = int(fx_events["fx_pair_status"].fillna("").astype(str).str.lower().eq("partial").sum()) if "fx_pair_status" in fx_events.columns else 0
     parts.extend([
         "## Snapshot",
         dashboard_kpi_grid([
@@ -749,10 +1228,20 @@ def import_review_content(
             snapshot_card("Transaction Files", metric(summary, "transaction_history_file_count", "0")),
             snapshot_card("Balance Files", metric(summary, "holdings_file_count", "0")),
             snapshot_card("Value Status", metric(summary, "total_portfolio_value_status", "unknown")),
+            snapshot_card("Income Rows", len(income)),
+            snapshot_card("Expense Rows", len(expenses)),
+            snapshot_card("FX Legs", len(fx_events)),
+            snapshot_card("FX Partial", fx_partial_count),
             snapshot_card("Unclassified", len(unclassified)),
             snapshot_card("Skipped", skipped_count),
             snapshot_card("Dedupe Excluded", dedupe_excluded),
         ]),
+        "## Processed Output Availability",
+        output_availability_table(processed_dir) if processed_dir is not None else EMPTY_DATA,
+        "## Unresolved Status Counts",
+        unresolved_status_count_table(income, expenses, fx_events, unclassified),
+        "## Amount/Unit Audit Summary",
+        amount_unit_audit_summary_table(amount_audit, unit_mismatch, income, fx_events),
         "## Source Files",
         markdown_table(sources, ["source_file", "source_file_type", "account_type", "size_bytes", "modified_at", "sensitive_data_found"], 20),
     ])
@@ -918,28 +1407,36 @@ def bootstrap_autogenerated_block(path: Path, heading: str = "Auto-generated upd
 
 def dashboard_content(name: str, processed_dir: Path) -> str:
     summary = read_csv(processed_dir / "portfolio_summary.csv")
+    reconciliation = read_csv(processed_dir / "reconciliation_summary.csv")
     holdings = read_csv(processed_dir / "processed_holdings.csv")
     risk = read_csv(processed_dir / "risk_watchlist.csv")
     review = read_csv(processed_dir / "review_queue.csv")
     history = read_csv(processed_dir / "history_queue.csv")
     cash = read_csv(processed_dir / "processed_cashflows.csv")
     dividends = read_csv(processed_dir / "processed_dividends.csv")
+    income = read_csv(processed_dir / "processed_income.csv")
+    expenses = read_csv(processed_dir / "processed_expenses.csv")
+    fx_events = read_csv(processed_dir / "processed_fx_events.csv")
     sources = read_csv(processed_dir / "source_file_index.csv")
     qa = read_csv(processed_dir / "qa_exceptions.csv")
     unclassified = read_csv(processed_dir / "unclassified_rows.csv")
     skipped = read_csv(processed_dir / "skipped_rows.csv")
+    amount_audit = read_csv(processed_dir / "amount_unit_audit.csv")
+    unit_mismatch = read_csv(processed_dir / "unit_mismatch_audit.csv")
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
-        return portfolio_content(summary, holdings, warning)
+        return portfolio_content(summary, holdings, warning, reconciliation)
+    if name == "Reconciliation.md":
+        return reconciliation_content(reconciliation, summary)
     if name == "Companies.md":
         return companies_content(holdings)
     if name == "Exposure.md":
         return exposure_content(summary, holdings, warning)
     if name == "Cashflows.md":
-        return cashflow_content(cash, dividends)
+        return cashflow_content(cash, dividends, summary, income, expenses, fx_events)
     if name == "Import_Review.md":
-        return import_review_content(summary, sources, skipped, unclassified, warning, holdings)
+        return import_review_content(summary, sources, skipped, unclassified, warning, holdings, income, expenses, fx_events, amount_audit, unit_mismatch, processed_dir)
     if name == "Risk_Watchlist.md":
         return "\n".join([warning, risk_watchlist_cards(risk)]).strip()
     if name == "Review_Queue.md":
@@ -1120,7 +1617,7 @@ def write_company_notes(vault_root: Path, processed_dir: Path, create_companies:
 def write_dashboards(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = False) -> list[str]:
     processed_dir = processed_dir or vault_root / "70_Imports" / "processed"
     warnings: list[str] = []
-    for name in ["Portfolio.md", "Companies.md", "Exposure.md", "Cashflows.md", "Import_Review.md", "Risk_Watchlist.md", "Review_Queue.md", "History_Queue.md", "QA_Exceptions.md"]:
+    for name in ["Portfolio.md", "Reconciliation.md", "Companies.md", "Exposure.md", "Cashflows.md", "Import_Review.md", "Risk_Watchlist.md", "Review_Queue.md", "History_Queue.md", "QA_Exceptions.md"]:
         path = vault_root / "10_Dashboard" / name
         ok, warning = replace_autogenerated_block(path, dashboard_content(name, processed_dir), dry_run=dry_run)
         if not ok:

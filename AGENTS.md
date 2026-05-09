@@ -2,7 +2,10 @@
 
 ## Project Scope
 - This repository is the clean GitHub baseline for `06_Stock` automation code, templates, prompts, and documentation.
-- It is not the live investment vault. The live Google Drive `06_Stock` vault must remain local/private.
+- It is not the live investment vault and it is not the actual Obsidian folder.
+- The Codex workspace `C:\Users\KSLV-II\Desktop\Codex\stock` is a baseline/review repository only.
+- The actual live/final Obsidian vault is [C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock](C:/Users/KSLV-II/Desktop/Obsidian/ESJ/06_Stock/).
+- The live Google Drive `06_Stock` vault must remain local/private.
 - The standard entrypoint is `70_Imports/scripts/main.py`.
 - New pipeline work should stay in `70_Imports/scripts/nh_importer.py`, `portfolio_model.py`, `obsidian_writer.py`, and `qa_checker.py` unless the task explicitly expands scope.
 - `70_Imports/scripts/namoo_excel_import.py` is compatibility-only; do not extend it for new pipeline behavior unless requested.
@@ -10,6 +13,8 @@
 ## Live Vault Rule
 - Never begin by editing the live Google Drive vault.
 - First modify and validate this GitHub baseline, then run tests, the quality gate, and a live-vault dry-run.
+- All live-vault work and final Obsidian output must be applied under `C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock`.
+- Do not treat `C:\Users\KSLV-II\Desktop\Codex\stock` as the final Obsidian vault or final note destination.
 - Actual live-vault writes require an expected dry-run result and explicit user intent for the live write.
 - Do not copy live vault files into this repository.
 

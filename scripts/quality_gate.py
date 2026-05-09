@@ -16,7 +16,15 @@ IMPORT_SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "70_Imports" / "scrip
 if str(IMPORT_SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(IMPORT_SCRIPTS_DIR))
 
-from nh_importer import canonical_overseas_position_key, dedupe_holdings, is_overseas_cashflow_amount_only_helper_row, is_overseas_position_row, is_principal_cashflow_row
+from nh_importer import (
+    AMOUNT_UNIT_AUDIT_COLUMNS,
+    UNIT_MISMATCH_AUDIT_COLUMNS,
+    canonical_overseas_position_key,
+    dedupe_holdings,
+    is_overseas_cashflow_amount_only_helper_row,
+    is_overseas_position_row,
+    is_principal_cashflow_row,
+)
 from obsidian_writer import company_note_identity_key, existing_company_note_index, parse_note_frontmatter, safe_component
 
 
@@ -27,6 +35,115 @@ TRANSACTION_SOURCE_TYPES = {"transaction_history", "transactions", "cashflow"}
 BLANK_VALUES = {"", "nan", "none", "na", "n/a", "<na>"}
 COMPANY_QA_EXCEPTION_IDS = {"INV-EX-03", "INV-EX-08"}
 CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
+BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
+DISALLOWED_CASHFLOW_TYPES = {
+    "buy",
+    "sell",
+    "dividend",
+    "interest",
+    "distribution",
+    "exchange",
+    "fee",
+    "tax",
+    "valuation",
+    "valuation_snapshot",
+}
+AMBIGUOUS_OR_UNRESOLVED_STATUSES = {
+    "fx_missing",
+    "currency_ambiguous",
+    "unit_ambiguous",
+    "needs_review",
+    "partial",
+    "unclassified",
+}
+
+REQUIRED_OUTPUT_SCHEMAS = {
+    "processed_income.csv": [
+        "source_file", "source_file_type", "account_type", "market", "trade_date", "trade_time",
+        "ticker", "security_name", "income_type", "currency_native", "amount_native", "amount_krw",
+        "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
+        "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
+        "affects_profit", "raw_memo",
+    ],
+    "processed_expenses.csv": [
+        "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
+        "security_name", "expense_type", "currency_native", "amount_native", "amount_krw",
+        "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis", "amount_confidence",
+        "amount_review_status", "amount_review_reason", "affects_principal", "affects_profit",
+        "raw_memo",
+    ],
+    "processed_fx_events.csv": [
+        "fx_event_id", "source_file", "source_file_type", "account_type", "trade_date", "trade_time",
+        "leg", "from_currency", "to_currency", "currency_native", "amount_native", "amount_krw",
+        "fx_rate_to_krw", "fx_rate_source", "fx_pair_status", "cashflow_role", "affects_principal",
+        "affects_profit", "is_internal_transfer", "amount_review_status", "amount_review_reason", "raw_memo",
+    ],
+}
+
+REQUIRED_RECONCILIATION_METRICS = [
+    "total_assets_krw",
+    "total_assets_status",
+    "external_deposit_krw",
+    "external_withdrawal_krw",
+    "net_external_principal_krw",
+    "net_external_principal_status",
+    "total_return_krw",
+    "total_return_status",
+    "unrealized_pnl_krw",
+    "dividend_income_krw",
+    "interest_income_krw",
+    "distribution_income_krw",
+    "fee_expense_krw",
+    "tax_expense_krw",
+    "realized_pnl_status",
+    "fx_pnl_status",
+    "explained_profit_krw",
+    "residual_krw",
+    "residual_status",
+    "fx_missing_row_count",
+    "currency_ambiguous_row_count",
+    "unit_ambiguous_row_count",
+    "amount_review_needed_row_count",
+    "fx_event_id_count",
+    "fx_event_leg_count",
+    "fx_paired_event_count",
+    "fx_partial_event_count",
+    "fx_unpaired_event_count",
+    "fx_needs_review_event_count",
+    "fx_unpaired_or_needs_review_row_count",
+    "fx_internal_transfer_row_count",
+]
+
+RECONCILIATION_COUNT_METRICS = {
+    "fx_missing_row_count",
+    "currency_ambiguous_row_count",
+    "unit_ambiguous_row_count",
+    "amount_review_needed_row_count",
+    "fx_event_id_count",
+    "fx_event_leg_count",
+    "fx_paired_event_count",
+    "fx_partial_event_count",
+    "fx_unpaired_event_count",
+    "fx_needs_review_event_count",
+    "fx_unpaired_or_needs_review_row_count",
+    "fx_internal_transfer_row_count",
+}
+
+RECONCILIATION_MONEY_METRICS = {
+    "total_assets_krw",
+    "external_deposit_krw",
+    "external_withdrawal_krw",
+    "net_external_principal_krw",
+    "total_return_krw",
+    "unrealized_pnl_krw",
+    "dividend_income_krw",
+    "interest_income_krw",
+    "distribution_income_krw",
+    "fee_expense_krw",
+    "tax_expense_krw",
+    "explained_profit_krw",
+    "residual_krw",
+}
 
 SENSITIVE_PATTERNS = [
     re.compile(r"\b(?!20\d{2}-\d{2}-\d{2}\b)\d{2,6}-\d{2,8}-\d{2,8}\b"),
@@ -48,7 +165,9 @@ def repo_root_from_script() -> Path:
 
 
 def is_blank(value: object) -> bool:
-    return str(value or "").strip().lower() in BLANK_VALUES
+    if value is None:
+        return True
+    return str(value).strip().lower() in BLANK_VALUES
 
 
 def read_csv_rows(path: Path) -> list[dict[str, str]]:
@@ -56,6 +175,53 @@ def read_csv_rows(path: Path) -> list[dict[str, str]]:
         return []
     with path.open("r", encoding="utf-8-sig", newline="") as handle:
         return list(csv.DictReader(handle))
+
+
+def read_csv_header(path: Path) -> list[str]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+        return list(reader.fieldnames or [])
+
+
+def boolish(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    return str(value or "").strip().lower() in {"true", "1", "yes", "y"}
+
+
+def text_value(value: object) -> str:
+    return "" if value is None else str(value).strip()
+
+
+def lower_value(value: object) -> str:
+    return text_value(value).lower()
+
+
+def upper_value(value: object) -> str:
+    return text_value(value).upper()
+
+
+def row_currency(row: dict[str, str]) -> str:
+    return upper_value(row.get("currency_native") or row.get("currency"))
+
+
+def row_status(row: dict[str, str]) -> str:
+    return lower_value(
+        row.get("amount_review_status")
+        or row.get("amount_normalization_status")
+        or row.get("fx_rate_status")
+    )
+
+
+def row_type(row: dict[str, str]) -> str:
+    return lower_value(
+        row.get("transaction_type")
+        or row.get("income_type")
+        or row.get("expense_type")
+        or row.get("cashflow_role")
+    )
 
 
 def write_result(results: list[GateResult], name: str, status: str, detail: str) -> None:
@@ -163,13 +329,445 @@ def is_valid_currency_code(value: object) -> bool:
 def invalid_currency_findings(holdings: list[dict[str, str]]) -> list[str]:
     findings: list[str] = []
     for idx, row in enumerate(holdings, start=2):
-        currency = row.get("currency", "")
+        for field in ["currency", "currency_native"]:
+            if field not in row:
+                continue
+            currency = row.get(field, "")
+            if is_blank(currency):
+                continue
+            if looks_like_fx_rate_value(currency):
+                findings.append(f"row {idx} {field} looks like FX rate: {currency}")
+            elif not is_valid_currency_code(currency):
+                findings.append(f"row {idx} invalid {field}={currency}")
+    return findings
+
+
+def non_krw_amount_without_fx_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        currency = row_currency(row)
+        if is_blank(currency) or currency == "KRW":
+            continue
+        if is_blank(row.get("amount_krw", "")):
+            continue
+        fx_rate = row.get("fx_rate_to_krw", "") or row.get("fx_rate", "")
+        amount_source = lower_value(row.get("amount_krw_source"))
+        amount_basis = lower_value(row.get("amount_basis"))
+        has_provenance = (
+            not is_blank(fx_rate)
+            or amount_source in BROKER_KRW_SOURCES
+            or amount_basis in BROKER_KRW_SOURCES
+        )
+        if not has_provenance:
+            findings.append(
+                f"row {idx} non-KRW native amount has amount_krw without FX or broker KRW source: "
+                f"currency_native={currency} amount_krw={row.get('amount_krw')}"
+            )
+        native = optional_float(row.get("amount_native"))
+        krw = optional_float(row.get("amount_krw"))
+        if currency == "USD" and is_blank(fx_rate) and native is not None and krw is not None and abs(native - krw) < 0.0001:
+            findings.append(f"row {idx} USD amount_krw equals amount_native while FX rate is blank")
+    return findings
+
+
+def principal_unit_misuse_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        role = lower_value(row.get("cashflow_role"))
+        affects_principal = boolish(row.get("affects_principal", ""))
+        if not (affects_principal or role == "external_principal" or is_principal_cashflow_row(row)):
+            continue
+        amount_kind = lower_value(row.get("amount_kind"))
+        quantity = optional_float(row.get("quantity") or row.get("raw_quantity"))
+        price = optional_float(row.get("price") or row.get("raw_price"))
+        if amount_kind in {"quantity", "unit_price"} or (quantity is not None and abs(quantity) > 1e-9) or (price is not None and abs(price) > 1e-9):
+            findings.append(
+                f"row {idx} principal row uses quantity/unit_price: "
+                f"transaction_type={row.get('transaction_type')} amount_kind={row.get('amount_kind')} "
+                f"quantity={row.get('quantity')} price={row.get('price')}"
+            )
+    return findings
+
+
+def processed_output_schema_findings(processed_dir: Path) -> list[str]:
+    findings: list[str] = []
+    for name, required_columns in REQUIRED_OUTPUT_SCHEMAS.items():
+        path = processed_dir / name
+        if not path.exists():
+            findings.append(f"{name} is missing")
+            continue
+        header = read_csv_header(path)
+        missing = [col for col in required_columns if col not in header]
+        if missing:
+            findings.append(f"{name} missing required columns: {', '.join(missing)}")
+    return findings
+
+
+def audit_output_schema_findings(processed_dir: Path) -> list[str]:
+    findings: list[str] = []
+    required_by_file = {
+        "amount_unit_audit.csv": AMOUNT_UNIT_AUDIT_COLUMNS,
+        "unit_mismatch_audit.csv": UNIT_MISMATCH_AUDIT_COLUMNS,
+    }
+    for name, required_columns in required_by_file.items():
+        path = processed_dir / name
+        if not path.exists():
+            findings.append(f"{name} is missing")
+            continue
+        header = read_csv_header(path)
+        missing = [col for col in required_columns if col not in header]
+        if missing:
+            findings.append(f"{name} missing required columns: {', '.join(missing)}")
+    return findings
+
+
+def optional_float(value: object) -> float | None:
+    if is_blank(value):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
+        return None
+
+
+def row_has_numeric_value(row: dict[str, str], fields: Iterable[str]) -> bool:
+    return any(optional_float(row.get(field)) is not None for field in fields)
+
+
+def official_total_candidate(row: dict[str, str]) -> bool:
+    role = lower_value(row.get("cashflow_role"))
+    if role == "external_principal" or boolish(row.get("affects_principal", "")):
+        return row_has_numeric_value(row, ["amount_krw", "settlement_amount_krw", "trade_amount_krw"])
+    if row_has_numeric_value(row, ["evaluation_amount_krw"]):
+        return True
+    return False
+
+
+def unit_classification_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    money_fields = [
+        "amount_native",
+        "amount_krw",
+        "trade_amount_native",
+        "trade_amount_krw",
+        "settlement_amount_native",
+        "settlement_amount_krw",
+        "evaluation_amount_native",
+        "evaluation_amount_krw",
+        "unrealized_pnl_native",
+        "unrealized_pnl_krw",
+        "fee_native",
+        "fee_krw",
+        "tax_native",
+        "tax_krw",
+    ]
+    for idx, row in enumerate(rows, start=2):
+        amount_kind = lower_value(row.get("amount_kind"))
+        amount_basis = lower_value(row.get("amount_basis"))
+        if amount_kind == "fx_rate" and row_has_numeric_value(row, money_fields):
+            findings.append(f"row {idx} FX rate is present in money amount fields")
+        if not official_total_candidate(row):
+            continue
+        currency = row_currency(row)
+        status = row_status(row)
+        missing = []
+        if is_blank(amount_kind) or amount_kind in {"unknown", "quantity", "unit_price", "fx_rate"}:
+            missing.append("amount_kind")
+        if is_blank(amount_basis) or amount_basis in {"unknown", "not_money"}:
+            missing.append("amount_basis")
         if is_blank(currency):
-            findings.append(f"row {idx} blank currency")
-        elif looks_like_fx_rate_value(currency):
-            findings.append(f"row {idx} currency looks like FX rate: {currency}")
-        elif not is_valid_currency_code(currency):
-            findings.append(f"row {idx} invalid currency={currency}")
+            missing.append("currency_native")
+        if is_blank(status):
+            missing.append("amount_review_status")
+        if missing:
+            findings.append(f"row {idx} official total candidate lacks explicit unit/currency classification: {', '.join(missing)}")
+    return findings
+
+
+def processed_cashflows_contract_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        role = lower_value(row.get("cashflow_role"))
+        transaction_type = lower_value(row.get("transaction_type"))
+        if role != "external_principal":
+            findings.append(f"processed_cashflows row {idx} cashflow_role is not external_principal: {row.get('cashflow_role')}")
+        if transaction_type in DISALLOWED_CASHFLOW_TYPES:
+            findings.append(f"processed_cashflows row {idx} contains non-principal transaction_type={row.get('transaction_type')}")
+        if not is_principal_cashflow_row(row):
+            findings.append(
+                f"processed_cashflows row {idx} is not a principal cashflow: "
+                f"transaction_type={row.get('transaction_type')} ticker={row.get('ticker')} quantity={row.get('quantity')} trade_date={row.get('trade_date')}"
+            )
+        if is_blank(row.get("settlement_amount_krw")) and is_blank(row.get("amount_krw")):
+            findings.append(f"processed_cashflows row {idx} has no KRW-normalized official amount field")
+        if not is_blank(row.get("amount_native")) and row_currency(row) != "KRW" and is_blank(row.get("amount_krw")):
+            findings.append(f"processed_cashflows row {idx} non-KRW principal amount lacks KRW-normalized amount")
+    return findings
+
+
+def fx_internal_transfer_findings(
+    cashflows: list[dict[str, str]],
+    transactions: list[dict[str, str]],
+    fx_events: list[dict[str, str]],
+    processed_dir: Path | None = None,
+) -> list[str]:
+    findings: list[str] = []
+    cashflow_exchange_rows = [
+        idx for idx, row in enumerate(cashflows, start=2)
+        if lower_value(row.get("transaction_type")) == "exchange" or lower_value(row.get("cashflow_role")) == "internal_fx_exchange"
+    ]
+    if cashflow_exchange_rows:
+        rows = ", ".join(str(idx) for idx in cashflow_exchange_rows[:5])
+        findings.append(f"exchange/internal FX rows appear in processed_cashflows at rows {rows}")
+
+    exchange_detected = any(
+        lower_value(row.get("transaction_type")) == "exchange" or lower_value(row.get("cashflow_role")) == "internal_fx_exchange"
+        for row in [*transactions, *cashflows]
+    )
+    if exchange_detected:
+        fx_file_missing = processed_dir is not None and not (processed_dir / "processed_fx_events.csv").exists()
+        if fx_file_missing or not fx_events:
+            findings.append("exchange rows are present but processed_fx_events.csv has no FX event rows")
+    return findings
+
+
+def income_expense_separation_findings(
+    cashflows: list[dict[str, str]],
+    income: list[dict[str, str]],
+    expenses: list[dict[str, str]],
+) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(cashflows, start=2):
+        role = lower_value(row.get("cashflow_role"))
+        transaction_type = lower_value(row.get("transaction_type"))
+        if role.startswith("income_") or transaction_type in {"dividend", "interest", "distribution"}:
+            findings.append(f"processed_cashflows row {idx} contains income transaction_type={row.get('transaction_type')}")
+        if role.startswith("expense_") or transaction_type in {"fee", "tax"}:
+            findings.append(f"processed_cashflows row {idx} contains expense transaction_type={row.get('transaction_type')}")
+    for idx, row in enumerate(income, start=2):
+        if boolish(row.get("affects_principal", "")):
+            findings.append(f"processed_income row {idx} affects principal")
+    for idx, row in enumerate(expenses, start=2):
+        if boolish(row.get("affects_principal", "")):
+            findings.append(f"processed_expenses row {idx} affects principal")
+    return findings
+
+
+def audit_representation_findings(
+    rows: list[dict[str, str]],
+    amount_audit: list[dict[str, str]],
+    unit_mismatch_audit: list[dict[str, str]],
+) -> list[str]:
+    findings: list[str] = []
+    audit_rows = [*amount_audit, *unit_mismatch_audit]
+
+    def source_has_non_krw() -> bool:
+        return any((currency := row_currency(row)) and currency != "KRW" for row in rows)
+
+    def source_has_exchange() -> bool:
+        return any(lower_value(row.get("transaction_type")) == "exchange" or lower_value(row.get("cashflow_role")) == "internal_fx_exchange" for row in rows)
+
+    def source_has_income() -> bool:
+        return any(
+            lower_value(row.get("transaction_type")) in {"dividend", "interest", "distribution"}
+            or lower_value(row.get("cashflow_role")).startswith("income_")
+            or lower_value(row.get("income_type")) in {"dividend", "interest", "distribution"}
+            for row in rows
+        )
+
+    def source_has_ambiguity() -> bool:
+        return any(row_status(row) in AMBIGUOUS_OR_UNRESOLVED_STATUSES for row in rows)
+
+    if source_has_non_krw() and not any((currency := row_currency(row)) and currency != "KRW" for row in audit_rows):
+        findings.append("non-KRW rows are not represented in audit outputs")
+    if source_has_exchange() and not any(lower_value(row.get("transaction_type")) == "exchange" or lower_value(row.get("cashflow_role")) == "internal_fx_exchange" for row in audit_rows):
+        findings.append("exchange/internal FX rows are not represented in audit outputs")
+    if source_has_income() and not any(
+        lower_value(row.get("transaction_type")) in {"dividend", "interest", "distribution"}
+        or lower_value(row.get("cashflow_role")).startswith("income_")
+        for row in audit_rows
+    ):
+        findings.append("income rows are not represented in audit outputs")
+    if source_has_ambiguity() and not any(row_status(row) in AMBIGUOUS_OR_UNRESOLVED_STATUSES for row in audit_rows):
+        findings.append("ambiguous or unresolved rows are not represented in audit outputs")
+    return findings
+
+
+def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    metrics = {str(row.get("metric", "") or "").strip(): row.get("value", "") for row in rows}
+    missing = [metric for metric in REQUIRED_RECONCILIATION_METRICS if metric not in metrics]
+    if missing:
+        findings.append(f"reconciliation_summary.csv missing required metrics: {', '.join(missing)}")
+        return findings
+
+    for metric in RECONCILIATION_MONEY_METRICS:
+        if not is_blank(metrics.get(metric, "")) and optional_float(metrics.get(metric)) is None:
+            findings.append(f"reconciliation_summary.csv metric {metric} is not numeric: {metrics.get(metric)}")
+    for metric in RECONCILIATION_COUNT_METRICS:
+        value = optional_float(metrics.get(metric))
+        if value is None or value < 0 or value != int(value):
+            findings.append(f"reconciliation_summary.csv count metric {metric} must be a non-negative integer: {metrics.get(metric)}")
+
+    if str(metrics.get("realized_pnl_status", "")).strip().lower() != "unavailable":
+        findings.append("reconciliation_summary.csv realized_pnl_status must remain unavailable")
+    if str(metrics.get("fx_pnl_status", "")).strip().lower() != "unavailable":
+        findings.append("reconciliation_summary.csv fx_pnl_status must remain unavailable")
+
+    assets = optional_float(metrics.get("total_assets_krw"))
+    principal = optional_float(metrics.get("net_external_principal_krw"))
+    total_return = optional_float(metrics.get("total_return_krw"))
+    total_assets_status = str(metrics.get("total_assets_status", "")).strip().lower()
+    principal_status = str(metrics.get("net_external_principal_status", "")).strip().lower()
+    total_return_status = str(metrics.get("total_return_status", "")).strip().lower()
+    residual_status = str(metrics.get("residual_status", "")).strip().lower()
+    if total_assets_status == "available" and assets is None:
+        findings.append("reconciliation_summary.csv total_assets_status is available but total_assets_krw is blank")
+    if principal_status == "available" and principal is None:
+        findings.append("reconciliation_summary.csv net_external_principal_status is available but net_external_principal_krw is blank")
+    if total_return_status == "available":
+        unresolved_counts = {
+            metric: optional_float(metrics.get(metric))
+            for metric in [
+                "fx_missing_row_count",
+                "currency_ambiguous_row_count",
+                "unit_ambiguous_row_count",
+                "amount_review_needed_row_count",
+            ]
+        }
+        active_unresolved = [metric for metric, value in unresolved_counts.items() if value is not None and value > 0]
+        if active_unresolved:
+            findings.append(
+                "reconciliation_summary.csv total_return_status is available despite unresolved official-total rows: "
+                + ", ".join(active_unresolved)
+            )
+        if total_assets_status != "available":
+            findings.append("reconciliation_summary.csv total_return_status is available but total_assets_status is not available")
+        if principal_status != "available":
+            findings.append("reconciliation_summary.csv total_return_status is available but net_external_principal_status is not available")
+        if assets is None or principal is None or total_return is None:
+            findings.append("reconciliation_summary.csv total_return_status is available but required KRW values are blank")
+        elif abs(total_return - (assets - principal)) > 0.0001:
+            findings.append("reconciliation_summary.csv total_return_krw formula mismatch")
+    elif residual_status == "available":
+        findings.append("reconciliation_summary.csv residual_status must not be available when total_return_status is not available")
+
+    explained_inputs = [
+        "unrealized_pnl_krw",
+        "dividend_income_krw",
+        "interest_income_krw",
+        "distribution_income_krw",
+        "fee_expense_krw",
+        "tax_expense_krw",
+    ]
+    explained_values = {metric: optional_float(metrics.get(metric)) for metric in explained_inputs}
+    explained = optional_float(metrics.get("explained_profit_krw"))
+    if all(value is not None for value in explained_values.values()) and explained is not None:
+        expected = (
+            explained_values["unrealized_pnl_krw"]
+            + explained_values["dividend_income_krw"]
+            + explained_values["interest_income_krw"]
+            + explained_values["distribution_income_krw"]
+            - explained_values["fee_expense_krw"]
+            - explained_values["tax_expense_krw"]
+        )
+        if abs(explained - expected) > 0.0001:
+            findings.append("reconciliation_summary.csv explained_profit_krw formula mismatch")
+
+    residual = optional_float(metrics.get("residual_krw"))
+    if residual_status == "available":
+        if total_return_status != "available":
+            findings.append("reconciliation_summary.csv residual_status is available but total_return_status is not available")
+        if total_return is None or explained is None or residual is None:
+            findings.append("reconciliation_summary.csv residual_status is available but required KRW values are blank")
+        elif abs(residual - (total_return - explained)) > 0.0001:
+            findings.append("reconciliation_summary.csv residual_krw formula mismatch")
+    return findings
+
+
+def reconciliation_summary_file_findings(processed_dir: Path) -> list[str]:
+    path = processed_dir / "reconciliation_summary.csv"
+    if not path.exists():
+        return ["reconciliation_summary.csv is missing"]
+    header = read_csv_header(path)
+    missing_columns = [column for column in ["metric", "value"] if column not in header]
+    if missing_columns:
+        return [f"reconciliation_summary.csv missing required columns: {', '.join(missing_columns)}"]
+    return reconciliation_summary_findings(read_csv_rows(path))
+
+
+def money_event_contract_findings(rows: list[dict[str, str]], label: str, type_col: str, allowed_types: set[str]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        event_type = str(row.get(type_col, "") or "").strip().lower()
+        if event_type not in allowed_types:
+            findings.append(f"{label} row {idx} invalid {type_col}={row.get(type_col)}")
+        if boolish(row.get("affects_principal", "")):
+            findings.append(f"{label} row {idx} affects principal")
+        if not boolish(row.get("affects_profit", "")):
+            findings.append(f"{label} row {idx} does not affect profit")
+        status = str(row.get("amount_review_status", "") or "").strip().lower()
+        if is_blank(status):
+            findings.append(f"{label} row {idx} has blank amount_review_status")
+        currency = str(row.get("currency_native", "") or "").strip().upper()
+        amount_native = row.get("amount_native", "")
+        amount_krw = row.get("amount_krw", "")
+        if status == "ok" and not is_blank(amount_native) and is_blank(amount_krw):
+            findings.append(f"{label} row {idx} has status ok but blank amount_krw")
+        if currency and currency != "KRW" and not is_blank(amount_native) and is_blank(amount_krw) and status != "fx_missing":
+            findings.append(f"{label} row {idx} non-KRW amount without KRW conversion is not marked fx_missing")
+    return findings
+
+
+def income_contract_findings(rows: list[dict[str, str]]) -> list[str]:
+    return money_event_contract_findings(rows, "processed_income", "income_type", {"dividend", "interest", "distribution"})
+
+
+def expense_contract_findings(rows: list[dict[str, str]]) -> list[str]:
+    return money_event_contract_findings(rows, "processed_expenses", "expense_type", {"fee", "tax"})
+
+
+def fx_event_contract_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    allowed_pair_statuses = {"paired", "partial", "unpaired", "needs_review", ""}
+    paired_groups: dict[str, list[tuple[int, dict[str, str]]]] = {}
+    for idx, row in enumerate(rows, start=2):
+        if boolish(row.get("affects_principal", "")):
+            findings.append(f"processed_fx_events row {idx} affects principal")
+        if boolish(row.get("affects_profit", "")):
+            findings.append(f"processed_fx_events row {idx} affects profit")
+        role = str(row.get("cashflow_role", "") or "").strip().lower()
+        if role != "internal_fx_exchange" and not boolish(row.get("is_internal_transfer", "")):
+            findings.append(f"processed_fx_events row {idx} is not marked as an internal FX transfer")
+        pair_status = str(row.get("fx_pair_status", "") or "").strip().lower()
+        if pair_status not in allowed_pair_statuses:
+            findings.append(f"processed_fx_events row {idx} invalid fx_pair_status={row.get('fx_pair_status')}")
+        if not is_blank(row.get("amount_native", "")) and is_blank(row.get("amount_review_status", "")):
+            findings.append(f"processed_fx_events row {idx} has amount_native but blank amount_review_status")
+        if pair_status == "paired" and is_blank(row.get("fx_event_id", "")):
+            findings.append(f"processed_fx_events row {idx} paired leg has blank fx_event_id")
+        if pair_status == "paired":
+            event_id = str(row.get("fx_event_id", "") or "").strip()
+            paired_groups.setdefault(event_id, []).append((idx, row))
+    for event_id, group in sorted(paired_groups.items()):
+        label = event_id or "<blank>"
+        row_numbers = ", ".join(str(idx) for idx, _ in group)
+        if len(group) != 2:
+            findings.append(f"processed_fx_events paired fx_event_id={label} has {len(group)} rows; expected exactly 2 rows (rows {row_numbers})")
+        currencies = [str(row.get("currency_native", "") or "").strip().upper() for _, row in group]
+        krw_count = sum(1 for currency in currencies if currency == "KRW")
+        non_krw_count = sum(1 for currency in currencies if currency and currency != "KRW")
+        if krw_count != 1 or non_krw_count != 1:
+            findings.append(f"processed_fx_events paired fx_event_id={label} must have one KRW leg and one non-KRW leg; currencies={currencies}")
+        for idx, row in group:
+            if str(row.get("cashflow_role", "") or "").strip().lower() != "internal_fx_exchange":
+                findings.append(f"processed_fx_events paired fx_event_id={label} row {idx} cashflow_role is not internal_fx_exchange")
+            if not boolish(row.get("is_internal_transfer", "")):
+                findings.append(f"processed_fx_events paired fx_event_id={label} row {idx} is_internal_transfer is not true")
+            if boolish(row.get("affects_principal", "")):
+                findings.append(f"processed_fx_events paired fx_event_id={label} row {idx} affects principal")
+            if boolish(row.get("affects_profit", "")):
+                findings.append(f"processed_fx_events paired fx_event_id={label} row {idx} affects profit")
     return findings
 
 
@@ -337,8 +935,31 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     transactions = read_csv_rows(processed_dir / "processed_transactions.csv")
     holdings = read_csv_rows(processed_dir / "processed_holdings.csv")
     cashflows = read_csv_rows(processed_dir / "processed_cashflows.csv")
+    income = read_csv_rows(processed_dir / "processed_income.csv")
+    expenses = read_csv_rows(processed_dir / "processed_expenses.csv")
+    fx_events = read_csv_rows(processed_dir / "processed_fx_events.csv")
+    amount_audit = read_csv_rows(processed_dir / "amount_unit_audit.csv")
+    unit_mismatch_audit = read_csv_rows(processed_dir / "unit_mismatch_audit.csv")
     unclassified_rows = read_csv_rows(processed_dir / "unclassified_rows.csv")
     summary = summary_map(processed_dir)
+
+    output_schema_findings = processed_output_schema_findings(processed_dir)
+    if output_schema_findings:
+        write_result(results, "income/expense/FX output schema contract", "FAIL", "; ".join(output_schema_findings[:5]))
+    else:
+        write_result(results, "income/expense/FX output schema contract", "PASS", "required output files exist with expected columns.")
+
+    audit_schema_findings = audit_output_schema_findings(processed_dir)
+    if audit_schema_findings:
+        write_result(results, "amount/unit audit output contract", "FAIL", "; ".join(audit_schema_findings[:5]))
+    else:
+        write_result(results, "amount/unit audit output contract", "PASS", "audit output files exist with expected columns.")
+
+    reconciliation_findings = reconciliation_summary_file_findings(processed_dir)
+    if reconciliation_findings:
+        write_result(results, "reconciliation_summary metric contract", "FAIL", "; ".join(reconciliation_findings[:5]))
+    else:
+        write_result(results, "reconciliation_summary metric contract", "PASS", "required reconciliation metrics exist and formulas/statuses are guarded.")
 
     if not source_index:
         if not raw_excel_files(raw_dir):
@@ -390,22 +1011,79 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     else:
         write_result(results, "processed_holdings currency code contract", "PASS", "currency values are 3-letter codes.")
 
+    all_normalized_rows = [*transactions, *holdings, *cashflows, *income, *expenses, *fx_events]
+    all_currency_rows = [*all_normalized_rows, *amount_audit, *unit_mismatch_audit]
+    invalid_normalized_currencies = invalid_currency_findings(all_currency_rows)
+    if invalid_normalized_currencies:
+        write_result(results, "normalized currency unit contract", "FAIL", "; ".join(invalid_normalized_currencies[:5]))
+    else:
+        write_result(results, "normalized currency unit contract", "PASS", "currency and currency_native values are 3-letter codes.")
+
+    non_krw_without_fx = non_krw_amount_without_fx_findings(all_normalized_rows)
+    if non_krw_without_fx:
+        write_result(results, "non-KRW amount KRW conversion provenance", "FAIL", "; ".join(non_krw_without_fx[:5]))
+    else:
+        write_result(results, "non-KRW amount KRW conversion provenance", "PASS", "non-KRW amount_krw values have FX or broker KRW source.")
+
+    unit_classification = unit_classification_findings([*all_normalized_rows, *amount_audit])
+    if unit_classification:
+        write_result(results, "official amount unit classification contract", "FAIL", "; ".join(unit_classification[:5]))
+    else:
+        write_result(results, "official amount unit classification contract", "PASS", "official amount candidates carry unit, currency, role, and review status.")
+
     cash_qa_findings = cash_company_qa_findings(processed_dir, holdings)
     if cash_qa_findings:
         write_result(results, "cash assets excluded from Company QA", "FAIL", "; ".join(cash_qa_findings[:5]))
     else:
         write_result(results, "cash assets excluded from Company QA", "PASS", "no cash ticker appears in Company thesis/sell-criteria QA.")
 
-    bad_cashflow_rows = []
-    for idx, row in enumerate(cashflows, start=2):
-        if not is_principal_cashflow_row(row):
-            bad_cashflow_rows.append(
-                f"row {idx} transaction_type={row.get('transaction_type')} ticker={row.get('ticker')} quantity={row.get('quantity')} trade_date={row.get('trade_date')}"
-            )
-    if bad_cashflow_rows:
-        write_result(results, "processed_cashflows principal-only contract", "FAIL", "; ".join(bad_cashflow_rows[:5]))
+    cashflow_contract = processed_cashflows_contract_findings(cashflows)
+    if cashflow_contract:
+        write_result(results, "processed_cashflows principal-only contract", "FAIL", "; ".join(cashflow_contract[:5]))
     else:
         write_result(results, "processed_cashflows principal-only contract", "PASS", f"{len(cashflows)} principal cashflow rows.")
+
+    principal_unit_misuse = principal_unit_misuse_findings(cashflows)
+    if principal_unit_misuse:
+        write_result(results, "principal cashflow amount unit contract", "FAIL", "; ".join(principal_unit_misuse[:5]))
+    else:
+        write_result(results, "principal cashflow amount unit contract", "PASS", "principal cashflows do not use quantity or unit price as amount.")
+
+    separation_findings = income_expense_separation_findings(cashflows, income, expenses)
+    if separation_findings:
+        write_result(results, "income/expense separation from principal", "FAIL", "; ".join(separation_findings[:5]))
+    else:
+        write_result(results, "income/expense separation from principal", "PASS", "income and expense rows are outside processed_cashflows and do not affect principal.")
+
+    income_findings = income_contract_findings(income)
+    if income_findings:
+        write_result(results, "processed_income non-principal contract", "FAIL", "; ".join(income_findings[:5]))
+    else:
+        write_result(results, "processed_income non-principal contract", "PASS", f"{len(income)} income rows do not affect principal.")
+
+    expense_findings = expense_contract_findings(expenses)
+    if expense_findings:
+        write_result(results, "processed_expenses non-principal contract", "FAIL", "; ".join(expense_findings[:5]))
+    else:
+        write_result(results, "processed_expenses non-principal contract", "PASS", f"{len(expenses)} expense rows do not affect principal.")
+
+    fx_findings = fx_event_contract_findings(fx_events)
+    if fx_findings:
+        write_result(results, "processed_fx_events internal-transfer contract", "FAIL", "; ".join(fx_findings[:5]))
+    else:
+        write_result(results, "processed_fx_events internal-transfer contract", "PASS", f"{len(fx_events)} FX event legs are internal transfers.")
+
+    fx_transfer_findings = fx_internal_transfer_findings(cashflows, transactions, fx_events, processed_dir)
+    if fx_transfer_findings:
+        write_result(results, "FX exchange internal-transfer separation", "FAIL", "; ".join(fx_transfer_findings[:5]))
+    else:
+        write_result(results, "FX exchange internal-transfer separation", "PASS", "exchange rows stay out of processed_cashflows and are surfaced through FX events when present.")
+
+    audit_representation = audit_representation_findings(all_normalized_rows, amount_audit, unit_mismatch_audit)
+    if audit_representation:
+        write_result(results, "audit output representation contract", "FAIL", "; ".join(audit_representation[:5]))
+    else:
+        write_result(results, "audit output representation contract", "PASS", "non-KRW, exchange, income, and unresolved rows are represented in audit outputs when present.")
 
     skip_findings = skipped_rows_findings(processed_dir, unclassified_rows)
     if skip_findings:

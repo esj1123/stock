@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from nh_importer import detect_sensitive, is_cash_asset_name, is_leveraged_etf_name, safe_source_name
+from nh_importer import detect_sensitive, is_cash_asset_name, is_leveraged_etf_name, is_principal_cashflow_row, safe_source_name
 from obsidian_writer import (
     AUTO_END,
     AUTO_START,
@@ -18,6 +18,12 @@ from obsidian_writer import (
     safe_component,
 )
 from portfolio_model import has_filled_section, parse_frontmatter
+
+
+BLANK_VALUES = {"", "nan", "none", "na", "n/a", "<na>", "-", "--"}
+BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
+FX_KRW_SOURCES = {"fx_rate_to_krw", "derived_krw_from_fx"}
+RESIDUAL_EXCEPTION_THRESHOLD_KRW = 1000.0
 
 
 def read_csv(path: Path) -> pd.DataFrame:
@@ -31,6 +37,53 @@ def read_csv(path: Path) -> pd.DataFrame:
 
 def add(rows: list[dict[str, Any]], exception_id: str, severity: str, file: str, issue: str, suggested_fix: str) -> None:
     rows.append({"exception_id": exception_id, "severity": severity, "file": file, "issue": issue, "suggested_fix": suggested_fix})
+
+
+def is_blank(value: Any) -> bool:
+    if value is None:
+        return True
+    try:
+        if pd.isna(value):
+            return True
+    except Exception:
+        pass
+    return str(value).strip().lower() in BLANK_VALUES
+
+
+def text_value(value: Any) -> str:
+    return "" if is_blank(value) else str(value).strip()
+
+
+def lower_value(value: Any) -> str:
+    return text_value(value).lower()
+
+
+def bool_value(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    return lower_value(value) in {"true", "1", "yes", "y"}
+
+
+def optional_number(value: Any) -> float | None:
+    if is_blank(value):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except Exception:
+        return None
+
+
+def row_status(row: pd.Series, *fields: str) -> str:
+    for field in fields:
+        if field in row.index:
+            value = lower_value(row.get(field))
+            if value:
+                return value
+    return ""
+
+
+def processed_row_ref(file_name: str, idx: int) -> str:
+    return f"70_Imports/processed/{file_name}:row{idx + 2}"
 
 
 def days_old(value: Any) -> int | None:
@@ -83,6 +136,249 @@ def active_company_note_targets(vault_root: Path, processed_dir: Path) -> dict[s
             )
         targets.setdefault(identity, set()).add(str(path.relative_to(vault_root)))
     return targets
+
+
+def reconciliation_summary_metrics(processed_dir: Path) -> dict[str, str]:
+    summary = read_csv(processed_dir / "reconciliation_summary.csv")
+    if summary.empty or "metric" not in summary.columns or "value" not in summary.columns:
+        return {}
+    return {
+        str(row.get("metric", "") or "").strip(): text_value(row.get("value", ""))
+        for _, row in summary.iterrows()
+        if text_value(row.get("metric", ""))
+    }
+
+
+def add_status_exception(rows: list[dict[str, Any]], status: str, file_name: str, idx: int) -> None:
+    if status == "fx_missing":
+        add(
+            rows,
+            "REC-EX-01",
+            "blocking",
+            processed_row_ref(file_name, idx),
+            "FX rate missing for a non-KRW amount needed before reconciliation can be official.",
+            "Review FX source or broker-provided KRW amount provenance; keep the row out of official KRW totals until resolved.",
+        )
+    elif status == "currency_ambiguous":
+        add(
+            rows,
+            "REC-EX-02",
+            "blocking",
+            processed_row_ref(file_name, idx),
+            "Currency is ambiguous; raw amount cannot be safely treated as KRW.",
+            "Review source mapping and set currency_native to a 3-letter currency code before reconciliation.",
+        )
+    elif status == "unit_ambiguous":
+        add(
+            rows,
+            "REC-EX-03",
+            "blocking",
+            processed_row_ref(file_name, idx),
+            "Unit is ambiguous; numeric value may be quantity, unit price, FX rate, fee, tax, or money.",
+            "Classify amount_kind, amount_basis, unit, and review status before using the row in KRW totals.",
+        )
+
+
+def add_status_exceptions_from_frame(rows: list[dict[str, Any]], df: pd.DataFrame, file_name: str, status_fields: tuple[str, ...]) -> None:
+    if df.empty:
+        return
+    for idx, row in df.reset_index(drop=True).iterrows():
+        status = row_status(row, *status_fields)
+        add_status_exception(rows, status, file_name, idx)
+
+
+def row_currency(row: pd.Series) -> str:
+    for field in ["currency_native", "currency"]:
+        if field in row.index:
+            currency = text_value(row.get(field)).upper()
+            if currency:
+                return currency
+    return ""
+
+
+def row_has_krw_without_provenance(row: pd.Series) -> bool:
+    currency = row_currency(row)
+    if not currency or currency == "KRW":
+        return False
+    if is_blank(row.get("amount_krw", "")):
+        return False
+    fx_rate = row.get("fx_rate_to_krw", row.get("fx_rate", ""))
+    amount_source = lower_value(row.get("amount_krw_source", ""))
+    amount_basis = lower_value(row.get("amount_basis", ""))
+    if not is_blank(fx_rate):
+        return False
+    return amount_source not in BROKER_KRW_SOURCES | FX_KRW_SOURCES and amount_basis not in BROKER_KRW_SOURCES | FX_KRW_SOURCES
+
+
+def add_non_krw_provenance_exceptions(rows: list[dict[str, Any]], df: pd.DataFrame, file_name: str) -> None:
+    if df.empty:
+        return
+    for idx, row in df.reset_index(drop=True).iterrows():
+        if row_has_krw_without_provenance(row):
+            add(
+                rows,
+                "REC-EX-08",
+                "blocking",
+                processed_row_ref(file_name, idx),
+                "Non-KRW amount has amount_krw populated without FX rate or broker KRW provenance.",
+                "Add fx_rate_to_krw or broker KRW source metadata before treating the KRW amount as official.",
+            )
+
+
+def is_principal_candidate(row: pd.Series) -> bool:
+    role = lower_value(row.get("cashflow_role", ""))
+    tx_type = lower_value(row.get("transaction_type", ""))
+    return (
+        role == "external_principal"
+        or tx_type in {"deposit", "withdrawal"}
+        or bool_value(row.get("affects_principal", ""))
+        or is_principal_cashflow_row(row)
+    )
+
+
+def has_quantity_or_price_unit(row: pd.Series) -> bool:
+    amount_kind = lower_value(row.get("amount_kind", ""))
+    quantity = optional_number(row.get("quantity", row.get("raw_quantity", "")))
+    price = optional_number(row.get("price", row.get("raw_price", "")))
+    quantity_unit = text_value(row.get("quantity_unit", ""))
+    price_unit = text_value(row.get("price_unit", ""))
+    return (
+        amount_kind in {"quantity", "unit_price"}
+        or (quantity is not None and abs(quantity) > 1e-9)
+        or (price is not None and abs(price) > 1e-9)
+        or bool(quantity_unit)
+        or bool(price_unit)
+    )
+
+
+def add_quantity_price_exceptions(rows: list[dict[str, Any]], df: pd.DataFrame, file_name: str) -> None:
+    if df.empty:
+        return
+    for idx, row in df.reset_index(drop=True).iterrows():
+        if is_principal_candidate(row) and has_quantity_or_price_unit(row):
+            add(
+                rows,
+                "REC-EX-09",
+                "blocking",
+                processed_row_ref(file_name, idx),
+                "Quantity or unit price appears in a principal or total amount candidate.",
+                "Separate quantity/unit price from money amount fields before principal or asset reconciliation.",
+            )
+
+
+def add_exchange_exceptions(rows: list[dict[str, Any]], df: pd.DataFrame, file_name: str) -> None:
+    if df.empty:
+        return
+    for idx, row in df.reset_index(drop=True).iterrows():
+        role = lower_value(row.get("cashflow_role", ""))
+        tx_type = lower_value(row.get("transaction_type", ""))
+        if role == "internal_fx_exchange" or tx_type == "exchange" or bool_value(row.get("is_internal_transfer", "")):
+            add(
+                rows,
+                "REC-EX-04",
+                "advisory",
+                processed_row_ref(file_name, idx),
+                "Exchange row detected and excluded from external principal.",
+                "Verify FX pairing and keep exchange activity classified as an internal transfer.",
+            )
+
+
+def add_income_exclusion_exceptions(rows: list[dict[str, Any]], income: pd.DataFrame, transactions: pd.DataFrame) -> None:
+    income_types = {"dividend", "interest", "distribution"}
+    if not income.empty:
+        for idx, row in income.reset_index(drop=True).iterrows():
+            if lower_value(row.get("income_type", "")) in income_types:
+                add(
+                    rows,
+                    "REC-EX-05",
+                    "advisory",
+                    processed_row_ref("processed_income.csv", idx),
+                    "Dividend, interest, or distribution row detected and excluded from external principal.",
+                    "Verify income classification and include it only in profit breakdown after KRW conversion is reviewed.",
+                )
+    if not transactions.empty:
+        for idx, row in transactions.reset_index(drop=True).iterrows():
+            role = lower_value(row.get("cashflow_role", ""))
+            tx_type = lower_value(row.get("transaction_type", ""))
+            if role.startswith("income_") or tx_type in income_types:
+                add(
+                    rows,
+                    "REC-EX-05",
+                    "advisory",
+                    processed_row_ref("processed_transactions.csv", idx),
+                    "Dividend, interest, or distribution row detected and excluded from external principal.",
+                    "Verify income classification and include it only in profit breakdown after KRW conversion is reviewed.",
+                )
+
+
+def add_reconciliation_summary_exceptions(rows: list[dict[str, Any]], processed_dir: Path) -> None:
+    metrics = reconciliation_summary_metrics(processed_dir)
+    if not metrics:
+        return
+    total_assets_status = lower_value(metrics.get("total_assets_status", ""))
+    principal_status = lower_value(metrics.get("net_external_principal_status", ""))
+    total_return_status = lower_value(metrics.get("total_return_status", ""))
+    if total_return_status and total_return_status != "available":
+        add(
+            rows,
+            "REC-EX-06",
+            "blocking",
+            "70_Imports/processed/reconciliation_summary.csv",
+            "Reconciliation total return is unavailable because total assets or net principal is unavailable.",
+            "Resolve total_assets_status and net_external_principal_status before treating total return as official.",
+        )
+    elif (total_assets_status and total_assets_status != "available") or (principal_status and principal_status != "available"):
+        add(
+            rows,
+            "REC-EX-06",
+            "blocking",
+            "70_Imports/processed/reconciliation_summary.csv",
+            "Reconciliation total return is unavailable because total assets or net principal is unavailable.",
+            "Resolve total_assets_status and net_external_principal_status before treating total return as official.",
+        )
+
+    residual_status = lower_value(metrics.get("residual_status", ""))
+    residual = optional_number(metrics.get("residual_krw", ""))
+    if residual_status == "available" and residual is not None and abs(residual) > RESIDUAL_EXCEPTION_THRESHOLD_KRW:
+        add(
+            rows,
+            "REC-EX-07",
+            "advisory",
+            "70_Imports/processed/reconciliation_summary.csv",
+            "Residual exceeds configured reconciliation threshold.",
+            "Review realized PnL, FX PnL, income, expenses, and principal classifications for unexplained difference.",
+        )
+
+
+def add_reconciliation_quality_exceptions(rows: list[dict[str, Any]], processed_dir: Path) -> None:
+    amount_audit = read_csv(processed_dir / "amount_unit_audit.csv")
+    unit_mismatch = read_csv(processed_dir / "unit_mismatch_audit.csv")
+    transactions = read_csv(processed_dir / "processed_transactions.csv")
+    cashflows = read_csv(processed_dir / "processed_cashflows.csv")
+    income = read_csv(processed_dir / "processed_income.csv")
+    expenses = read_csv(processed_dir / "processed_expenses.csv")
+    fx_events = read_csv(processed_dir / "processed_fx_events.csv")
+
+    add_status_exceptions_from_frame(rows, amount_audit, "amount_unit_audit.csv", ("amount_review_status", "fx_rate_status"))
+    add_status_exceptions_from_frame(rows, unit_mismatch, "unit_mismatch_audit.csv", ("amount_normalization_status",))
+
+    for file_name, df in [
+        ("amount_unit_audit.csv", amount_audit),
+        ("unit_mismatch_audit.csv", unit_mismatch),
+        ("processed_transactions.csv", transactions),
+        ("processed_cashflows.csv", cashflows),
+        ("processed_income.csv", income),
+        ("processed_expenses.csv", expenses),
+        ("processed_fx_events.csv", fx_events),
+    ]:
+        add_non_krw_provenance_exceptions(rows, df, file_name)
+        add_quantity_price_exceptions(rows, df, file_name)
+
+    add_exchange_exceptions(rows, transactions, "processed_transactions.csv")
+    add_exchange_exceptions(rows, cashflows, "processed_cashflows.csv")
+    add_exchange_exceptions(rows, fx_events, "processed_fx_events.csv")
+    add_income_exclusion_exceptions(rows, income, transactions)
+    add_reconciliation_summary_exceptions(rows, processed_dir)
 
 
 def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = False) -> pd.DataFrame:
@@ -164,6 +460,8 @@ def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = 
             continue
         if safe_source_name(raw) not in indexed:
             add(rows, "INV-EX-10", "advisory", str(raw.relative_to(vault_root)), "raw brokerage file이 source_file_index.csv에 없습니다.", "import를 다시 실행하세요.")
+
+    add_reconciliation_quality_exceptions(rows, processed_dir)
 
     result = pd.DataFrame(rows, columns=["exception_id", "severity", "file", "issue", "suggested_fix"])
     if not dry_run:
