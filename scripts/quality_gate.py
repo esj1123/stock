@@ -51,6 +51,71 @@ REQUIRED_OUTPUT_SCHEMAS = {
     ],
 }
 
+REQUIRED_RECONCILIATION_METRICS = [
+    "total_assets_krw",
+    "total_assets_status",
+    "external_deposit_krw",
+    "external_withdrawal_krw",
+    "net_external_principal_krw",
+    "net_external_principal_status",
+    "total_return_krw",
+    "total_return_status",
+    "unrealized_pnl_krw",
+    "dividend_income_krw",
+    "interest_income_krw",
+    "distribution_income_krw",
+    "fee_expense_krw",
+    "tax_expense_krw",
+    "realized_pnl_status",
+    "fx_pnl_status",
+    "explained_profit_krw",
+    "residual_krw",
+    "residual_status",
+    "fx_missing_row_count",
+    "currency_ambiguous_row_count",
+    "unit_ambiguous_row_count",
+    "amount_review_needed_row_count",
+    "fx_event_id_count",
+    "fx_event_leg_count",
+    "fx_paired_event_count",
+    "fx_partial_event_count",
+    "fx_unpaired_event_count",
+    "fx_needs_review_event_count",
+    "fx_unpaired_or_needs_review_row_count",
+    "fx_internal_transfer_row_count",
+]
+
+RECONCILIATION_COUNT_METRICS = {
+    "fx_missing_row_count",
+    "currency_ambiguous_row_count",
+    "unit_ambiguous_row_count",
+    "amount_review_needed_row_count",
+    "fx_event_id_count",
+    "fx_event_leg_count",
+    "fx_paired_event_count",
+    "fx_partial_event_count",
+    "fx_unpaired_event_count",
+    "fx_needs_review_event_count",
+    "fx_unpaired_or_needs_review_row_count",
+    "fx_internal_transfer_row_count",
+}
+
+RECONCILIATION_MONEY_METRICS = {
+    "total_assets_krw",
+    "external_deposit_krw",
+    "external_withdrawal_krw",
+    "net_external_principal_krw",
+    "total_return_krw",
+    "unrealized_pnl_krw",
+    "dividend_income_krw",
+    "interest_income_krw",
+    "distribution_income_krw",
+    "fee_expense_krw",
+    "tax_expense_krw",
+    "explained_profit_krw",
+    "residual_krw",
+}
+
 SENSITIVE_PATTERNS = [
     re.compile(r"\b(?!20\d{2}-\d{2}-\d{2}\b)\d{2,6}-\d{2,8}-\d{2,8}\b"),
     re.compile(r"\b\d{6}-[1-4]\d{6}\b"),
@@ -267,6 +332,87 @@ def processed_output_schema_findings(processed_dir: Path) -> list[str]:
         if missing:
             findings.append(f"{name} missing required columns: {', '.join(missing)}")
     return findings
+
+
+def optional_float(value: object) -> float | None:
+    if is_blank(value):
+        return None
+    try:
+        return float(str(value).replace(",", "").strip())
+    except ValueError:
+        return None
+
+
+def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    metrics = {str(row.get("metric", "") or "").strip(): row.get("value", "") for row in rows}
+    missing = [metric for metric in REQUIRED_RECONCILIATION_METRICS if metric not in metrics]
+    if missing:
+        findings.append(f"reconciliation_summary.csv missing required metrics: {', '.join(missing)}")
+        return findings
+
+    for metric in RECONCILIATION_MONEY_METRICS:
+        if not is_blank(metrics.get(metric, "")) and optional_float(metrics.get(metric)) is None:
+            findings.append(f"reconciliation_summary.csv metric {metric} is not numeric: {metrics.get(metric)}")
+    for metric in RECONCILIATION_COUNT_METRICS:
+        value = optional_float(metrics.get(metric))
+        if value is None or value < 0 or value != int(value):
+            findings.append(f"reconciliation_summary.csv count metric {metric} must be a non-negative integer: {metrics.get(metric)}")
+
+    if str(metrics.get("realized_pnl_status", "")).strip().lower() != "unavailable":
+        findings.append("reconciliation_summary.csv realized_pnl_status must remain unavailable")
+    if str(metrics.get("fx_pnl_status", "")).strip().lower() != "unavailable":
+        findings.append("reconciliation_summary.csv fx_pnl_status must remain unavailable")
+
+    assets = optional_float(metrics.get("total_assets_krw"))
+    principal = optional_float(metrics.get("net_external_principal_krw"))
+    total_return = optional_float(metrics.get("total_return_krw"))
+    if str(metrics.get("total_return_status", "")).strip().lower() == "available":
+        if assets is None or principal is None or total_return is None:
+            findings.append("reconciliation_summary.csv total_return_status is available but required KRW values are blank")
+        elif abs(total_return - (assets - principal)) > 0.0001:
+            findings.append("reconciliation_summary.csv total_return_krw formula mismatch")
+
+    explained_inputs = [
+        "unrealized_pnl_krw",
+        "dividend_income_krw",
+        "interest_income_krw",
+        "distribution_income_krw",
+        "fee_expense_krw",
+        "tax_expense_krw",
+    ]
+    explained_values = {metric: optional_float(metrics.get(metric)) for metric in explained_inputs}
+    explained = optional_float(metrics.get("explained_profit_krw"))
+    if all(value is not None for value in explained_values.values()) and explained is not None:
+        expected = (
+            explained_values["unrealized_pnl_krw"]
+            + explained_values["dividend_income_krw"]
+            + explained_values["interest_income_krw"]
+            + explained_values["distribution_income_krw"]
+            - explained_values["fee_expense_krw"]
+            - explained_values["tax_expense_krw"]
+        )
+        if abs(explained - expected) > 0.0001:
+            findings.append("reconciliation_summary.csv explained_profit_krw formula mismatch")
+
+    residual = optional_float(metrics.get("residual_krw"))
+    if str(metrics.get("residual_status", "")).strip().lower() == "available":
+        if total_return is None or explained is None or residual is None:
+            findings.append("reconciliation_summary.csv residual_status is available but required KRW values are blank")
+        elif abs(residual - (total_return - explained)) > 0.0001:
+            findings.append("reconciliation_summary.csv residual_krw formula mismatch")
+    return findings
+
+
+def reconciliation_summary_file_findings(processed_dir: Path) -> list[str]:
+    path = processed_dir / "reconciliation_summary.csv"
+    if not path.exists():
+        return ["reconciliation_summary.csv is missing"]
+    header = read_csv_header(path)
+    missing_columns = [column for column in ["metric", "value"] if column not in header]
+    if missing_columns:
+        return [f"reconciliation_summary.csv missing required columns: {', '.join(missing_columns)}"]
+    return reconciliation_summary_findings(read_csv_rows(path))
 
 
 def money_event_contract_findings(rows: list[dict[str, str]], label: str, type_col: str, allowed_types: set[str]) -> list[str]:
@@ -519,6 +665,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "income/expense/FX output schema contract", "FAIL", "; ".join(output_schema_findings[:5]))
     else:
         write_result(results, "income/expense/FX output schema contract", "PASS", "required output files exist with expected columns.")
+
+    reconciliation_findings = reconciliation_summary_file_findings(processed_dir)
+    if reconciliation_findings:
+        write_result(results, "reconciliation_summary metric contract", "FAIL", "; ".join(reconciliation_findings[:5]))
+    else:
+        write_result(results, "reconciliation_summary metric contract", "PASS", "required reconciliation metrics exist and formulas/statuses are guarded.")
 
     if not source_index:
         if not raw_excel_files(raw_dir):

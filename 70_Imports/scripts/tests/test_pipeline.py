@@ -45,6 +45,7 @@ from quality_gate import (
     non_krw_amount_without_fx_findings,
     principal_unit_misuse_findings,
     processed_output_schema_findings,
+    reconciliation_summary_findings,
     scan_generated_markdown_sensitive,
     snapshot_raw_files,
 )
@@ -999,6 +1000,62 @@ def test_quality_gate_requires_stage8_output_schemas(tmp_path: Path):
     pd.DataFrame(columns=["income_type", "amount_native"]).to_csv(processed / "processed_income.csv", index=False)
     findings = processed_output_schema_findings(processed)
     assert any("processed_income.csv missing required columns" in finding for finding in findings)
+
+
+def valid_reconciliation_summary_rows(**overrides: object) -> list[dict[str, str]]:
+    values: dict[str, object] = {
+        "total_assets_krw": "120000",
+        "total_assets_status": "available",
+        "external_deposit_krw": "100000",
+        "external_withdrawal_krw": "0",
+        "net_external_principal_krw": "100000",
+        "net_external_principal_status": "available",
+        "total_return_krw": "20000",
+        "total_return_status": "available",
+        "unrealized_pnl_krw": "15000",
+        "dividend_income_krw": "3000",
+        "interest_income_krw": "500",
+        "distribution_income_krw": "2000",
+        "fee_expense_krw": "300",
+        "tax_expense_krw": "200",
+        "realized_pnl_status": "unavailable",
+        "fx_pnl_status": "unavailable",
+        "explained_profit_krw": "20000",
+        "residual_krw": "0",
+        "residual_status": "available",
+        "fx_missing_row_count": "0",
+        "currency_ambiguous_row_count": "0",
+        "unit_ambiguous_row_count": "0",
+        "amount_review_needed_row_count": "0",
+        "fx_event_id_count": "1",
+        "fx_event_leg_count": "2",
+        "fx_paired_event_count": "1",
+        "fx_partial_event_count": "0",
+        "fx_unpaired_event_count": "0",
+        "fx_needs_review_event_count": "0",
+        "fx_unpaired_or_needs_review_row_count": "0",
+        "fx_internal_transfer_row_count": "2",
+    }
+    values.update(overrides)
+    return [{"metric": metric, "value": str(value)} for metric, value in values.items()]
+
+
+def test_quality_gate_requires_reconciliation_summary_metrics():
+    assert reconciliation_summary_findings(valid_reconciliation_summary_rows()) == []
+
+    findings = reconciliation_summary_findings([
+        row for row in valid_reconciliation_summary_rows() if row["metric"] != "distribution_income_krw"
+    ])
+    assert any("missing required metrics" in finding and "distribution_income_krw" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_status="available"))
+    assert any("realized_pnl_status must remain unavailable" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(fx_pnl_status="available"))
+    assert any("fx_pnl_status must remain unavailable" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(total_return_krw="21000"))
+    assert any("total_return_krw formula mismatch" in finding for finding in findings)
 
 
 def fx_gate_row(**overrides) -> dict[str, str]:
@@ -2065,7 +2122,14 @@ def test_holdings_file_makes_portfolio_summary_available(tmp_path: Path):
     assert summary_map["reconciliation_status"] == "currency_normalization_pending"
 
 
-def write_reconciliation_baseline(processed: Path, holdings_rows: list[dict[str, object]], cashflow_rows: list[dict[str, object]] | None = None, income_rows: list[dict[str, object]] | None = None, expense_rows: list[dict[str, object]] | None = None) -> None:
+def write_reconciliation_baseline(
+    processed: Path,
+    holdings_rows: list[dict[str, object]],
+    cashflow_rows: list[dict[str, object]] | None = None,
+    income_rows: list[dict[str, object]] | None = None,
+    expense_rows: list[dict[str, object]] | None = None,
+    fx_rows: list[dict[str, object]] | None = None,
+) -> None:
     processed.mkdir(parents=True, exist_ok=True)
     pd.DataFrame([
         {"source_file": "source_balance.csv", "source_file_type": "holdings", "account_type": "ISA"},
@@ -2076,6 +2140,7 @@ def write_reconciliation_baseline(processed: Path, holdings_rows: list[dict[str,
     pd.DataFrame(cashflow_rows or []).to_csv(processed / "processed_cashflows.csv", index=False)
     pd.DataFrame(income_rows or [], columns=INCOME_OUTPUT_COLUMNS).to_csv(processed / "processed_income.csv", index=False)
     pd.DataFrame(expense_rows or [], columns=EXPENSE_OUTPUT_COLUMNS).to_csv(processed / "processed_expenses.csv", index=False)
+    pd.DataFrame(fx_rows or [], columns=FX_EVENT_COLUMNS).to_csv(processed / "processed_fx_events.csv", index=False)
 
 
 def reconciliation_metrics(processed: Path) -> dict[str, str]:
@@ -2174,6 +2239,7 @@ def test_reconciliation_income_breakdown_does_not_change_net_principal(tmp_path:
         income_rows=[
             {"income_type": "dividend", "currency_native": "KRW", "amount_native": 3000, "amount_krw": 3000, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
             {"income_type": "interest", "currency_native": "KRW", "amount_native": 500, "amount_krw": 500, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+            {"income_type": "distribution", "currency_native": "KRW", "amount_native": 700, "amount_krw": 700, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
         ],
         expense_rows=[
             {"expense_type": "fee", "currency_native": "KRW", "amount_native": 100, "amount_krw": 100, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
@@ -2187,9 +2253,10 @@ def test_reconciliation_income_breakdown_does_not_change_net_principal(tmp_path:
     assert float(metrics["net_external_principal_krw"]) == 100000
     assert float(metrics["dividend_income_krw"]) == 3000
     assert float(metrics["interest_income_krw"]) == 500
+    assert float(metrics["distribution_income_krw"]) == 700
     assert float(metrics["fee_expense_krw"]) == 100
     assert float(metrics["tax_expense_krw"]) == 200
-    assert float(metrics["explained_profit_krw"]) == 5200
+    assert float(metrics["explained_profit_krw"]) == 5900
 
 
 def test_reconciliation_exchange_rows_do_not_change_principal(tmp_path: Path):
@@ -2209,6 +2276,40 @@ def test_reconciliation_exchange_rows_do_not_change_principal(tmp_path: Path):
     metrics = reconciliation_metrics(processed)
 
     assert float(metrics["external_deposit_krw"]) == 100000
+    assert float(metrics["net_external_principal_krw"]) == 100000
+
+
+def test_reconciliation_summary_exposes_fx_event_counts(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[
+            {"ticker": "005930", "security_name": "Samsung", "account_type": "ISA", "market": "KR", "asset_type": "stock", "currency": "KRW", "currency_native": "KRW", "balance_quantity": 1, "evaluation_amount": 100000, "evaluation_amount_krw": 100000, "source_file_type": "holdings"},
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+        fx_rows=[
+            fx_gate_row(fx_event_id="FX-1", fx_pair_status="paired", currency_native="KRW"),
+            fx_gate_row(fx_event_id="FX-1", fx_pair_status="paired", currency_native="USD"),
+            fx_gate_row(fx_event_id="FX-2", fx_pair_status="partial", currency_native="USD"),
+            fx_gate_row(fx_event_id="FX-3", fx_pair_status="unpaired", currency_native="KRW"),
+            fx_gate_row(fx_event_id="FX-4", fx_pair_status="needs_review", currency_native="USD", amount_review_status="needs_review"),
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    metrics = reconciliation_metrics(processed)
+
+    assert int(metrics["fx_event_id_count"]) == 4
+    assert int(metrics["fx_event_leg_count"]) == 5
+    assert int(metrics["fx_paired_event_count"]) == 1
+    assert int(metrics["fx_partial_event_count"]) == 1
+    assert int(metrics["fx_unpaired_event_count"]) == 1
+    assert int(metrics["fx_needs_review_event_count"]) == 1
+    assert int(metrics["fx_unpaired_or_needs_review_row_count"]) == 2
+    assert int(metrics["fx_internal_transfer_row_count"]) == 5
+    assert metrics["fx_pnl_status"] == "unavailable"
     assert float(metrics["net_external_principal_krw"]) == 100000
 
 

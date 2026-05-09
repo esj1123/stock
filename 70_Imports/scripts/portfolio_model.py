@@ -491,11 +491,65 @@ def review_status_counts(dfs: list[pd.DataFrame], seed_counts: dict[str, int] | 
     return counts
 
 
+def fx_event_key(row: pd.Series, idx: int) -> str:
+    event_id = text_value(row.get("fx_event_id"))
+    return event_id if event_id else f"__row_{idx}"
+
+
+def fx_event_counts(fx_events: pd.DataFrame) -> dict[str, int]:
+    counts = {
+        "fx_event_id_count": 0,
+        "fx_event_leg_count": 0,
+        "fx_paired_event_count": 0,
+        "fx_partial_event_count": 0,
+        "fx_unpaired_event_count": 0,
+        "fx_needs_review_event_count": 0,
+        "fx_unpaired_or_needs_review_row_count": 0,
+        "fx_internal_transfer_row_count": 0,
+    }
+    if fx_events.empty:
+        return counts
+
+    event_ids: set[str] = set()
+    events_by_status = {
+        "paired": set(),
+        "partial": set(),
+        "unpaired": set(),
+        "needs_review": set(),
+    }
+    unpaired_or_needs_review_rows = 0
+    internal_transfer_rows = 0
+
+    for idx, row in fx_events.reset_index(drop=True).iterrows():
+        event_key = fx_event_key(row, idx)
+        event_ids.add(event_key)
+        pair_status = text_value(row.get("fx_pair_status")).lower()
+        amount_status = row_review_status(row)
+        if pair_status in events_by_status:
+            events_by_status[pair_status].add(event_key)
+        if pair_status in {"unpaired", "needs_review"} or amount_status == "needs_review":
+            unpaired_or_needs_review_rows += 1
+        role = text_value(row.get("cashflow_role")).lower()
+        if role == "internal_fx_exchange" or truthy_value(row.get("is_internal_transfer")):
+            internal_transfer_rows += 1
+
+    counts["fx_event_id_count"] = len(event_ids)
+    counts["fx_event_leg_count"] = len(fx_events)
+    counts["fx_paired_event_count"] = len(events_by_status["paired"])
+    counts["fx_partial_event_count"] = len(events_by_status["partial"])
+    counts["fx_unpaired_event_count"] = len(events_by_status["unpaired"])
+    counts["fx_needs_review_event_count"] = len(events_by_status["needs_review"])
+    counts["fx_unpaired_or_needs_review_row_count"] = unpaired_or_needs_review_rows
+    counts["fx_internal_transfer_row_count"] = internal_transfer_rows
+    return counts
+
+
 def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) -> pd.DataFrame:
     cashflows_path = processed_dir / "processed_cashflows.csv"
     cashflows = load_csv(cashflows_path)
     income = load_csv(processed_dir / "processed_income.csv")
     expenses = load_csv(processed_dir / "processed_expenses.csv")
+    fx_events = load_csv(processed_dir / "processed_fx_events.csv")
 
     asset_total, asset_status, asset_status_counts = total_assets_krw(holdings)
     deposits, withdrawals, net_principal, principal_status, principal_status_counts = net_external_principal_krw(cashflows, source_available=cashflows_path.exists())
@@ -512,9 +566,10 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) ->
     unrealized = unrealized_pnl_krw(holdings)
     dividend_income = ok_amount_sum(income, "income_type", {"dividend"})
     interest_income = ok_amount_sum(income, "income_type", {"interest"})
+    distribution_income = ok_amount_sum(income, "income_type", {"distribution"})
     fee_expense = ok_amount_sum(expenses, "expense_type", {"fee"})
     tax_expense = ok_amount_sum(expenses, "expense_type", {"tax"})
-    explained_profit = unrealized + dividend_income + interest_income - fee_expense - tax_expense
+    explained_profit = unrealized + dividend_income + interest_income + distribution_income - fee_expense - tax_expense
 
     residual = None
     residual_status = "unavailable"
@@ -525,7 +580,8 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) ->
     seeded_counts = asset_status_counts.copy()
     for key, value in principal_status_counts.items():
         seeded_counts[key] = seeded_counts.get(key, 0) + int(value or 0)
-    counts = review_status_counts([holdings, cashflows, income, expenses], seeded_counts)
+    counts = review_status_counts([holdings, cashflows, income, expenses, fx_events], seeded_counts)
+    fx_counts = fx_event_counts(fx_events)
 
     return summary_metric_rows({
         "total_assets_krw": asset_total,
@@ -539,6 +595,7 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) ->
         "unrealized_pnl_krw": unrealized,
         "dividend_income_krw": dividend_income,
         "interest_income_krw": interest_income,
+        "distribution_income_krw": distribution_income,
         "fee_expense_krw": fee_expense,
         "tax_expense_krw": tax_expense,
         "realized_pnl_status": "unavailable",
@@ -550,6 +607,14 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) ->
         "currency_ambiguous_row_count": counts["currency_ambiguous"],
         "unit_ambiguous_row_count": counts["unit_ambiguous"],
         "amount_review_needed_row_count": counts["amount_review_needed"],
+        "fx_event_id_count": fx_counts["fx_event_id_count"],
+        "fx_event_leg_count": fx_counts["fx_event_leg_count"],
+        "fx_paired_event_count": fx_counts["fx_paired_event_count"],
+        "fx_partial_event_count": fx_counts["fx_partial_event_count"],
+        "fx_unpaired_event_count": fx_counts["fx_unpaired_event_count"],
+        "fx_needs_review_event_count": fx_counts["fx_needs_review_event_count"],
+        "fx_unpaired_or_needs_review_row_count": fx_counts["fx_unpaired_or_needs_review_row_count"],
+        "fx_internal_transfer_row_count": fx_counts["fx_internal_transfer_row_count"],
     })
 
 
