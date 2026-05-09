@@ -227,6 +227,31 @@ UNIT_MISMATCH_AUDIT_COLUMNS = [
     "cashflow_role",
 ]
 
+FX_EVENT_COLUMNS = [
+    "fx_event_id",
+    "source_file",
+    "source_file_type",
+    "account_type",
+    "trade_date",
+    "trade_time",
+    "leg",
+    "from_currency",
+    "to_currency",
+    "currency_native",
+    "amount_native",
+    "amount_krw",
+    "fx_rate_to_krw",
+    "fx_rate_source",
+    "fx_pair_status",
+    "cashflow_role",
+    "affects_principal",
+    "affects_profit",
+    "is_internal_transfer",
+    "amount_review_status",
+    "amount_review_reason",
+    "raw_memo",
+]
+
 
 def assert_columns_present(df: pd.DataFrame, columns: list[str]) -> None:
     missing = [col for col in columns if col not in df.columns]
@@ -456,7 +481,92 @@ def test_fx_exchange_is_internal_transfer_not_principal_cashflow(tmp_path: Path)
     assert not boolish(row["affects_principal"])
     assert boolish(row["is_internal_transfer"])
     assert str(row["fx_event_id"]).startswith("FX-")
-    assert row["fx_pair_status"] == "unpaired"
+    assert row["fx_pair_status"] == "partial"
+    assert read_processed_csv(processed, "processed_cashflows.csv").empty
+
+
+def test_fx_exchange_krw_usd_pair_outputs_two_internal_event_legs(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="외화매수 USD exchange",
+            ticker="",
+            security_name="",
+            quantity=0,
+            price=0,
+            trade_amount=638254,
+            settlement_amount=430,
+        )
+    ])
+
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    fx_events = read_processed_csv(processed, "processed_fx_events.csv")
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+    amount_audit = read_processed_csv(processed, "amount_unit_audit.csv")
+    mismatch_audit = read_processed_csv(processed, "unit_mismatch_audit.csv")
+
+    assert_columns_present(fx_events, FX_EVENT_COLUMNS)
+    assert len(fx_events) == 2
+    assert fx_events["fx_event_id"].nunique() == 1
+    assert str(fx_events["fx_event_id"].iloc[0]).startswith("FX-")
+    assert set(fx_events["leg"]) == {"KRW_OUT", "USD_IN"}
+    assert set(fx_events["fx_pair_status"]) == {"paired"}
+    assert set(fx_events["cashflow_role"]) == {"internal_fx_exchange"}
+    assert not fx_events["affects_principal"].map(boolish).any()
+    assert not fx_events["affects_profit"].map(boolish).any()
+    assert fx_events["is_internal_transfer"].map(boolish).all()
+
+    usd_leg = fx_events[fx_events["currency_native"] == "USD"].iloc[0]
+    assert usd_leg["amount_native"] == 430
+    assert usd_leg["amount_krw"] == 638254
+    assert abs(float(usd_leg["fx_rate_to_krw"]) - 1484.311628) < 0.001
+    assert usd_leg["fx_rate_source"] == "implied_from_exchange_row"
+
+    krw_leg = fx_events[fx_events["currency_native"] == "KRW"].iloc[0]
+    assert krw_leg["amount_native"] == 638254
+    assert krw_leg["amount_krw"] == 638254
+
+    tx_row = transactions.iloc[0]
+    assert tx_row["transaction_type"] == "exchange"
+    assert tx_row["cashflow_role"] == "internal_fx_exchange"
+    assert boolish(tx_row["is_internal_transfer"])
+    assert cashflows.empty
+
+    fx_audit = amount_audit[amount_audit["cashflow_role"].eq("internal_fx_exchange")]
+    assert not fx_audit.empty
+    assert set(fx_audit["amount_review_status"]) == {"ok"}
+
+    fx_mismatch = mismatch_audit[mismatch_audit["cashflow_role"].eq("internal_fx_exchange")]
+    assert not fx_mismatch.empty
+    assert set(fx_mismatch["amount_normalization_status"]) == {"ok"}
+
+
+def test_fx_exchange_single_detectable_leg_outputs_partial_event(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        synthetic_transaction_row(
+            transaction_raw="환전 exchange",
+            ticker="",
+            security_name="",
+            quantity=0,
+            price=0,
+            trade_amount=100000,
+            currency="KRW",
+        )
+    ])
+
+    fx_events = read_processed_csv(processed, "processed_fx_events.csv")
+
+    assert_columns_present(fx_events, FX_EVENT_COLUMNS)
+    assert len(fx_events) == 1
+    row = fx_events.iloc[0]
+    assert str(row["fx_event_id"]).startswith("FX-")
+    assert row["leg"] == "PARTIAL"
+    assert row["currency_native"] == "KRW"
+    assert row["amount_native"] == 100000
+    assert row["amount_krw"] == 100000
+    assert row["fx_pair_status"] == "partial"
+    assert row["cashflow_role"] == "internal_fx_exchange"
+    assert boolish(row["is_internal_transfer"])
+    assert not boolish(row["affects_principal"])
     assert read_processed_csv(processed, "processed_cashflows.csv").empty
 
 

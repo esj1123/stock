@@ -65,6 +65,31 @@ UNIT_MISMATCH_AUDIT_COLUMNS = [
     "currency_native", "amount_normalization_status", "amount_normalization_reason", "cashflow_role",
 ]
 
+FX_EVENT_COLUMNS = [
+    "fx_event_id",
+    "source_file",
+    "source_file_type",
+    "account_type",
+    "trade_date",
+    "trade_time",
+    "leg",
+    "from_currency",
+    "to_currency",
+    "currency_native",
+    "amount_native",
+    "amount_krw",
+    "fx_rate_to_krw",
+    "fx_rate_source",
+    "fx_pair_status",
+    "cashflow_role",
+    "affects_principal",
+    "affects_profit",
+    "is_internal_transfer",
+    "amount_review_status",
+    "amount_review_reason",
+    "raw_memo",
+]
+
 HOLDING_SOURCE_PRIORITY = {
     "overseas_balance": 0,
     "holdings": 10,
@@ -1814,6 +1839,7 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
         "processed_transactions.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "processed_holdings.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS + HOLDING_DEDUPE_COLUMNS),
         "processed_cashflows.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
+        "processed_fx_events.csv": pd.DataFrame(columns=FX_EVENT_COLUMNS),
         "processed_dividends.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "portfolio_summary.csv": pd.DataFrame(columns=["metric", "value"]),
         "risk_watchlist.csv": pd.DataFrame(columns=["ticker", "security_name", "account_type", "risk_flags", "pnl_pct", "weight_pct", "suggested_action"]),
@@ -1860,6 +1886,168 @@ def unit_mismatch_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
         | ((currency != "KRW") & (amount_native.round(6) != amount_krw.round(6)))
     )
     return rows.loc[mask].reindex(columns=UNIT_MISMATCH_AUDIT_COLUMNS)
+
+
+def fx_event_id_for_row(row: dict[str, Any] | pd.Series) -> str:
+    existing = str(_row_value(row, "fx_event_id") or "").strip()
+    if existing:
+        return existing
+    import_id = str(_row_value(row, "import_id") or "").strip()
+    if import_id:
+        return f"FX-{import_id[:12]}"
+    stable = json.dumps(
+        {
+            "source_file": str(_row_value(row, "source_file") or ""),
+            "sheet": str(_row_value(row, "_source_sheet") or ""),
+            "raw_row": str(_row_value(row, "_raw_row_number") or ""),
+            "trade_date": str(_row_value(row, "trade_date") or ""),
+            "raw_memo": str(_row_value(row, "raw_memo") or ""),
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"FX-{hashlib.sha256(stable.encode('utf-8')).hexdigest()[:12]}"
+
+
+def fx_event_foreign_currency(row: dict[str, Any] | pd.Series) -> str:
+    for field in ["currency_native", "currency", "raw_memo", "security_name", "ticker"]:
+        code = currency_code_from_text(_row_value(row, field))
+        if code and code != "KRW":
+            return code
+    return ""
+
+
+def fx_exchange_direction(row: dict[str, Any] | pd.Series, foreign_currency: str) -> str:
+    text = " ".join(
+        str(_row_value(row, field) or "")
+        for field in ["transaction_type", "raw_memo", "security_name"]
+    ).lower()
+    currency = str(foreign_currency or "USD").lower()
+    if "외화매도" in text or "foreign sell" in text or f"{currency}_out" in text or f"sell {currency}" in text:
+        return "foreign_to_krw"
+    return "krw_to_foreign"
+
+
+def classify_fx_exchange_amounts(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
+    foreign_currency = fx_event_foreign_currency(row)
+    trade_amount = abs(parse_korean_number(_row_value(row, "trade_amount")))
+    settlement_amount = abs(parse_korean_number(_row_value(row, "settlement_amount")))
+    raw_amounts = [amount for amount in [trade_amount, settlement_amount] if amount > 1e-9]
+    distinct_amounts = sorted(set(round(amount, 6) for amount in raw_amounts), reverse=True)
+    if foreign_currency and len(distinct_amounts) >= 2:
+        krw_amount = float(distinct_amounts[0])
+        foreign_amount = float(distinct_amounts[-1])
+        if foreign_amount > 1e-9 and krw_amount / foreign_amount >= 10:
+            return {
+                "status": "paired",
+                "foreign_currency": foreign_currency,
+                "krw_amount": krw_amount,
+                "foreign_amount": foreign_amount,
+                "implied_rate": round(krw_amount / foreign_amount, 6),
+                "direction": fx_exchange_direction(row, foreign_currency),
+            }
+    native_currency = currency_code_from_text(_row_value(row, "currency_native")) or currency_code_from_text(_row_value(row, "currency")) or "KRW"
+    native_amount = parse_korean_number(_row_value(row, "amount_native"))
+    if abs(native_amount) <= 1e-9:
+        native_amount = trade_amount or settlement_amount
+    amount_krw = _row_value(row, "amount_krw")
+    if is_blank_text(amount_krw) and native_currency == "KRW" and abs(native_amount) > 1e-9:
+        amount_krw = native_amount
+    return {
+        "status": "partial",
+        "foreign_currency": foreign_currency,
+        "native_currency": native_currency,
+        "native_amount": native_amount,
+        "amount_krw": amount_krw,
+        "direction": fx_exchange_direction(row, foreign_currency or native_currency),
+    }
+
+
+def fx_event_base(row: dict[str, Any] | pd.Series, event_id: str, pair_status: str) -> dict[str, Any]:
+    amount_review_reason = str(_row_value(row, "amount_review_reason") or "")
+    if pair_status == "partial" and not amount_review_reason:
+        amount_review_reason = "only one FX leg detected"
+    return {
+        "fx_event_id": event_id,
+        "source_file": _row_value(row, "source_file"),
+        "source_file_type": _row_value(row, "source_file_type"),
+        "account_type": _row_value(row, "account_type"),
+        "trade_date": _row_value(row, "trade_date"),
+        "trade_time": _row_value(row, "trade_time"),
+        "fx_pair_status": pair_status,
+        "cashflow_role": "internal_fx_exchange",
+        "affects_principal": False,
+        "affects_profit": False,
+        "is_internal_transfer": True,
+        "amount_review_status": _row_value(row, "amount_review_status") or "needs_review",
+        "amount_review_reason": amount_review_reason,
+        "raw_memo": _row_value(row, "raw_memo"),
+    }
+
+
+def fx_event_rows(rows: pd.DataFrame) -> pd.DataFrame:
+    if rows.empty:
+        return pd.DataFrame(columns=FX_EVENT_COLUMNS)
+    event_rows: list[dict[str, Any]] = []
+    fx_rows = rows[rows.get("cashflow_role", pd.Series("", index=rows.index)).fillna("").astype(str).eq("internal_fx_exchange")]
+    for _, row in fx_rows.iterrows():
+        event_id = fx_event_id_for_row(row)
+        classified = classify_fx_exchange_amounts(row)
+        status = classified["status"]
+        base = fx_event_base(row, event_id, status)
+        if status == "paired":
+            foreign_currency = classified["foreign_currency"]
+            direction = classified["direction"]
+            from_currency = foreign_currency if direction == "foreign_to_krw" else "KRW"
+            to_currency = "KRW" if direction == "foreign_to_krw" else foreign_currency
+            krw_leg = "KRW_IN" if direction == "foreign_to_krw" else "KRW_OUT"
+            foreign_leg = f"{foreign_currency}_OUT" if direction == "foreign_to_krw" else f"{foreign_currency}_IN"
+            event_rows.append({
+                **base,
+                "leg": krw_leg,
+                "from_currency": from_currency,
+                "to_currency": to_currency,
+                "currency_native": "KRW",
+                "amount_native": classified["krw_amount"],
+                "amount_krw": classified["krw_amount"],
+                "fx_rate_to_krw": 1.0,
+                "fx_rate_source": "identity_krw",
+            })
+            event_rows.append({
+                **base,
+                "leg": foreign_leg,
+                "from_currency": from_currency,
+                "to_currency": to_currency,
+                "currency_native": foreign_currency,
+                "amount_native": classified["foreign_amount"],
+                "amount_krw": classified["krw_amount"],
+                "fx_rate_to_krw": classified["implied_rate"],
+                "fx_rate_source": "implied_from_exchange_row",
+            })
+        else:
+            event_rows.append({
+                **base,
+                "leg": "PARTIAL",
+                "from_currency": classified.get("native_currency", ""),
+                "to_currency": classified.get("foreign_currency", ""),
+                "currency_native": classified.get("native_currency", ""),
+                "amount_native": classified.get("native_amount", pd.NA),
+                "amount_krw": classified.get("amount_krw", pd.NA),
+                "fx_rate_to_krw": _row_value(row, "fx_rate_to_krw"),
+                "fx_rate_source": _row_value(row, "fx_rate_source"),
+            })
+    return pd.DataFrame(event_rows).reindex(columns=FX_EVENT_COLUMNS)
+
+
+def apply_fx_pair_status(df: pd.DataFrame) -> pd.DataFrame:
+    if df.empty or "cashflow_role" not in df.columns:
+        return df
+    work = df.copy()
+    mask = work["cashflow_role"].fillna("").astype(str).eq("internal_fx_exchange")
+    for idx in work[mask].index:
+        classified = classify_fx_exchange_amounts(work.loc[idx])
+        work.at[idx, "fx_pair_status"] = classified["status"]
+    return work
 
 
 def normalize_amount_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -2288,6 +2476,8 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
     combined, helper_skipped_rows = split_skipped_broker_helper_rows(combined)
     outputs["skipped_rows.csv"] = combine_skipped_rows(adjacent_skipped_rows, helper_skipped_rows)
     combined = normalize_amount_dataframe(combined)
+    combined = apply_fx_pair_status(combined)
+    outputs["processed_fx_events.csv"] = fx_event_rows(combined)
     outputs["amount_unit_audit.csv"] = amount_unit_audit_rows(combined)
     outputs["unit_mismatch_audit.csv"] = unit_mismatch_audit_rows(combined)
     summary.unclassified_rows = int((combined.get("transaction_type", pd.Series(dtype=str)) == "unknown").sum()) if not combined.empty else 0
