@@ -13,6 +13,20 @@ python main.py qa --vault-root ../..
 pytest
 ```
 
+Actual writes to the configured live/final vault are blocked unless the live-write gate flags are supplied:
+
+```bash
+python main.py all --vault-root "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock" --raw-dir "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock\70_Imports\raw" \
+  --live-baseline-updated \
+  --live-tests-passed \
+  --live-quality-gate-passed \
+  --live-dry-run-reviewed \
+  --live-expected-changes-reviewed \
+  --live-write-confirmation LIVE_06_STOCK_WRITE_REVIEWED
+```
+
+Set `STOCK_LIVE_VAULT_ROOT` when the live vault path differs. Dry-runs against the live vault do not require these flags.
+
 ## 주요 출력
 - `70_Imports/processed/processed_transactions.csv`
 - `70_Imports/processed/processed_holdings.csv`

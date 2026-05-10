@@ -99,6 +99,22 @@ Cleanup and ambiguous-file rules:
 - Exclude files with `Personal` or `personal` in the filename from cleanup, merge, rename, and delete decisions.
 - Do not delete, merge, rename, or consolidate README or template files before user confirmation, even if they look duplicated.
 
+The standard entrypoint enforces the live-write gate for the configured live vault path. Actual live writes through `70_Imports/scripts/main.py` require all confirmation flags:
+
+```bash
+python 70_Imports/scripts/main.py all \
+  --vault-root "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock" \
+  --raw-dir "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock\70_Imports\raw" \
+  --live-baseline-updated \
+  --live-tests-passed \
+  --live-quality-gate-passed \
+  --live-dry-run-reviewed \
+  --live-expected-changes-reviewed \
+  --live-write-confirmation LIVE_06_STOCK_WRITE_REVIEWED
+```
+
+Use `STOCK_LIVE_VAULT_ROOT` if the live vault path is different on a local machine. Dry-runs against the live vault do not require these actual-write flags.
+
 Known normalization rules:
 
 - Do not double-count overseas positions when both comprehensive holdings and `overseas_balance` files contain the same overseas position.

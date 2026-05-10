@@ -26,6 +26,7 @@ from nh_importer import (
     is_principal_cashflow_row,
 )
 from obsidian_writer import company_note_identity_key, existing_company_note_index, parse_note_frontmatter, safe_component
+import main as pipeline_main
 
 
 AUTO_START = "<!-- AUTO-GENERATED:START -->"
@@ -928,6 +929,48 @@ def check_vault_local_venv(vault_root: Path, results: list[GateResult]) -> None:
         write_result(results, "vault-root .venv guard", "PASS", "no .venv exists at vault root.")
 
 
+def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
+    fake_live_vault = vault_root / ".quality_gate_fake_live_vault"
+    live_roots = (fake_live_vault,)
+    blocked_args = pipeline_main.build_parser().parse_args(["all", "--vault-root", str(fake_live_vault)])
+    blocked_findings = pipeline_main.live_write_guard_findings(blocked_args, fake_live_vault, live_roots=live_roots)
+    required_findings = {
+        "missing --live-baseline-updated",
+        "missing --live-tests-passed",
+        "missing --live-quality-gate-passed",
+        "missing --live-dry-run-reviewed",
+        "missing --live-expected-changes-reviewed",
+        f"missing --live-write-confirmation {pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN}",
+    }
+
+    findings: list[str] = []
+    missing_findings = sorted(required_findings.difference(blocked_findings))
+    if missing_findings:
+        findings.append("unguarded live write did not report: " + ", ".join(missing_findings))
+
+    dry_run_args = pipeline_main.build_parser().parse_args(["all", "--vault-root", str(fake_live_vault), "--dry-run"])
+    if pipeline_main.live_write_guard_findings(dry_run_args, fake_live_vault, live_roots=live_roots):
+        findings.append("live dry-run was blocked")
+
+    confirmed_args = pipeline_main.build_parser().parse_args([
+        "all",
+        "--vault-root",
+        str(fake_live_vault),
+        "--live-baseline-updated",
+        "--live-tests-passed",
+        "--live-quality-gate-passed",
+        "--live-dry-run-reviewed",
+        "--live-expected-changes-reviewed",
+        "--live-write-confirmation",
+        pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN,
+    ])
+    confirmed_findings = pipeline_main.live_write_guard_findings(confirmed_args, fake_live_vault, live_roots=live_roots)
+    if confirmed_findings:
+        findings.append("fully attested live write was blocked: " + ", ".join(confirmed_findings))
+
+    return findings
+
+
 def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> None:
     processed_dir = vault_root / "70_Imports" / "processed"
     raw_dir = vault_root / "70_Imports" / "raw"
@@ -1124,6 +1167,12 @@ def quality_gate(vault_root: Path) -> int:
     md_before = snapshot_markdown_outside_auto(vault_root)
 
     check_vault_local_venv(vault_root, results)
+
+    live_guard_findings = live_vault_actual_write_guard_findings(vault_root)
+    if live_guard_findings:
+        write_result(results, "live vault actual-write guard", "FAIL", "; ".join(live_guard_findings))
+    else:
+        write_result(results, "live vault actual-write guard", "PASS", "actual live writes require baseline/test/quality-gate/dry-run/review flags and confirmation token.")
 
     command = [sys.executable, "main.py", "all", "--vault-root", "../..", "--raw-dir", "../raw"]
     code, output = run_command(command, scripts_dir)

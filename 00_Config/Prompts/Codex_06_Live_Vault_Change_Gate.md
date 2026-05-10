@@ -31,6 +31,8 @@ Required gate before any actual live vault write:
 4. Run the live vault command in dry-run mode.
 5. Review and summarize the expected live-vault changes.
 6. Ask for and receive explicit user intent for the actual live write.
+7. For `70_Imports/scripts/main.py`, pass all actual-write guard flags:
+   `--live-baseline-updated --live-tests-passed --live-quality-gate-passed --live-dry-run-reviewed --live-expected-changes-reviewed --live-write-confirmation LIVE_06_STOCK_WRITE_REVIEWED`.
 
 Live vault cleanup rules:
 - Cleanup is a live vault write and must follow the same gate unless the user explicitly scopes the task to a narrow cleanup action.
@@ -47,5 +49,6 @@ Report format:
 - List files changed in the baseline.
 - For live vault cleanup, list only deleted folders/files and preserved ambiguous filenames.
 - State whether tests, quality gate, dry-run, expected-change review, and explicit user intent were completed.
+- State whether the `main.py` live-write guard flags were required and supplied.
 - State that no import/report/qa/all was run unless it was actually run.
 ```

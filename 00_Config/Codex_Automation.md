@@ -81,6 +81,8 @@ Vault 루트에서:
 - Do not delete `.tmp.drivedownload` or `.tmp.driveupload` before user confirmation.
 - Exclude documents with `Personal` or `personal` in the filename from cleanup, merge, rename, and delete decisions.
 - Do not delete, merge, rename, or consolidate README or template documents before user confirmation, even when they look duplicated.
+- The standard `70_Imports/scripts/main.py` entrypoint blocks actual writes to the configured live vault unless all live-write gate flags are present: `--live-baseline-updated`, `--live-tests-passed`, `--live-quality-gate-passed`, `--live-dry-run-reviewed`, `--live-expected-changes-reviewed`, and `--live-write-confirmation LIVE_06_STOCK_WRITE_REVIEWED`.
+- `STOCK_LIVE_VAULT_ROOT` may be set when the live vault path differs from the default local path. Dry-runs are allowed without actual-write confirmation flags.
 - Preserve user-written Markdown outside `<!-- AUTO-GENERATED:START -->` and `<!-- AUTO-GENERATED:END -->`.
 - Never modify raw broker files under `70_Imports/raw/`.
 - Never write thesis, sell criteria, buy/sell recommendations, or investment opinions automatically. Missing thesis/sell criteria must go to QA/Review Queue only.
