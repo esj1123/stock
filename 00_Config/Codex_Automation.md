@@ -73,7 +73,14 @@ Vault 루트에서:
 ## Live Vault Change Procedure
 
 - Never begin with live Google Drive writes. Update and validate the GitHub baseline first.
+- Treat live vault cleanup as a live vault write. This includes deleting cache folders, temporary files, duplicate-looking files, renaming documents, moving files, or consolidating templates.
+- Before an actual live write, complete the sequence: GitHub baseline update, tests, quality gate, live vault dry-run, expected change review, and explicit user intent for the actual write.
 - Before an actual live write, run the live vault command with `--dry-run` and confirm the expected files and warnings.
+- Only clear obvious cache/system artifacts when cleanup is explicitly requested: `.pyc`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.ipynb_checkpoints`, and empty `__pycache__` folders.
+- If a cache folder contains unknown non-cache files such as `*.DOCX`, `*.xlsx`, `.tmp.drive*`, or unfamiliar generated-looking names, do not delete the folder or file. Report filenames only and do not inspect contents unless explicitly authorized and outside restricted/private areas.
+- Do not delete `.tmp.drivedownload` or `.tmp.driveupload` before user confirmation.
+- Exclude documents with `Personal` or `personal` in the filename from cleanup, merge, rename, and delete decisions.
+- Do not delete, merge, rename, or consolidate README or template documents before user confirmation, even when they look duplicated.
 - Preserve user-written Markdown outside `<!-- AUTO-GENERATED:START -->` and `<!-- AUTO-GENERATED:END -->`.
 - Never modify raw broker files under `70_Imports/raw/`.
 - Never write thesis, sell criteria, buy/sell recommendations, or investment opinions automatically. Missing thesis/sell criteria must go to QA/Review Queue only.

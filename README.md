@@ -79,6 +79,8 @@ Do not commit local raw input files or generated outputs. The ignored local fold
 
 Modify and validate the GitHub baseline first. Do not start by editing the Google Drive live Vault.
 
+Live vault cleanup is also a live Vault write. Treat cache removal, temporary-file cleanup, duplicate-looking file deletion, renames, moves, and template/document consolidation as live-write operations.
+
 Required sequence before any actual live Vault write:
 
 1. Modify GitHub baseline.
@@ -86,7 +88,16 @@ Required sequence before any actual live Vault write:
 3. Run pytest.
 4. Run `scripts/quality_gate.py`.
 5. Run live vault dry-run.
-6. Apply actual live vault write only after expected dry-run result.
+6. Review the expected live vault changes.
+7. Apply actual live vault write only after explicit user intent for the actual write.
+
+Cleanup and ambiguous-file rules:
+
+- Only delete clear cache/system artifacts when explicitly requested, such as `.pyc`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.ipynb_checkpoints`, or an empty `__pycache__`.
+- If a cache folder contains unknown non-cache files such as `*.DOCX`, `*.xlsx`, `.tmp.drive*`, or unfamiliar generated-looking names, report filenames only and do not delete the folder or file.
+- Do not delete `.tmp.drivedownload` or `.tmp.driveupload` before user confirmation.
+- Exclude files with `Personal` or `personal` in the filename from cleanup, merge, rename, and delete decisions.
+- Do not delete, merge, rename, or consolidate README or template files before user confirmation, even if they look duplicated.
 
 Known normalization rules:
 
