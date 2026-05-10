@@ -34,7 +34,11 @@ def configured_live_vault_roots() -> tuple[Path, ...]:
 def is_live_vault_path(vault_root: Path, live_roots: tuple[Path, ...] | None = None) -> bool:
     candidate = normalized_path_key(vault_root)
     roots = live_roots if live_roots is not None else configured_live_vault_roots()
-    return any(candidate == normalized_path_key(root) for root in roots)
+    for root in roots:
+        root_key = normalized_path_key(root)
+        if candidate == root_key or candidate.startswith(root_key + "\\") or candidate.startswith(root_key + "/"):
+            return True
+    return False
 
 
 def live_write_guard_findings(args: argparse.Namespace, vault_root: Path, live_roots: tuple[Path, ...] | None = None) -> list[str]:

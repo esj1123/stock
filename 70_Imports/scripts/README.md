@@ -13,7 +13,7 @@ python main.py qa --vault-root ../..
 pytest
 ```
 
-Actual writes to the configured live/final vault are blocked unless the live-write gate flags are supplied:
+Actual writes to the configured live/final vault root or any child path under it are blocked unless the live-write gate flags are supplied:
 
 ```bash
 python main.py all --vault-root "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock" --raw-dir "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock\70_Imports\raw" \

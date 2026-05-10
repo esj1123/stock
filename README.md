@@ -99,7 +99,7 @@ Cleanup and ambiguous-file rules:
 - Exclude files with `Personal` or `personal` in the filename from cleanup, merge, rename, and delete decisions.
 - Do not delete, merge, rename, or consolidate README or template files before user confirmation, even if they look duplicated.
 
-The standard entrypoint enforces the live-write gate for the configured live vault path. Actual live writes through `70_Imports/scripts/main.py` require all confirmation flags:
+The standard entrypoint enforces the live-write gate for the configured live vault path and any child path under it. Actual live writes through `70_Imports/scripts/main.py` require all confirmation flags:
 
 ```bash
 python 70_Imports/scripts/main.py all \

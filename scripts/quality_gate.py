@@ -931,9 +931,10 @@ def check_vault_local_venv(vault_root: Path, results: list[GateResult]) -> None:
 
 def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
     fake_live_vault = vault_root / ".quality_gate_fake_live_vault"
+    fake_live_child = fake_live_vault / "70_Imports" / "scripts"
     live_roots = (fake_live_vault,)
-    blocked_args = pipeline_main.build_parser().parse_args(["all", "--vault-root", str(fake_live_vault)])
-    blocked_findings = pipeline_main.live_write_guard_findings(blocked_args, fake_live_vault, live_roots=live_roots)
+    blocked_args = pipeline_main.build_parser().parse_args(["all", "--vault-root", str(fake_live_child)])
+    blocked_findings = pipeline_main.live_write_guard_findings(blocked_args, fake_live_child, live_roots=live_roots)
     required_findings = {
         "missing --live-baseline-updated",
         "missing --live-tests-passed",
@@ -948,14 +949,14 @@ def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
     if missing_findings:
         findings.append("unguarded live write did not report: " + ", ".join(missing_findings))
 
-    dry_run_args = pipeline_main.build_parser().parse_args(["all", "--vault-root", str(fake_live_vault), "--dry-run"])
-    if pipeline_main.live_write_guard_findings(dry_run_args, fake_live_vault, live_roots=live_roots):
+    dry_run_args = pipeline_main.build_parser().parse_args(["all", "--vault-root", str(fake_live_child), "--dry-run"])
+    if pipeline_main.live_write_guard_findings(dry_run_args, fake_live_child, live_roots=live_roots):
         findings.append("live dry-run was blocked")
 
     confirmed_args = pipeline_main.build_parser().parse_args([
         "all",
         "--vault-root",
-        str(fake_live_vault),
+        str(fake_live_child),
         "--live-baseline-updated",
         "--live-tests-passed",
         "--live-quality-gate-passed",
@@ -964,7 +965,7 @@ def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
         "--live-write-confirmation",
         pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN,
     ])
-    confirmed_findings = pipeline_main.live_write_guard_findings(confirmed_args, fake_live_vault, live_roots=live_roots)
+    confirmed_findings = pipeline_main.live_write_guard_findings(confirmed_args, fake_live_child, live_roots=live_roots)
     if confirmed_findings:
         findings.append("fully attested live write was blocked: " + ", ".join(confirmed_findings))
 

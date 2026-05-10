@@ -49,6 +49,6 @@ Report format:
 - List files changed in the baseline.
 - For live vault cleanup, list only deleted folders/files and preserved ambiguous filenames.
 - State whether tests, quality gate, dry-run, expected-change review, and explicit user intent were completed.
-- State whether the `main.py` live-write guard flags were required and supplied.
+- State whether the `main.py` live-write guard flags were required and supplied, including when the target path is inside the live vault rather than exactly the vault root.
 - State that no import/report/qa/all was run unless it was actually run.
 ```
