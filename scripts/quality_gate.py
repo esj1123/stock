@@ -39,6 +39,59 @@ CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
 REALIZED_COST_BASIS_METHOD = "fifo"
 REALIZED_PNL_BASIS = "gross_trade_pnl_krw_fee_tax_separate"
+REQUIRED_PERFORMANCE_METRICS = [
+    "net_external_principal_krw",
+    "external_deposit_krw",
+    "external_withdrawal_krw",
+    "current_total_assets_krw",
+    "current_cash_krw",
+    "current_holding_assets_krw",
+    "cumulative_return_krw",
+    "cumulative_return_pct",
+    "realized_trade_pnl_gross_krw",
+    "realized_trade_pnl_net_krw",
+    "realized_gain_krw",
+    "realized_loss_krw",
+    "realized_loss_abs_krw",
+    "unrealized_pnl_krw",
+    "dividend_income_krw",
+    "interest_income_krw",
+    "distribution_income_krw",
+    "income_total_krw",
+    "fee_expense_krw",
+    "tax_expense_krw",
+    "explained_profit_krw",
+    "reconciliation_residual_krw",
+    "performance_status",
+    "realized_pnl_status",
+    "income_status",
+    "fx_status",
+    "amount_review_needed_row_count",
+]
+PERFORMANCE_MONEY_METRICS = {
+    "net_external_principal_krw",
+    "external_deposit_krw",
+    "external_withdrawal_krw",
+    "current_total_assets_krw",
+    "current_cash_krw",
+    "current_holding_assets_krw",
+    "cumulative_return_krw",
+    "cumulative_return_pct",
+    "realized_trade_pnl_gross_krw",
+    "realized_trade_pnl_net_krw",
+    "realized_gain_krw",
+    "realized_loss_krw",
+    "realized_loss_abs_krw",
+    "unrealized_pnl_krw",
+    "dividend_income_krw",
+    "interest_income_krw",
+    "distribution_income_krw",
+    "income_total_krw",
+    "fee_expense_krw",
+    "tax_expense_krw",
+    "explained_profit_krw",
+    "reconciliation_residual_krw",
+}
 DISALLOWED_CASHFLOW_TYPES = {
     "buy",
     "sell",
@@ -89,6 +142,7 @@ REQUIRED_OUTPUT_SCHEMAS = {
         "tax_krw_sum", "net_income_native", "net_income_krw", "row_count", "fx_missing_row_count",
         "amount_review_needed_row_count", "income_status",
     ],
+    "performance_summary.csv": ["metric", "value"],
     "processed_expenses.csv": [
         "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
         "security_name", "expense_type", "currency_native", "amount_native", "amount_krw",
@@ -1020,6 +1074,150 @@ def reconciliation_summary_file_findings(processed_dir: Path) -> list[str]:
     return reconciliation_summary_findings(read_csv_rows(path))
 
 
+def metric_rows_to_map(rows: list[dict[str, str]]) -> dict[str, str]:
+    return {str(row.get("metric", "") or "").strip(): row.get("value", "") for row in rows}
+
+
+def performance_summary_findings(
+    rows: list[dict[str, str]],
+    reconciliation_rows: list[dict[str, str]] | None = None,
+) -> list[str]:
+    findings: list[str] = []
+    metrics = metric_rows_to_map(rows)
+    missing = [metric for metric in REQUIRED_PERFORMANCE_METRICS if metric not in metrics]
+    if missing:
+        findings.append(f"performance_summary.csv missing required metrics: {', '.join(missing)}")
+        return findings
+
+    for metric in PERFORMANCE_MONEY_METRICS:
+        if not is_blank(metrics.get(metric, "")) and optional_float(metrics.get(metric)) is None:
+            findings.append(f"performance_summary.csv metric {metric} is not numeric: {metrics.get(metric)}")
+
+    amount_review_count = optional_float(metrics.get("amount_review_needed_row_count"))
+    if amount_review_count is None or amount_review_count < 0 or amount_review_count != int(amount_review_count):
+        findings.append(
+            "performance_summary.csv count metric amount_review_needed_row_count must be a non-negative integer: "
+            f"{metrics.get('amount_review_needed_row_count')}"
+        )
+
+    deposits = optional_float(metrics.get("external_deposit_krw"))
+    withdrawals = optional_float(metrics.get("external_withdrawal_krw"))
+    principal = optional_float(metrics.get("net_external_principal_krw"))
+    assets = optional_float(metrics.get("current_total_assets_krw"))
+    cumulative_return = optional_float(metrics.get("cumulative_return_krw"))
+    cumulative_return_pct = optional_float(metrics.get("cumulative_return_pct"))
+    if all(value is not None for value in [deposits, withdrawals, principal]):
+        if abs(principal - (deposits - withdrawals)) > 0.0001:
+            findings.append("performance_summary.csv net_external_principal_krw formula mismatch")
+    if assets is not None and principal is not None:
+        if cumulative_return is None:
+            findings.append("performance_summary.csv cumulative_return_krw is blank despite available assets and principal")
+        elif abs(cumulative_return - (assets - principal)) > 0.0001:
+            findings.append("performance_summary.csv cumulative_return_krw formula mismatch")
+        if principal != 0 and cumulative_return is not None:
+            if cumulative_return_pct is None:
+                findings.append("performance_summary.csv cumulative_return_pct is blank despite available non-zero principal")
+            elif abs(cumulative_return_pct - (cumulative_return / principal * 100)) > 0.0001:
+                findings.append("performance_summary.csv cumulative_return_pct formula mismatch")
+    elif cumulative_return is not None or cumulative_return_pct is not None:
+        findings.append("performance_summary.csv cumulative return is populated despite unavailable assets or principal")
+
+    realized_loss = optional_float(metrics.get("realized_loss_krw"))
+    realized_loss_abs = optional_float(metrics.get("realized_loss_abs_krw"))
+    if realized_loss is not None:
+        if realized_loss_abs is None:
+            findings.append("performance_summary.csv realized_loss_abs_krw is blank")
+        elif abs(realized_loss_abs - abs(realized_loss)) > 0.0001:
+            findings.append("performance_summary.csv realized_loss_abs_krw formula mismatch")
+
+    income_values = [
+        optional_float(metrics.get("dividend_income_krw")),
+        optional_float(metrics.get("interest_income_krw")),
+        optional_float(metrics.get("distribution_income_krw")),
+    ]
+    income_total = optional_float(metrics.get("income_total_krw"))
+    if all(value is not None for value in income_values):
+        expected_income_total = sum(value for value in income_values if value is not None)
+        if income_total is None:
+            findings.append("performance_summary.csv income_total_krw is blank despite available income components")
+        elif abs(income_total - expected_income_total) > 0.0001:
+            findings.append("performance_summary.csv income_total_krw formula mismatch")
+
+    explained_inputs = [
+        optional_float(metrics.get("realized_trade_pnl_gross_krw")),
+        optional_float(metrics.get("unrealized_pnl_krw")),
+        *income_values,
+        optional_float(metrics.get("fee_expense_krw")),
+        optional_float(metrics.get("tax_expense_krw")),
+    ]
+    explained = optional_float(metrics.get("explained_profit_krw"))
+    if all(value is not None for value in explained_inputs):
+        expected_explained = (
+            explained_inputs[0]
+            + explained_inputs[1]
+            + explained_inputs[2]
+            + explained_inputs[3]
+            + explained_inputs[4]
+            - explained_inputs[5]
+            - explained_inputs[6]
+        )
+        if explained is None:
+            findings.append("performance_summary.csv explained_profit_krw is blank despite available components")
+        elif abs(explained - expected_explained) > 0.0001:
+            findings.append("performance_summary.csv explained_profit_krw formula mismatch")
+
+    residual = optional_float(metrics.get("reconciliation_residual_krw"))
+    if cumulative_return is not None and explained is not None:
+        if residual is None:
+            findings.append("performance_summary.csv reconciliation_residual_krw is blank despite available cumulative return and explained profit")
+        elif abs(residual - (cumulative_return - explained)) > 0.0001:
+            findings.append("performance_summary.csv reconciliation_residual_krw formula mismatch")
+
+    performance_status = lower_value(metrics.get("performance_status"))
+    realized_status = lower_value(metrics.get("realized_pnl_status"))
+    income_status = lower_value(metrics.get("income_status"))
+    fx_status = lower_value(metrics.get("fx_status"))
+    if is_blank(performance_status):
+        findings.append("performance_summary.csv performance_status is blank")
+    if performance_status == "available":
+        blocking = []
+        if cumulative_return is None:
+            blocking.append("cumulative_return_krw")
+        for label, status in [("realized_pnl_status", realized_status), ("income_status", income_status), ("fx_status", fx_status)]:
+            if status and status != "available":
+                blocking.append(label)
+        if amount_review_count is not None and amount_review_count > 0:
+            blocking.append("amount_review_needed_row_count")
+        if blocking:
+            findings.append("performance_summary.csv performance_status is available despite unresolved inputs: " + ", ".join(blocking))
+
+    if reconciliation_rows:
+        reconciliation = metric_rows_to_map(reconciliation_rows)
+        mapping = {
+            "current_total_assets_krw": "total_assets_krw",
+            "cumulative_return_krw": "total_return_krw",
+            "cumulative_return_pct": "total_return_pct",
+            "reconciliation_residual_krw": "residual_krw",
+        }
+        for perf_metric, rec_metric in mapping.items():
+            perf_value = optional_float(metrics.get(perf_metric))
+            rec_value = optional_float(reconciliation.get(rec_metric))
+            if perf_value is not None and rec_value is not None and abs(perf_value - rec_value) > 0.0001:
+                findings.append(f"performance_summary.csv {perf_metric} does not match reconciliation_summary.csv {rec_metric}")
+    return findings
+
+
+def performance_summary_file_findings(processed_dir: Path) -> list[str]:
+    path = processed_dir / "performance_summary.csv"
+    if not path.exists():
+        return ["performance_summary.csv is missing"]
+    header = read_csv_header(path)
+    missing_columns = [column for column in ["metric", "value"] if column not in header]
+    if missing_columns:
+        return [f"performance_summary.csv missing required columns: {', '.join(missing_columns)}"]
+    return performance_summary_findings(read_csv_rows(path), read_csv_rows(processed_dir / "reconciliation_summary.csv"))
+
+
 def money_event_contract_findings(rows: list[dict[str, str]], label: str, type_col: str, allowed_types: set[str]) -> list[str]:
     findings: list[str] = []
     for idx, row in enumerate(rows, start=2):
@@ -1329,6 +1527,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "reconciliation_summary metric contract", "FAIL", "; ".join(reconciliation_findings[:5]))
     else:
         write_result(results, "reconciliation_summary metric contract", "PASS", "required reconciliation metrics exist and formulas/statuses are guarded.")
+
+    performance_findings = performance_summary_file_findings(processed_dir)
+    if performance_findings:
+        write_result(results, "performance_summary metric contract", "FAIL", "; ".join(performance_findings[:5]))
+    else:
+        write_result(results, "performance_summary metric contract", "PASS", "required performance metrics exist and formulas/statuses are guarded.")
 
     income_summary_findings = income_summary_contract_findings(income_summary, income)
     if income_summary_findings:

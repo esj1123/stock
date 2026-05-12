@@ -36,6 +36,35 @@ INCOME_SUMMARY_COLUMNS = [
     "amount_review_needed_row_count",
     "income_status",
 ]
+PERFORMANCE_SUMMARY_METRICS = [
+    "net_external_principal_krw",
+    "external_deposit_krw",
+    "external_withdrawal_krw",
+    "current_total_assets_krw",
+    "current_cash_krw",
+    "current_holding_assets_krw",
+    "cumulative_return_krw",
+    "cumulative_return_pct",
+    "realized_trade_pnl_gross_krw",
+    "realized_trade_pnl_net_krw",
+    "realized_gain_krw",
+    "realized_loss_krw",
+    "realized_loss_abs_krw",
+    "unrealized_pnl_krw",
+    "dividend_income_krw",
+    "interest_income_krw",
+    "distribution_income_krw",
+    "income_total_krw",
+    "fee_expense_krw",
+    "tax_expense_krw",
+    "explained_profit_krw",
+    "reconciliation_residual_krw",
+    "performance_status",
+    "realized_pnl_status",
+    "income_status",
+    "fx_status",
+    "amount_review_needed_row_count",
+]
 REALIZED_PNL_COLUMNS = [
     "account_type",
     "market",
@@ -595,6 +624,179 @@ def build_income_summary(income: pd.DataFrame) -> pd.DataFrame:
         .drop(columns=["_type_order"], errors="ignore")
         .reindex(columns=INCOME_SUMMARY_COLUMNS)
     )
+
+
+def summary_to_dict(summary: pd.DataFrame) -> dict[str, Any]:
+    if summary.empty or "metric" not in summary.columns or "value" not in summary.columns:
+        return {}
+    return dict(zip(summary["metric"].astype(str), summary["value"]))
+
+
+def summary_number(metrics: dict[str, Any], name: str) -> float | None:
+    return number_value(metrics.get(name))
+
+
+def summary_status(metrics: dict[str, Any], name: str, default: str = "available") -> str:
+    value = text_value(metrics.get(name)).lower()
+    return value or default
+
+
+def income_summary_status(income_summary: pd.DataFrame) -> str:
+    if income_summary.empty or "income_status" not in income_summary.columns:
+        return "available"
+    statuses = [
+        text_value(value).lower()
+        for value in income_summary["income_status"].fillna("")
+        if text_value(value)
+    ]
+    return status_from_list(statuses, default="available")
+
+
+def income_summary_total(
+    income_summary: pd.DataFrame,
+    *,
+    income_type: str | None = None,
+    field: str = "amount_krw_sum",
+) -> float | None:
+    if income_summary.empty or field not in income_summary.columns:
+        return 0.0
+    view = income_summary
+    if income_type is not None and "income_type" in view.columns:
+        view = view[view["income_type"].fillna("").astype(str).str.lower().eq(income_type)]
+    if view.empty:
+        return 0.0
+    values = [number_value(value) for value in view[field]]
+    values = [value for value in values if value is not None]
+    if values:
+        return float(sum(values))
+    row_counts = [number_value(value) for value in view.get("row_count", pd.Series(dtype=float))]
+    if any((value or 0.0) > 0 for value in row_counts):
+        return None
+    return 0.0
+
+
+def performance_fx_status(reconciliation_metrics: dict[str, Any]) -> str:
+    statuses: list[str] = []
+    if (summary_number(reconciliation_metrics, "currency_ambiguous_row_count") or 0.0) > 0:
+        statuses.append("currency_ambiguous")
+    if (summary_number(reconciliation_metrics, "unit_ambiguous_row_count") or 0.0) > 0:
+        statuses.append("unit_ambiguous")
+    if (summary_number(reconciliation_metrics, "fx_missing_row_count") or 0.0) > 0:
+        statuses.append("fx_missing")
+    if (summary_number(reconciliation_metrics, "amount_review_needed_row_count") or 0.0) > 0:
+        statuses.append("needs_review")
+    return status_from_list(statuses, default="available")
+
+
+def build_performance_summary(reconciliation: pd.DataFrame, income_summary: pd.DataFrame | None = None) -> pd.DataFrame:
+    income_summary = income_summary if income_summary is not None else pd.DataFrame()
+    rec = summary_to_dict(reconciliation)
+    total_assets_status = summary_status(rec, "total_assets_status", "unavailable")
+    principal_status = summary_status(rec, "net_external_principal_status", "unavailable")
+    realized_status = summary_status(rec, "realized_pnl_status", "transaction_history_missing")
+    income_status = income_summary_status(income_summary)
+    fx_status = performance_fx_status(rec)
+
+    current_total_assets = summary_number(rec, "total_assets_krw")
+    net_principal = summary_number(rec, "net_external_principal_krw")
+    cumulative_status = status_from_list(
+        [
+            total_assets_status if total_assets_status != "available" else "",
+            principal_status if principal_status != "available" else "",
+        ],
+        default="available",
+    )
+    cumulative_return = None
+    cumulative_return_pct = None
+    if cumulative_status == "available" and current_total_assets is not None and net_principal is not None:
+        cumulative_return = current_total_assets - net_principal
+        cumulative_return_pct = round(cumulative_return / net_principal * 100, 6) if abs(net_principal) > 1e-9 else None
+
+    dividend_income = income_summary_total(income_summary, income_type="dividend")
+    interest_income = income_summary_total(income_summary, income_type="interest")
+    distribution_income = income_summary_total(income_summary, income_type="distribution")
+    income_values = [dividend_income, interest_income, distribution_income]
+    income_total = float(sum(value for value in income_values if value is not None)) if all(value is not None for value in income_values) else None
+
+    realized_gross = summary_number(rec, "realized_trade_pnl_gross_krw")
+    realized_net = summary_number(rec, "realized_trade_pnl_net_krw")
+    realized_gain = summary_number(rec, "realized_gain_krw")
+    realized_loss = summary_number(rec, "realized_loss_krw")
+    unrealized = summary_number(rec, "unrealized_pnl_krw")
+    fee_expense = summary_number(rec, "fee_expense_krw")
+    tax_expense = summary_number(rec, "tax_expense_krw")
+
+    explain_status = status_from_list(
+        [
+            realized_status if realized_status != "available" else "",
+            income_status if income_status != "available" else "",
+            fx_status if fx_status != "available" else "",
+        ],
+        default="available",
+    )
+    explain_inputs = [
+        realized_gross,
+        unrealized,
+        dividend_income,
+        interest_income,
+        distribution_income,
+        fee_expense,
+        tax_expense,
+    ]
+    explained_profit = None
+    if explain_status == "available" and all(value is not None for value in explain_inputs):
+        explained_profit = (
+            realized_gross
+            + unrealized
+            + dividend_income
+            + interest_income
+            + distribution_income
+            - fee_expense
+            - tax_expense
+        )
+    reconciliation_residual = (
+        cumulative_return - explained_profit
+        if cumulative_return is not None and explained_profit is not None
+        else None
+    )
+    performance_status = status_from_list(
+        [
+            cumulative_status if cumulative_status != "available" else "",
+            explain_status if explain_status != "available" else "",
+        ],
+        default="available",
+    )
+
+    values = {
+        "net_external_principal_krw": net_principal,
+        "external_deposit_krw": summary_number(rec, "external_deposit_krw"),
+        "external_withdrawal_krw": summary_number(rec, "external_withdrawal_krw"),
+        "current_total_assets_krw": current_total_assets,
+        "current_cash_krw": summary_number(rec, "current_cash_krw"),
+        "current_holding_assets_krw": summary_number(rec, "current_holding_assets_krw"),
+        "cumulative_return_krw": cumulative_return,
+        "cumulative_return_pct": cumulative_return_pct,
+        "realized_trade_pnl_gross_krw": realized_gross,
+        "realized_trade_pnl_net_krw": realized_net,
+        "realized_gain_krw": realized_gain,
+        "realized_loss_krw": realized_loss,
+        "realized_loss_abs_krw": abs(realized_loss) if realized_loss is not None else None,
+        "unrealized_pnl_krw": unrealized,
+        "dividend_income_krw": dividend_income,
+        "interest_income_krw": interest_income,
+        "distribution_income_krw": distribution_income,
+        "income_total_krw": income_total,
+        "fee_expense_krw": fee_expense,
+        "tax_expense_krw": tax_expense,
+        "explained_profit_krw": explained_profit,
+        "reconciliation_residual_krw": reconciliation_residual,
+        "performance_status": performance_status,
+        "realized_pnl_status": realized_status,
+        "income_status": income_status,
+        "fx_status": fx_status,
+        "amount_review_needed_row_count": summary_number(rec, "amount_review_needed_row_count") or 0,
+    }
+    return summary_metric_rows({metric: values.get(metric) for metric in PERFORMANCE_SUMMARY_METRICS})
 
 
 def trade_identity(row: pd.Series) -> tuple[str, str, str]:
@@ -1399,6 +1601,7 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     income_summary = build_income_summary(income)
     realized = realized_pnl_ledger(transactions, holdings)
     reconciliation = build_reconciliation_summary(processed_dir, holdings, realized)
+    performance = build_performance_summary(reconciliation, income_summary)
     if dry_run:
         return {
             "summary_rows": len(summary),
@@ -1408,11 +1611,13 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
             "review_rows": len(review),
             "realized_rows": len(realized),
             "income_summary_rows": len(income_summary),
+            "performance_rows": len(performance),
             "reconciliation_rows": len(reconciliation),
         }
     processed_dir.mkdir(parents=True, exist_ok=True)
     summary.to_csv(processed_dir / "portfolio_summary.csv", index=False, encoding="utf-8-sig")
     reconciliation.to_csv(processed_dir / "reconciliation_summary.csv", index=False, encoding="utf-8-sig")
+    performance.to_csv(processed_dir / "performance_summary.csv", index=False, encoding="utf-8-sig")
     income_summary.to_csv(processed_dir / "income_summary.csv", index=False, encoding="utf-8-sig")
     realized.to_csv(processed_dir / "processed_realized_pnl.csv", index=False, encoding="utf-8-sig")
     holdings.to_csv(processed_dir / "processed_holdings.csv", index=False, encoding="utf-8-sig")
@@ -1428,5 +1633,6 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
         "review_rows": len(review),
         "realized_rows": len(realized),
         "income_summary_rows": len(income_summary),
+        "performance_rows": len(performance),
         "reconciliation_rows": len(reconciliation),
     }
