@@ -47,6 +47,7 @@ from quality_gate import (
     fx_event_contract_findings,
     income_contract_findings,
     income_expense_separation_findings,
+    income_reversal_review_findings,
     income_summary_contract_findings,
     invalid_currency_findings,
     live_vault_actual_write_guard_findings,
@@ -1184,6 +1185,47 @@ def test_quality_gate_validates_income_summary_contract():
     available_status = [{**valid_summary[0], "income_status": "available"}]
     findings = income_summary_contract_findings(available_status, income_rows)
     assert any("income_status expected fx_missing" in finding for finding in findings)
+
+
+def test_quality_gate_flags_income_reversal_rows_for_review_without_private_amounts():
+    rows = [
+        {
+            "income_type": "dividend",
+            "currency_native": "USD",
+            "amount_native": "-12.34",
+            "amount_krw": "-17000",
+            "tax_native": "",
+            "tax_krw": "",
+            "amount_review_status": "ok",
+            "account_type": "PRIVATE-ACCOUNT-123",
+            "raw_memo": "regular dividend",
+        },
+        {
+            "income_type": "dividend",
+            "currency_native": "USD",
+            "amount_native": "5",
+            "amount_krw": "",
+            "tax_native": "",
+            "tax_krw": "",
+            "amount_review_status": "fx_missing",
+            "account_type": "PRIVATE-ACCOUNT-456",
+            "raw_memo": "dividend reversal refund",
+        },
+    ]
+
+    findings = income_reversal_review_findings(rows)
+    text = "\n".join(findings)
+
+    assert any("reversal/refund-like rows need review" in finding for finding in findings)
+    assert "row_count=2" in text
+    assert "income_types=dividend" in text
+    assert "statuses=fx_missing,ok" in text
+    assert "negative_amount" in text
+    assert "reversal_keyword" in text
+    assert "12.34" not in text
+    assert "17000" not in text
+    assert "PRIVATE-ACCOUNT" not in text
+    assert "dividend reversal refund" not in text
 
 
 def test_quality_gate_validates_realized_pnl_fifo_cost_basis_rows():

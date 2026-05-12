@@ -60,6 +60,21 @@ AMBIGUOUS_OR_UNRESOLVED_STATUSES = {
     "unclassified",
     "lot_missing",
 }
+INCOME_REVERSAL_KEYWORDS = {
+    "reversal",
+    "reversed",
+    "cancel",
+    "canceled",
+    "cancelled",
+    "cancellation",
+    "correction",
+    "corrected",
+    "refund",
+    "refunded",
+    "취소",
+    "정정",
+    "환급",
+}
 
 REQUIRED_OUTPUT_SCHEMAS = {
     "processed_income.csv": [
@@ -660,6 +675,41 @@ def income_summary_contract_findings(summary_rows: list[dict[str, str]], income_
                 f"{label_prefix} income_status expected {expected_values['income_status']} but found {row.get('income_status')}"
             )
     return findings
+
+
+def income_reversal_review_findings(rows: list[dict[str, str]]) -> list[str]:
+    suspicious: list[dict[str, str]] = []
+    for row in rows:
+        income_type = lower_value(row.get("income_type"))
+        if income_type not in {"dividend", "interest", "distribution"}:
+            continue
+        has_negative_amount = any(
+            (value := optional_float(row.get(field))) is not None and value < 0
+            for field in ["amount_native", "amount_krw", "tax_native", "tax_krw"]
+        )
+        text = " ".join(
+            lower_value(row.get(field))
+            for field in ["transaction_type", "cashflow_role", "raw_memo", "amount_review_reason"]
+        )
+        has_reversal_keyword = any(keyword in text for keyword in INCOME_REVERSAL_KEYWORDS)
+        if has_negative_amount or has_reversal_keyword:
+            suspicious.append({
+                "income_type": income_type,
+                "status": row_status(row) or "ok",
+                "signal": "negative_amount" if has_negative_amount else "reversal_keyword",
+            })
+
+    if not suspicious:
+        return []
+
+    income_types = sorted({row["income_type"] for row in suspicious})
+    statuses = sorted({row["status"] for row in suspicious})
+    signals = sorted({row["signal"] for row in suspicious})
+    return [
+        "processed_income reversal/refund-like rows need review before relying on absolute income_summary totals: "
+        f"row_count={len(suspicious)}; income_types={','.join(income_types)}; "
+        f"statuses={','.join(statuses)}; signals={','.join(signals)}"
+    ]
 
 
 def row_has_numeric_value(row: dict[str, str], fields: Iterable[str]) -> bool:
@@ -1285,6 +1335,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "income_summary cash income contract", "FAIL", "; ".join(income_summary_findings[:5]))
     else:
         write_result(results, "income_summary cash income contract", "PASS", f"{len(income_summary)} income summary rows preserve native amounts and use status-ok KRW totals.")
+
+    income_reversal_findings = income_reversal_review_findings(income)
+    if income_reversal_findings:
+        write_result(results, "income reversal/refund review", "WARN", "; ".join(income_reversal_findings[:5]))
+    else:
+        write_result(results, "income reversal/refund review", "PASS", "no negative or reversal-like income rows detected.")
 
     realized_cost_basis_findings = realized_pnl_cost_basis_findings(realized)
     if realized_cost_basis_findings:
