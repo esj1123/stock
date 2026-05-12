@@ -20,6 +20,7 @@ REVIEW_COLUMNS = ["ticker", "security_name", "reason", "severity", "suggested_ac
 SUMMARY_COLUMNS = ["metric", "value"]
 RECONCILIATION_SUMMARY_COLUMNS = ["metric", "value"]
 REALIZED_COST_BASIS_METHOD = "fifo"
+REALIZED_PNL_BASIS = "gross_trade_pnl_krw_fee_tax_separate"
 REALIZED_PNL_COLUMNS = [
     "account_type",
     "market",
@@ -29,13 +30,23 @@ REALIZED_PNL_COLUMNS = [
     "sell_date",
     "sell_import_id",
     "quantity_sold",
+    "proceeds_native",
     "proceeds_krw",
+    "cost_basis_native",
     "cost_basis_krw",
-    "cost_basis_method",
-    "realized_pnl_krw",
+    "fee_native",
+    "fee_krw",
+    "tax_native",
+    "tax_krw",
+    "realized_trade_pnl_gross_native",
+    "realized_trade_pnl_gross_krw",
+    "realized_trade_pnl_net_native",
+    "realized_trade_pnl_net_krw",
     "realized_result",
     "position_status",
+    "cost_basis_method",
     "amount_review_status",
+    "fx_status",
     "amount_review_reason",
     "source_file",
 ]
@@ -531,6 +542,94 @@ def trade_amount_krw(row: pd.Series) -> tuple[float | None, str, str]:
     return abs(amount), "ok", ""
 
 
+def trade_money_amounts(
+    row: pd.Series,
+    native_fields: list[str],
+    krw_fields: list[str],
+    *,
+    default_zero: bool = False,
+) -> dict[str, Any]:
+    currency = row_currency(row)
+    review_status = row_review_status(row) or "ok"
+    native = first_number(row, native_fields)
+    krw = first_number(row, krw_fields)
+
+    if default_zero and native is None and krw is None:
+        native = 0.0
+        krw = 0.0
+    if native is None and currency == "KRW" and krw is not None:
+        native = krw
+    if krw is None and currency == "KRW" and native is not None:
+        krw = native
+
+    status = "ok"
+    reason = ""
+    if not currency or len(currency) != 3 or not currency.isalpha():
+        status = "currency_ambiguous"
+        reason = "trade currency is missing or invalid"
+    elif native is None and krw is None:
+        status = "unit_ambiguous"
+        reason = "trade amount has no native or KRW value"
+    elif review_status != "ok":
+        status = review_status
+        reason = text_value(row.get("amount_review_reason"))
+    elif currency != "KRW" and krw is None:
+        status = "fx_missing"
+        reason = "trade amount has no KRW-normalized value"
+
+    if currency == "KRW":
+        fx_status = "not_required"
+    elif krw is not None:
+        fx_status = "available"
+    elif status == "fx_missing":
+        fx_status = "fx_missing"
+    else:
+        fx_status = status
+
+    return {
+        "native": abs(native) if native is not None else None,
+        "krw": abs(krw) if krw is not None else None,
+        "status": status,
+        "fx_status": fx_status,
+        "reason": reason,
+    }
+
+
+def trade_amounts(row: pd.Series) -> dict[str, Any]:
+    return trade_money_amounts(
+        row,
+        ["trade_amount_native", "amount_native", "trade_amount", "settlement_amount_native", "settlement_amount"],
+        ["trade_amount_krw", "amount_krw", "settlement_amount_krw"],
+    )
+
+
+def trade_fee_amounts(row: pd.Series) -> dict[str, Any]:
+    return trade_money_amounts(row, ["fee_native", "fee"], ["fee_krw"], default_zero=True)
+
+
+def trade_tax_amounts(row: pd.Series) -> dict[str, Any]:
+    return trade_money_amounts(row, ["tax_native", "tax"], ["tax_krw"], default_zero=True)
+
+
+def fx_status_from_list(statuses: list[str]) -> str:
+    cleaned = [status for status in statuses if status and status != "not_required"]
+    if not cleaned:
+        return "not_required"
+    for status in ["currency_ambiguous", "unit_ambiguous", "fx_missing", "available"]:
+        if status in cleaned:
+            return status
+    return cleaned[0]
+
+
+def native_status_for_amount(amount: dict[str, Any]) -> str:
+    status = text_value(amount.get("status")).lower() or "ok"
+    if amount.get("native") is None:
+        return "unit_ambiguous" if status in {"ok", "fx_missing"} else status
+    if status == "fx_missing":
+        return "ok"
+    return status
+
+
 def trade_quantity(row: pd.Series) -> float | None:
     quantity = first_number(row, ["quantity"])
     if quantity is None or abs(quantity) <= 1e-9:
@@ -577,29 +676,57 @@ def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> p
         for _, row in group.iterrows():
             tx_type = text_value(row.get("transaction_type")).lower()
             quantity = trade_quantity(row)
-            amount, amount_status, amount_reason = trade_amount_krw(row)
+            amount = trade_amounts(row)
+            fee = trade_fee_amounts(row)
+            tax = trade_tax_amounts(row)
             if tx_type == "buy":
+                native_status = native_status_for_amount(amount)
+                krw_status = amount["status"] if amount["status"] != "ok" or quantity is None else "ok"
                 lots.append({
                     "remaining_qty": quantity or 0.0,
-                    "unit_cost": (amount / quantity) if quantity and amount is not None else None,
-                    "status": amount_status if amount_status != "ok" or quantity is None else "ok",
-                    "reason": amount_reason if amount_status != "ok" else ("buy quantity missing" if quantity is None else ""),
+                    "unit_cost_native": (amount["native"] / quantity) if quantity and amount["native"] is not None and native_status == "ok" else None,
+                    "unit_cost_krw": (amount["krw"] / quantity) if quantity and amount["krw"] is not None and krw_status == "ok" else None,
+                    "native_status": native_status if quantity is not None else "unit_ambiguous",
+                    "krw_status": krw_status if quantity is not None else "unit_ambiguous",
+                    "fx_status": amount["fx_status"],
+                    "reason": amount["reason"] if amount["status"] != "ok" else ("buy quantity missing" if quantity is None else ""),
                 })
                 continue
             if tx_type != "sell":
                 continue
 
-            statuses: list[str] = []
+            official_statuses: list[str] = []
+            native_statuses: list[str] = []
+            fx_statuses: list[str] = []
             reasons: list[str] = []
-            matched_cost = 0.0
+            matched_cost_native = 0.0
+            matched_cost_krw = 0.0
             remaining = quantity or 0.0
             if quantity is None:
-                statuses.append("unit_ambiguous")
+                official_statuses.append("unit_ambiguous")
+                native_statuses.append("unit_ambiguous")
                 reasons.append("sell quantity missing")
-            if amount_status != "ok" or amount is None:
-                statuses.append(amount_status)
-                if amount_reason:
-                    reasons.append(amount_reason)
+            amount_native_status = native_status_for_amount(amount)
+            if amount_native_status != "ok":
+                native_statuses.append(amount_native_status)
+            if amount["status"] != "ok" or amount["krw"] is None:
+                official_statuses.append(amount["status"])
+            if amount["fx_status"]:
+                fx_statuses.append(amount["fx_status"])
+            if amount["reason"]:
+                reasons.append(amount["reason"])
+
+            for label, extra_amount in [("fee", fee), ("tax", tax)]:
+                has_amount = (extra_amount["native"] or 0.0) != 0.0 or (extra_amount["krw"] or 0.0) != 0.0
+                native_status = native_status_for_amount(extra_amount)
+                if has_amount and native_status != "ok":
+                    native_statuses.append(native_status)
+                if has_amount and (extra_amount["status"] != "ok" or extra_amount["krw"] is None):
+                    official_statuses.append(extra_amount["status"])
+                if has_amount and extra_amount["fx_status"]:
+                    fx_statuses.append(extra_amount["fx_status"])
+                if has_amount and extra_amount["reason"]:
+                    reasons.append(f"{label}: {extra_amount['reason']}")
 
             lot_index = 0
             # Consume buy lots in insertion order; this is the realized PnL cost-basis contract.
@@ -610,24 +737,50 @@ def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> p
                     lot_index += 1
                     continue
                 matched_qty = min(remaining, lot_qty)
-                if lot.get("unit_cost") is None or lot.get("status") != "ok":
-                    statuses.append(text_value(lot.get("status")) or "unit_ambiguous")
+                if lot.get("unit_cost_native") is None or lot.get("native_status") != "ok":
+                    native_statuses.append(text_value(lot.get("native_status")) or "unit_ambiguous")
                     if lot.get("reason"):
                         reasons.append(text_value(lot.get("reason")))
                 else:
-                    matched_cost += float(lot["unit_cost"]) * matched_qty
+                    matched_cost_native += float(lot["unit_cost_native"]) * matched_qty
+                if lot.get("unit_cost_krw") is None or lot.get("krw_status") != "ok":
+                    official_statuses.append(text_value(lot.get("krw_status")) or "unit_ambiguous")
+                    if lot.get("fx_status"):
+                        fx_statuses.append(text_value(lot.get("fx_status")))
+                    if lot.get("reason"):
+                        reasons.append(text_value(lot.get("reason")))
+                else:
+                    matched_cost_krw += float(lot["unit_cost_krw"]) * matched_qty
                 lot["remaining_qty"] = lot_qty - matched_qty
                 remaining -= matched_qty
                 if lot["remaining_qty"] <= 1e-9:
                     lot_index += 1
 
             if remaining > 1e-9:
-                statuses.append("lot_missing")
+                official_statuses.append("lot_missing")
+                native_statuses.append("lot_missing")
                 reasons.append("sell quantity exceeds matched buy lots in imported transaction history")
 
-            status = status_from_list(statuses, default="ok")
-            proceeds = amount if amount is not None else None
-            realized = proceeds - matched_cost if status == "ok" and proceeds is not None else None
+            status = status_from_list(official_statuses, default="ok")
+            fx_status = fx_status_from_list(fx_statuses)
+            proceeds_native = amount["native"]
+            proceeds_krw = amount["krw"]
+            fee_native = fee["native"] if fee["native"] is not None else 0.0
+            fee_krw = fee["krw"] if fee["krw"] is not None else None
+            tax_native = tax["native"] if tax["native"] is not None else 0.0
+            tax_krw = tax["krw"] if tax["krw"] is not None else None
+            native_ready = (
+                not native_statuses
+                and proceeds_native is not None
+                and fee_native is not None
+                and tax_native is not None
+            )
+            krw_ready = status == "ok" and proceeds_krw is not None and fee_krw is not None and tax_krw is not None
+            gross_native = proceeds_native - matched_cost_native if native_ready else None
+            gross_krw = proceeds_krw - matched_cost_krw if krw_ready else None
+            net_native = gross_native - fee_native - tax_native if gross_native is not None else None
+            net_krw = gross_krw - fee_krw - tax_krw if gross_krw is not None else None
+            result_basis = gross_krw if gross_krw is not None else gross_native
             group_records.append({
                 "account_type": row.get("account_type", ""),
                 "market": row.get("market", ""),
@@ -637,13 +790,23 @@ def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> p
                 "sell_date": row.get("trade_date", ""),
                 "sell_import_id": row.get("import_id", ""),
                 "quantity_sold": quantity if quantity is not None else "",
-                "proceeds_krw": proceeds if status == "ok" else "",
-                "cost_basis_krw": matched_cost if status == "ok" else "",
-                "cost_basis_method": REALIZED_COST_BASIS_METHOD,
-                "realized_pnl_krw": realized if realized is not None else "",
-                "realized_result": "gain" if realized is not None and realized >= 0 else ("loss" if realized is not None else ""),
+                "proceeds_native": proceeds_native if proceeds_native is not None else "",
+                "proceeds_krw": proceeds_krw if proceeds_krw is not None else "",
+                "cost_basis_native": matched_cost_native if native_ready else "",
+                "cost_basis_krw": matched_cost_krw if krw_ready else "",
+                "fee_native": fee_native,
+                "fee_krw": fee_krw if fee_krw is not None else "",
+                "tax_native": tax_native,
+                "tax_krw": tax_krw if tax_krw is not None else "",
+                "realized_trade_pnl_gross_native": gross_native if gross_native is not None else "",
+                "realized_trade_pnl_gross_krw": gross_krw if gross_krw is not None else "",
+                "realized_trade_pnl_net_native": net_native if net_native is not None else "",
+                "realized_trade_pnl_net_krw": net_krw if net_krw is not None else "",
+                "realized_result": "gain" if result_basis is not None and result_basis >= 0 else ("loss" if result_basis is not None else ""),
                 "position_status": "",
+                "cost_basis_method": REALIZED_COST_BASIS_METHOD,
                 "amount_review_status": status,
+                "fx_status": fx_status,
                 "amount_review_reason": "; ".join(dict.fromkeys(reason for reason in reasons if reason)),
                 "source_file": row.get("source_file", ""),
                 "_identity": trade_identity(row),
@@ -671,9 +834,12 @@ def realized_pnl_summary(
         if transaction_source_available:
             return {
                 "realized_pnl_krw": 0.0,
+                "realized_trade_pnl_gross_krw": 0.0,
+                "realized_trade_pnl_net_krw": 0.0,
                 "realized_gain_krw": 0.0,
                 "realized_loss_krw": 0.0,
                 "realized_cost_basis_method": REALIZED_COST_BASIS_METHOD,
+                "realized_pnl_basis": REALIZED_PNL_BASIS,
                 "realized_pnl_status": "available",
                 "realized_pnl_row_count": 0,
                 "realized_pnl_unavailable_row_count": 0,
@@ -681,9 +847,12 @@ def realized_pnl_summary(
             }
         return {
             "realized_pnl_krw": None,
+            "realized_trade_pnl_gross_krw": None,
+            "realized_trade_pnl_net_krw": None,
             "realized_gain_krw": None,
             "realized_loss_krw": None,
             "realized_cost_basis_method": REALIZED_COST_BASIS_METHOD,
+            "realized_pnl_basis": REALIZED_PNL_BASIS,
             "realized_pnl_status": "transaction_history_missing",
             "realized_pnl_row_count": 0,
             "realized_pnl_unavailable_row_count": 0,
@@ -696,21 +865,28 @@ def realized_pnl_summary(
         blocking = [value for value in status[unavailable].tolist() if value]
         return {
             "realized_pnl_krw": None,
+            "realized_trade_pnl_gross_krw": None,
+            "realized_trade_pnl_net_krw": None,
             "realized_gain_krw": None,
             "realized_loss_krw": None,
             "realized_cost_basis_method": REALIZED_COST_BASIS_METHOD,
+            "realized_pnl_basis": REALIZED_PNL_BASIS,
             "realized_pnl_status": status_from_list(blocking, default="unavailable"),
             "realized_pnl_row_count": len(ledger),
             "realized_pnl_unavailable_row_count": int(unavailable.sum()),
             "realized_closed_position_count": int(ledger.get("position_status", pd.Series("", index=ledger.index)).fillna("").astype(str).str.lower().eq("closed").sum()),
         }
 
-    pnl = pd.to_numeric(ledger.get("realized_pnl_krw", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    gross = pd.to_numeric(ledger.get("realized_trade_pnl_gross_krw", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    net = pd.to_numeric(ledger.get("realized_trade_pnl_net_krw", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
     return {
-        "realized_pnl_krw": float(pnl.sum()),
-        "realized_gain_krw": float(pnl[pnl > 0].sum()),
-        "realized_loss_krw": float(pnl[pnl < 0].sum()),
+        "realized_pnl_krw": float(gross.sum()),
+        "realized_trade_pnl_gross_krw": float(gross.sum()),
+        "realized_trade_pnl_net_krw": float(net.sum()),
+        "realized_gain_krw": float(gross[gross > 0].sum()),
+        "realized_loss_krw": float(gross[gross < 0].sum()),
         "realized_cost_basis_method": REALIZED_COST_BASIS_METHOD,
+        "realized_pnl_basis": REALIZED_PNL_BASIS,
         "realized_pnl_status": "available",
         "realized_pnl_row_count": len(ledger),
         "realized_pnl_unavailable_row_count": 0,
@@ -841,7 +1017,7 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame, re
     distribution_income = ok_amount_sum(income, "income_type", {"distribution"})
     fee_expense = ok_amount_sum(expenses, "expense_type", {"fee"})
     tax_expense = ok_amount_sum(expenses, "expense_type", {"tax"})
-    realized_pnl = realized_metrics["realized_pnl_krw"] if realized_metrics["realized_pnl_status"] == "available" else 0.0
+    realized_pnl = realized_metrics["realized_trade_pnl_gross_krw"] if realized_metrics["realized_pnl_status"] == "available" else 0.0
     explained_profit = unrealized + realized_pnl + dividend_income + interest_income + distribution_income - fee_expense - tax_expense
     explained_profit_status = "available" if realized_metrics["realized_pnl_status"] == "available" else realized_metrics["realized_pnl_status"]
 
@@ -875,9 +1051,12 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame, re
         "total_return_status": total_return_status,
         "unrealized_pnl_krw": unrealized,
         "realized_pnl_krw": realized_metrics["realized_pnl_krw"],
+        "realized_trade_pnl_gross_krw": realized_metrics["realized_trade_pnl_gross_krw"],
+        "realized_trade_pnl_net_krw": realized_metrics["realized_trade_pnl_net_krw"],
         "realized_gain_krw": realized_metrics["realized_gain_krw"],
         "realized_loss_krw": realized_metrics["realized_loss_krw"],
         "realized_cost_basis_method": realized_metrics["realized_cost_basis_method"],
+        "realized_pnl_basis": realized_metrics["realized_pnl_basis"],
         "realized_pnl_status": realized_metrics["realized_pnl_status"],
         "realized_pnl_row_count": realized_metrics["realized_pnl_row_count"],
         "realized_pnl_unavailable_row_count": realized_metrics["realized_pnl_unavailable_row_count"],

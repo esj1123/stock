@@ -38,6 +38,7 @@ COMPANY_QA_EXCEPTION_IDS = {"INV-EX-03", "INV-EX-08"}
 CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
 REALIZED_COST_BASIS_METHOD = "fifo"
+REALIZED_PNL_BASIS = "gross_trade_pnl_krw_fee_tax_separate"
 DISALLOWED_CASHFLOW_TYPES = {
     "buy",
     "sell",
@@ -83,8 +84,11 @@ REQUIRED_OUTPUT_SCHEMAS = {
     ],
     "processed_realized_pnl.csv": [
         "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
-        "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "cost_basis_method",
-        "realized_pnl_krw", "realized_result", "position_status", "amount_review_status",
+        "sell_import_id", "quantity_sold", "proceeds_native", "proceeds_krw", "cost_basis_native",
+        "cost_basis_krw", "fee_native", "fee_krw", "tax_native", "tax_krw",
+        "realized_trade_pnl_gross_native", "realized_trade_pnl_gross_krw",
+        "realized_trade_pnl_net_native", "realized_trade_pnl_net_krw", "realized_result",
+        "position_status", "cost_basis_method", "amount_review_status", "fx_status",
         "amount_review_reason", "source_file",
     ],
 }
@@ -103,9 +107,12 @@ REQUIRED_RECONCILIATION_METRICS = [
     "total_return_status",
     "unrealized_pnl_krw",
     "realized_pnl_krw",
+    "realized_trade_pnl_gross_krw",
+    "realized_trade_pnl_net_krw",
     "realized_gain_krw",
     "realized_loss_krw",
     "realized_cost_basis_method",
+    "realized_pnl_basis",
     "realized_pnl_status",
     "realized_pnl_row_count",
     "realized_pnl_unavailable_row_count",
@@ -163,6 +170,8 @@ RECONCILIATION_MONEY_METRICS = {
     "total_return_pct",
     "unrealized_pnl_krw",
     "realized_pnl_krw",
+    "realized_trade_pnl_gross_krw",
+    "realized_trade_pnl_net_krw",
     "realized_gain_krw",
     "realized_loss_krw",
     "dividend_income_krw",
@@ -443,12 +452,48 @@ def realized_pnl_cost_basis_findings(rows: list[dict[str, str]]) -> list[str]:
             )
 
         status = lower_value(row.get("amount_review_status"))
+        fx_status = lower_value(row.get("fx_status"))
         if is_blank(status):
             findings.append(f"processed_realized_pnl.csv row {idx} has blank amount_review_status")
-        if status == "ok" and is_blank(row.get("realized_pnl_krw", "")):
-            findings.append(f"processed_realized_pnl.csv row {idx} has status ok but blank realized_pnl_krw")
-        if status == "lot_missing" and not is_blank(row.get("realized_pnl_krw", "")):
-            findings.append(f"processed_realized_pnl.csv row {idx} has lot_missing status but realized_pnl_krw is populated")
+        if is_blank(fx_status):
+            findings.append(f"processed_realized_pnl.csv row {idx} has blank fx_status")
+
+        gross_krw = optional_float(row.get("realized_trade_pnl_gross_krw"))
+        net_krw = optional_float(row.get("realized_trade_pnl_net_krw"))
+        if status == "ok":
+            official_values = {
+                "proceeds_krw": optional_float(row.get("proceeds_krw")),
+                "cost_basis_krw": optional_float(row.get("cost_basis_krw")),
+                "fee_krw": optional_float(row.get("fee_krw")),
+                "tax_krw": optional_float(row.get("tax_krw")),
+                "realized_trade_pnl_gross_krw": gross_krw,
+                "realized_trade_pnl_net_krw": net_krw,
+            }
+            missing = [field for field, value in official_values.items() if value is None]
+            if missing:
+                findings.append(f"processed_realized_pnl.csv row {idx} has status ok but blank official KRW fields: {', '.join(missing)}")
+            else:
+                expected_gross = official_values["proceeds_krw"] - official_values["cost_basis_krw"]
+                expected_net = expected_gross - official_values["fee_krw"] - official_values["tax_krw"]
+                if abs(gross_krw - expected_gross) > 0.0001:
+                    findings.append(f"processed_realized_pnl.csv row {idx} gross KRW formula mismatch")
+                if abs(net_krw - expected_net) > 0.0001:
+                    findings.append(f"processed_realized_pnl.csv row {idx} net KRW formula mismatch")
+        elif not is_blank(row.get("realized_trade_pnl_gross_krw", "")) or not is_blank(row.get("realized_trade_pnl_net_krw", "")):
+            findings.append(
+                f"processed_realized_pnl.csv row {idx} has non-ok status but official KRW realized PnL is populated"
+            )
+
+        if status == "lot_missing" and (
+            not is_blank(row.get("realized_trade_pnl_gross_krw", ""))
+            or not is_blank(row.get("realized_trade_pnl_net_krw", ""))
+        ):
+            findings.append(f"processed_realized_pnl.csv row {idx} has lot_missing status but official KRW realized PnL is populated")
+        if fx_status == "fx_missing":
+            if status == "ok":
+                findings.append(f"processed_realized_pnl.csv row {idx} has fx_missing but amount_review_status is ok")
+            if not is_blank(row.get("realized_trade_pnl_gross_krw", "")) or not is_blank(row.get("realized_trade_pnl_net_krw", "")):
+                findings.append(f"processed_realized_pnl.csv row {idx} has fx_missing but official KRW realized PnL is populated")
     return findings
 
 
@@ -664,6 +709,12 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
             f"reconciliation_summary.csv realized_cost_basis_method must be {REALIZED_COST_BASIS_METHOD}: "
             f"{metrics.get('realized_cost_basis_method')}"
         )
+    realized_pnl_basis = str(metrics.get("realized_pnl_basis", "") or "").strip().lower()
+    if realized_pnl_basis != REALIZED_PNL_BASIS:
+        findings.append(
+            f"reconciliation_summary.csv realized_pnl_basis must be {REALIZED_PNL_BASIS}: "
+            f"{metrics.get('realized_pnl_basis')}"
+        )
 
     if str(metrics.get("fx_pnl_status", "")).strip().lower() != "unavailable":
         findings.append("reconciliation_summary.csv fx_pnl_status must remain unavailable")
@@ -687,8 +738,18 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
             findings.append("reconciliation_summary.csv total_assets_krw formula mismatch")
     if principal_status == "available" and principal is None:
         findings.append("reconciliation_summary.csv net_external_principal_status is available but net_external_principal_krw is blank")
-    if realized_status == "available" and optional_float(metrics.get("realized_pnl_krw")) is None:
-        findings.append("reconciliation_summary.csv realized_pnl_status is available but realized_pnl_krw is blank")
+    if realized_status == "available":
+        realized_pnl = optional_float(metrics.get("realized_pnl_krw"))
+        realized_gross = optional_float(metrics.get("realized_trade_pnl_gross_krw"))
+        realized_net = optional_float(metrics.get("realized_trade_pnl_net_krw"))
+        if realized_pnl is None:
+            findings.append("reconciliation_summary.csv realized_pnl_status is available but realized_pnl_krw is blank")
+        if realized_gross is None:
+            findings.append("reconciliation_summary.csv realized_pnl_status is available but realized_trade_pnl_gross_krw is blank")
+        if realized_net is None:
+            findings.append("reconciliation_summary.csv realized_pnl_status is available but realized_trade_pnl_net_krw is blank")
+        if realized_pnl is not None and realized_gross is not None and abs(realized_pnl - realized_gross) > 0.0001:
+            findings.append("reconciliation_summary.csv realized_pnl_krw must equal realized_trade_pnl_gross_krw")
     if total_return_status == "available":
         unresolved_counts = {
             metric: optional_float(metrics.get(metric))
@@ -723,7 +784,7 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
 
     explained_inputs = [
         "unrealized_pnl_krw",
-        "realized_pnl_krw",
+        "realized_trade_pnl_gross_krw",
         "dividend_income_krw",
         "interest_income_krw",
         "distribution_income_krw",
@@ -737,7 +798,7 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
     if explained_status == "available" and all(value is not None for value in explained_values.values()) and explained is not None:
         expected = (
             explained_values["unrealized_pnl_krw"]
-            + explained_values["realized_pnl_krw"]
+            + explained_values["realized_trade_pnl_gross_krw"]
             + explained_values["dividend_income_krw"]
             + explained_values["interest_income_krw"]
             + explained_values["distribution_income_krw"]
@@ -1082,9 +1143,14 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
 
     realized_cost_basis_findings = realized_pnl_cost_basis_findings(realized)
     if realized_cost_basis_findings:
-        write_result(results, "realized PnL FIFO cost-basis contract", "FAIL", "; ".join(realized_cost_basis_findings[:5]))
+        write_result(results, "realized PnL ledger FIFO/gross-net contract", "FAIL", "; ".join(realized_cost_basis_findings[:5]))
     else:
-        write_result(results, "realized PnL FIFO cost-basis contract", "PASS", f"{len(realized)} realized PnL rows use FIFO cost basis or no rows are present.")
+        write_result(
+            results,
+            "realized PnL ledger FIFO/gross-net contract",
+            "PASS",
+            f"{len(realized)} processed_realized_pnl.csv ledger rows use FIFO cost basis and gross/net formula guards or no rows are present.",
+        )
 
     if not source_index:
         if not raw_excel_files(raw_dir):

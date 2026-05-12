@@ -515,8 +515,11 @@ EXPENSE_OUTPUT_COLUMNS = [
 
 REALIZED_PNL_OUTPUT_COLUMNS = [
     "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
-    "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "cost_basis_method",
-    "realized_pnl_krw", "realized_result", "position_status", "amount_review_status",
+    "sell_import_id", "quantity_sold", "proceeds_native", "proceeds_krw", "cost_basis_native",
+    "cost_basis_krw", "fee_native", "fee_krw", "tax_native", "tax_krw",
+    "realized_trade_pnl_gross_native", "realized_trade_pnl_gross_krw",
+    "realized_trade_pnl_net_native", "realized_trade_pnl_net_krw", "realized_result",
+    "position_status", "cost_basis_method", "amount_review_status", "fx_status",
     "amount_review_reason", "source_file",
 ]
 
@@ -1126,9 +1129,15 @@ def test_quality_gate_validates_realized_pnl_fifo_cost_basis_rows():
     valid_row = {
         "ticker": "FIFO",
         "sell_import_id": "sell-1",
+        "proceeds_krw": "2500",
+        "cost_basis_krw": "1000",
+        "fee_krw": "100",
+        "tax_krw": "50",
         "cost_basis_method": "fifo",
-        "realized_pnl_krw": "1500",
+        "realized_trade_pnl_gross_krw": "1500",
+        "realized_trade_pnl_net_krw": "1350",
         "amount_review_status": "ok",
+        "fx_status": "not_required",
     }
     assert realized_pnl_cost_basis_findings([valid_row]) == []
 
@@ -1138,19 +1147,41 @@ def test_quality_gate_validates_realized_pnl_fifo_cost_basis_rows():
     blank_method_findings = realized_pnl_cost_basis_findings([{**valid_row, "cost_basis_method": ""}])
     assert any("cost_basis_method must be fifo" in finding for finding in blank_method_findings)
 
-    ok_without_pnl_findings = realized_pnl_cost_basis_findings([{**valid_row, "realized_pnl_krw": ""}])
-    assert any("status ok but blank realized_pnl_krw" in finding for finding in ok_without_pnl_findings)
+    ok_without_pnl_findings = realized_pnl_cost_basis_findings([{**valid_row, "realized_trade_pnl_gross_krw": ""}])
+    assert any("status ok but blank official KRW fields" in finding for finding in ok_without_pnl_findings)
+
+    gross_formula_findings = realized_pnl_cost_basis_findings([{**valid_row, "realized_trade_pnl_gross_krw": "1499"}])
+    assert any("gross KRW formula mismatch" in finding for finding in gross_formula_findings)
+
+    net_formula_findings = realized_pnl_cost_basis_findings([{**valid_row, "realized_trade_pnl_net_krw": "1490"}])
+    assert any("net KRW formula mismatch" in finding for finding in net_formula_findings)
 
     lot_missing_row = {
         **valid_row,
         "cost_basis_method": "fifo",
-        "realized_pnl_krw": "",
+        "cost_basis_krw": "",
+        "realized_trade_pnl_gross_krw": "",
+        "realized_trade_pnl_net_krw": "",
         "amount_review_status": "lot_missing",
     }
     assert realized_pnl_cost_basis_findings([lot_missing_row]) == []
 
-    populated_lot_missing_findings = realized_pnl_cost_basis_findings([{**lot_missing_row, "realized_pnl_krw": "1500"}])
-    assert any("lot_missing status but realized_pnl_krw is populated" in finding for finding in populated_lot_missing_findings)
+    populated_lot_missing_findings = realized_pnl_cost_basis_findings([{**lot_missing_row, "realized_trade_pnl_gross_krw": "1500"}])
+    assert any("lot_missing status but official KRW realized PnL is populated" in finding for finding in populated_lot_missing_findings)
+
+    fx_missing_row = {
+        **valid_row,
+        "proceeds_krw": "",
+        "cost_basis_krw": "",
+        "realized_trade_pnl_gross_krw": "",
+        "realized_trade_pnl_net_krw": "",
+        "amount_review_status": "fx_missing",
+        "fx_status": "fx_missing",
+    }
+    assert realized_pnl_cost_basis_findings([fx_missing_row]) == []
+
+    fx_missing_populated = realized_pnl_cost_basis_findings([{**fx_missing_row, "realized_trade_pnl_gross_krw": "1500"}])
+    assert any("fx_missing but official KRW realized PnL is populated" in finding for finding in fx_missing_populated)
 
 
 def test_quality_gate_requires_audit_output_schemas(tmp_path: Path):
@@ -1205,9 +1236,12 @@ def valid_reconciliation_summary_rows(**overrides: object) -> list[dict[str, str
         "total_return_status": "available",
         "unrealized_pnl_krw": "15000",
         "realized_pnl_krw": "0",
+        "realized_trade_pnl_gross_krw": "0",
+        "realized_trade_pnl_net_krw": "0",
         "realized_gain_krw": "0",
         "realized_loss_krw": "0",
         "realized_cost_basis_method": "fifo",
+        "realized_pnl_basis": "gross_trade_pnl_krw_fee_tax_separate",
         "realized_pnl_status": "available",
         "realized_pnl_row_count": "0",
         "realized_pnl_unavailable_row_count": "0",
@@ -1255,6 +1289,17 @@ def test_quality_gate_requires_reconciliation_summary_metrics():
     for invalid_method in ["", "average", "avg", "moving_average", "unknown"]:
         findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_cost_basis_method=invalid_method))
         assert any("realized_cost_basis_method must be fifo" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings([
+        row for row in valid_reconciliation_summary_rows() if row["metric"] != "realized_pnl_basis"
+    ])
+    assert any("missing required metrics" in finding and "realized_pnl_basis" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_basis="net_trade_pnl_krw"))
+    assert any("realized_pnl_basis must be gross_trade_pnl_krw_fee_tax_separate" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_krw="10", realized_trade_pnl_gross_krw="0"))
+    assert any("realized_pnl_krw must equal realized_trade_pnl_gross_krw" in finding for finding in findings)
 
     assert reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_status="available")) == []
 
@@ -2597,14 +2642,55 @@ def test_fifo_realized_pnl_ledger_handles_closed_positions_without_recreating_ho
     assert float(metrics["current_cash_krw"]) == 102000
     assert float(metrics["current_holding_assets_krw"]) == 0
     assert float(metrics["realized_pnl_krw"]) == 2000
+    assert float(metrics["realized_trade_pnl_gross_krw"]) == 2000
+    assert float(metrics["realized_trade_pnl_net_krw"]) == 2000
     assert float(metrics["realized_gain_krw"]) == 4000
     assert float(metrics["realized_loss_krw"]) == -2000
     assert metrics["realized_cost_basis_method"] == "fifo"
+    assert metrics["realized_pnl_basis"] == "gross_trade_pnl_krw_fee_tax_separate"
     assert metrics["realized_pnl_status"] == "available"
     assert int(metrics["realized_closed_position_count"]) == 2
     assert float(metrics["total_return_krw"]) == 2000
     assert float(metrics["total_return_pct"]) == 2
     assert float(metrics["explained_profit_krw"]) == 2000
+    assert float(metrics["residual_krw"]) == 0
+
+
+def test_realized_pnl_uses_gross_with_fee_tax_separate_to_prevent_double_count(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[
+            {"ticker": "CASH_KRW", "security_name": "KRW Cash", "account_type": "ISA", "market": "KR", "asset_type": "cash", "currency": "KRW", "currency_native": "KRW", "balance_quantity": 1, "evaluation_amount": 101820, "evaluation_amount_krw": 101820, "source_file_type": "holdings"},
+        ],
+        transaction_rows=[
+            {"import_id": "buy-fee-tax", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "FEE", "security_name": "Fee Tax Test", "trade_date": "2026-01-01", "transaction_type": "buy", "quantity": 1, "trade_amount_krw": 1000, "amount_krw": 1000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "sell-fee-tax", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "FEE", "security_name": "Fee Tax Test", "trade_date": "2026-01-02", "transaction_type": "sell", "quantity": 1, "trade_amount_krw": 3000, "amount_krw": 3000, "fee_native": 120, "fee_krw": 120, "tax_native": 60, "tax_krw": 60, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+        expense_rows=[
+            {"expense_type": "fee", "currency_native": "KRW", "amount_native": 120, "amount_krw": 120, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+            {"expense_type": "tax", "currency_native": "KRW", "amount_native": 60, "amount_krw": 60, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    metrics = reconciliation_metrics(processed)
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    row = realized.iloc[0]
+
+    assert float(row["realized_trade_pnl_gross_krw"]) == 2000
+    assert float(row["realized_trade_pnl_net_krw"]) == 1820
+    assert float(metrics["realized_pnl_krw"]) == 2000
+    assert float(metrics["realized_trade_pnl_gross_krw"]) == 2000
+    assert float(metrics["realized_trade_pnl_net_krw"]) == 1820
+    assert metrics["realized_pnl_basis"] == "gross_trade_pnl_krw_fee_tax_separate"
+    assert float(metrics["fee_expense_krw"]) == 120
+    assert float(metrics["tax_expense_krw"]) == 60
+    assert float(metrics["total_return_krw"]) == 1820
+    assert float(metrics["explained_profit_krw"]) == 1820
     assert float(metrics["residual_krw"]) == 0
 
 
@@ -2634,9 +2720,11 @@ def test_fifo_realized_pnl_consumes_oldest_lot_before_later_lot(tmp_path: Path):
 
     assert set(realized["cost_basis_method"]) == {"fifo"}
     assert float(realized_by_sell.loc["sell-first", "cost_basis_krw"]) == 1000
-    assert float(realized_by_sell.loc["sell-first", "realized_pnl_krw"]) == 1500
+    assert float(realized_by_sell.loc["sell-first", "realized_trade_pnl_gross_krw"]) == 1500
+    assert float(realized_by_sell.loc["sell-first", "realized_trade_pnl_net_krw"]) == 1500
     assert float(realized_by_sell.loc["sell-second", "cost_basis_krw"]) == 3000
-    assert float(realized_by_sell.loc["sell-second", "realized_pnl_krw"]) == -1000
+    assert float(realized_by_sell.loc["sell-second", "realized_trade_pnl_gross_krw"]) == -1000
+    assert float(realized_by_sell.loc["sell-second", "realized_trade_pnl_net_krw"]) == -1000
     assert set(realized["position_status"]) == {"closed"}
     assert set(holdings["ticker"]) == {"CASH_KRW"}
     assert metrics["realized_cost_basis_method"] == "fifo"
@@ -2671,7 +2759,8 @@ def test_fifo_realized_pnl_lot_missing_stays_review_status_without_blocking_pipe
     assert row["cost_basis_method"] == "fifo"
     assert row["amount_review_status"] == "lot_missing"
     assert "sell quantity exceeds matched buy lots" in row["amount_review_reason"]
-    assert is_blank_or_na(row["realized_pnl_krw"])
+    assert is_blank_or_na(row["realized_trade_pnl_gross_krw"])
+    assert is_blank_or_na(row["realized_trade_pnl_net_krw"])
     assert set(holdings["ticker"]) == {"CASH_KRW"}
     assert metrics["realized_cost_basis_method"] == "fifo"
     assert metrics["realized_pnl_status"] == "lot_missing"
@@ -2699,6 +2788,7 @@ def test_realized_pnl_fx_missing_blocks_official_profit_decomposition(tmp_path: 
     generate_reports(tmp_path, processed_dir=processed)
     metrics = reconciliation_metrics(processed)
     realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    row = realized.iloc[0]
 
     assert metrics["realized_pnl_krw"] == ""
     assert metrics["realized_pnl_status"] == "fx_missing"
@@ -2706,6 +2796,13 @@ def test_realized_pnl_fx_missing_blocks_official_profit_decomposition(tmp_path: 
     assert metrics["explained_profit_status"] == "fx_missing"
     assert metrics["residual_status"] == "unavailable"
     assert set(realized["amount_review_status"]) == {"fx_missing"}
+    assert set(realized["fx_status"]) == {"fx_missing"}
+    assert float(row["proceeds_native"]) == 120
+    assert float(row["cost_basis_native"]) == 100
+    assert float(row["realized_trade_pnl_gross_native"]) == 20
+    assert float(row["realized_trade_pnl_net_native"]) == 20
+    assert is_blank_or_na(row["realized_trade_pnl_gross_krw"])
+    assert is_blank_or_na(row["realized_trade_pnl_net_krw"])
 
 
 def test_reconciliation_exchange_rows_do_not_change_principal(tmp_path: Path):
