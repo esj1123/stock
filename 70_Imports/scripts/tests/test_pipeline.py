@@ -514,8 +514,9 @@ EXPENSE_OUTPUT_COLUMNS = [
 
 REALIZED_PNL_OUTPUT_COLUMNS = [
     "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
-    "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "realized_pnl_krw",
-    "realized_result", "position_status", "amount_review_status", "amount_review_reason", "source_file",
+    "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "cost_basis_method",
+    "realized_pnl_krw", "realized_result", "position_status", "amount_review_status",
+    "amount_review_reason", "source_file",
 ]
 
 
@@ -2518,7 +2519,7 @@ def test_reconciliation_income_breakdown_does_not_change_net_principal(tmp_path:
     assert float(metrics["explained_profit_krw"]) == 5900
 
 
-def test_realized_pnl_ledger_handles_closed_positions_without_recreating_holdings(tmp_path: Path):
+def test_fifo_realized_pnl_ledger_handles_closed_positions_without_recreating_holdings(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     write_reconciliation_baseline(
         processed,
@@ -2544,6 +2545,7 @@ def test_realized_pnl_ledger_handles_closed_positions_without_recreating_holding
 
     assert_columns_present(realized, REALIZED_PNL_OUTPUT_COLUMNS)
     assert set(realized["ticker"]) == {"TSLA", "RGTZ"}
+    assert set(realized["cost_basis_method"]) == {"fifo"}
     assert set(realized["position_status"]) == {"closed"}
     assert set(holdings["ticker"]) == {"CASH_KRW"}
     assert float(metrics["current_cash_krw"]) == 102000
@@ -2551,12 +2553,85 @@ def test_realized_pnl_ledger_handles_closed_positions_without_recreating_holding
     assert float(metrics["realized_pnl_krw"]) == 2000
     assert float(metrics["realized_gain_krw"]) == 4000
     assert float(metrics["realized_loss_krw"]) == -2000
+    assert metrics["realized_cost_basis_method"] == "fifo"
     assert metrics["realized_pnl_status"] == "available"
     assert int(metrics["realized_closed_position_count"]) == 2
     assert float(metrics["total_return_krw"]) == 2000
     assert float(metrics["total_return_pct"]) == 2
     assert float(metrics["explained_profit_krw"]) == 2000
     assert float(metrics["residual_krw"]) == 0
+
+
+def test_fifo_realized_pnl_consumes_oldest_lot_before_later_lot(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[
+            {"ticker": "CASH_KRW", "security_name": "KRW Cash", "account_type": "ISA", "market": "KR", "asset_type": "cash", "currency": "KRW", "currency_native": "KRW", "balance_quantity": 1, "evaluation_amount": 100500, "evaluation_amount_krw": 100500, "source_file_type": "holdings"},
+        ],
+        transaction_rows=[
+            {"import_id": "buy-oldest", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "FIFO", "security_name": "FIFO Test", "trade_date": "2026-01-01", "transaction_type": "buy", "quantity": 1, "trade_amount_krw": 1000, "amount_krw": 1000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "buy-later", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "FIFO", "security_name": "FIFO Test", "trade_date": "2026-01-02", "transaction_type": "buy", "quantity": 1, "trade_amount_krw": 3000, "amount_krw": 3000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "sell-first", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "FIFO", "security_name": "FIFO Test", "trade_date": "2026-01-03", "transaction_type": "sell", "quantity": 1, "trade_amount_krw": 2500, "amount_krw": 2500, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "sell-second", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "FIFO", "security_name": "FIFO Test", "trade_date": "2026-01-04", "transaction_type": "sell", "quantity": 1, "trade_amount_krw": 2000, "amount_krw": 2000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    metrics = reconciliation_metrics(processed)
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    realized_by_sell = realized.set_index("sell_import_id")
+    holdings = read_processed_csv(processed, "processed_holdings.csv")
+
+    assert set(realized["cost_basis_method"]) == {"fifo"}
+    assert float(realized_by_sell.loc["sell-first", "cost_basis_krw"]) == 1000
+    assert float(realized_by_sell.loc["sell-first", "realized_pnl_krw"]) == 1500
+    assert float(realized_by_sell.loc["sell-second", "cost_basis_krw"]) == 3000
+    assert float(realized_by_sell.loc["sell-second", "realized_pnl_krw"]) == -1000
+    assert set(realized["position_status"]) == {"closed"}
+    assert set(holdings["ticker"]) == {"CASH_KRW"}
+    assert metrics["realized_cost_basis_method"] == "fifo"
+    assert float(metrics["realized_pnl_krw"]) == 500
+    assert float(metrics["total_return_krw"]) == 500
+    assert float(metrics["residual_krw"]) == 0
+
+
+def test_fifo_realized_pnl_lot_missing_stays_review_status_without_blocking_pipeline(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[
+            {"ticker": "CASH_KRW", "security_name": "KRW Cash", "account_type": "ISA", "market": "KR", "asset_type": "cash", "currency": "KRW", "currency_native": "KRW", "balance_quantity": 1, "evaluation_amount": 100000, "evaluation_amount_krw": 100000, "source_file_type": "holdings"},
+        ],
+        transaction_rows=[
+            {"import_id": "buy-partial", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "MISS", "security_name": "Missing Lot Test", "trade_date": "2026-01-01", "transaction_type": "buy", "quantity": 1, "trade_amount_krw": 1000, "amount_krw": 1000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "sell-missing", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "MISS", "security_name": "Missing Lot Test", "trade_date": "2026-01-02", "transaction_type": "sell", "quantity": 2, "trade_amount_krw": 2500, "amount_krw": 2500, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    metrics = reconciliation_metrics(processed)
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    holdings = read_processed_csv(processed, "processed_holdings.csv")
+    row = realized.iloc[0]
+
+    assert len(realized) == 1
+    assert row["cost_basis_method"] == "fifo"
+    assert row["amount_review_status"] == "lot_missing"
+    assert "sell quantity exceeds matched buy lots" in row["amount_review_reason"]
+    assert is_blank_or_na(row["realized_pnl_krw"])
+    assert set(holdings["ticker"]) == {"CASH_KRW"}
+    assert metrics["realized_cost_basis_method"] == "fifo"
+    assert metrics["realized_pnl_status"] == "lot_missing"
+    assert int(metrics["realized_pnl_unavailable_row_count"]) == 1
+    assert metrics["explained_profit_status"] == "lot_missing"
+    assert metrics["residual_status"] == "unavailable"
 
 
 def test_realized_pnl_fx_missing_blocks_official_profit_decomposition(tmp_path: Path):

@@ -17,7 +17,8 @@ This baseline separates current holdings from performance accounting.
 
 ## Profit Decomposition
 
-- Realized PnL is calculated in a separate ledger from imported buy/sell transaction history.
+- Realized PnL is calculated in a separate FIFO cost-basis ledger from imported buy/sell transaction history.
+- If imported transaction history starts mid-position and FIFO buy lots are insufficient, the sell row is kept in the ledger with `lot_missing` review status instead of stopping the pipeline.
 - Closed symbols such as sold TSLA/TSLL/RGTZ-like positions stay out of current holdings and appear only in the realized PnL ledger.
 - Unrealized PnL is current-holding valuation PnL only.
 - Dividends, interest, and distributions are income events.

@@ -19,6 +19,7 @@ RISK_COLUMNS = ["ticker", "security_name", "account_type", "risk_flags", "pnl_pc
 REVIEW_COLUMNS = ["ticker", "security_name", "reason", "severity", "suggested_action"]
 SUMMARY_COLUMNS = ["metric", "value"]
 RECONCILIATION_SUMMARY_COLUMNS = ["metric", "value"]
+REALIZED_COST_BASIS_METHOD = "fifo"
 REALIZED_PNL_COLUMNS = [
     "account_type",
     "market",
@@ -30,6 +31,7 @@ REALIZED_PNL_COLUMNS = [
     "quantity_sold",
     "proceeds_krw",
     "cost_basis_krw",
+    "cost_basis_method",
     "realized_pnl_krw",
     "realized_result",
     "position_status",
@@ -562,6 +564,7 @@ def transaction_history_source_available(processed_dir: Path, transactions: pd.D
 
 
 def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFrame:
+    """Build realized PnL with FIFO lot matching from imported buy/sell rows."""
     trades = sorted_trade_rows(transactions)
     if trades.empty:
         return pd.DataFrame(columns=REALIZED_PNL_COLUMNS)
@@ -599,6 +602,7 @@ def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> p
                     reasons.append(amount_reason)
 
             lot_index = 0
+            # Consume buy lots in insertion order; this is the realized PnL cost-basis contract.
             while remaining > 1e-9 and lot_index < len(lots):
                 lot = lots[lot_index]
                 lot_qty = float(lot.get("remaining_qty") or 0.0)
@@ -635,6 +639,7 @@ def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> p
                 "quantity_sold": quantity if quantity is not None else "",
                 "proceeds_krw": proceeds if status == "ok" else "",
                 "cost_basis_krw": matched_cost if status == "ok" else "",
+                "cost_basis_method": REALIZED_COST_BASIS_METHOD,
                 "realized_pnl_krw": realized if realized is not None else "",
                 "realized_result": "gain" if realized is not None and realized >= 0 else ("loss" if realized is not None else ""),
                 "position_status": "",
@@ -668,6 +673,7 @@ def realized_pnl_summary(
                 "realized_pnl_krw": 0.0,
                 "realized_gain_krw": 0.0,
                 "realized_loss_krw": 0.0,
+                "realized_cost_basis_method": REALIZED_COST_BASIS_METHOD,
                 "realized_pnl_status": "available",
                 "realized_pnl_row_count": 0,
                 "realized_pnl_unavailable_row_count": 0,
@@ -677,6 +683,7 @@ def realized_pnl_summary(
             "realized_pnl_krw": None,
             "realized_gain_krw": None,
             "realized_loss_krw": None,
+            "realized_cost_basis_method": REALIZED_COST_BASIS_METHOD,
             "realized_pnl_status": "transaction_history_missing",
             "realized_pnl_row_count": 0,
             "realized_pnl_unavailable_row_count": 0,
@@ -691,6 +698,7 @@ def realized_pnl_summary(
             "realized_pnl_krw": None,
             "realized_gain_krw": None,
             "realized_loss_krw": None,
+            "realized_cost_basis_method": REALIZED_COST_BASIS_METHOD,
             "realized_pnl_status": status_from_list(blocking, default="unavailable"),
             "realized_pnl_row_count": len(ledger),
             "realized_pnl_unavailable_row_count": int(unavailable.sum()),
@@ -702,6 +710,7 @@ def realized_pnl_summary(
         "realized_pnl_krw": float(pnl.sum()),
         "realized_gain_krw": float(pnl[pnl > 0].sum()),
         "realized_loss_krw": float(pnl[pnl < 0].sum()),
+        "realized_cost_basis_method": REALIZED_COST_BASIS_METHOD,
         "realized_pnl_status": "available",
         "realized_pnl_row_count": len(ledger),
         "realized_pnl_unavailable_row_count": 0,
@@ -868,6 +877,7 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame, re
         "realized_pnl_krw": realized_metrics["realized_pnl_krw"],
         "realized_gain_krw": realized_metrics["realized_gain_krw"],
         "realized_loss_krw": realized_metrics["realized_loss_krw"],
+        "realized_cost_basis_method": realized_metrics["realized_cost_basis_method"],
         "realized_pnl_status": realized_metrics["realized_pnl_status"],
         "realized_pnl_row_count": realized_metrics["realized_pnl_row_count"],
         "realized_pnl_unavailable_row_count": realized_metrics["realized_pnl_unavailable_row_count"],
