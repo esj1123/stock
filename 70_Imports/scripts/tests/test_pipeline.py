@@ -512,6 +512,12 @@ EXPENSE_OUTPUT_COLUMNS = [
     "raw_memo",
 ]
 
+REALIZED_PNL_OUTPUT_COLUMNS = [
+    "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
+    "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "realized_pnl_krw",
+    "realized_result", "position_status", "amount_review_status", "amount_review_reason", "source_file",
+]
+
 
 def test_quantity_is_not_money_amount(tmp_path: Path):
     normalized = normalize_synthetic_transaction(tmp_path, synthetic_transaction_row())
@@ -1151,21 +1157,31 @@ def valid_reconciliation_summary_rows(**overrides: object) -> list[dict[str, str
     values: dict[str, object] = {
         "total_assets_krw": "120000",
         "total_assets_status": "available",
+        "current_cash_krw": "5000",
+        "current_holding_assets_krw": "115000",
         "external_deposit_krw": "100000",
         "external_withdrawal_krw": "0",
         "net_external_principal_krw": "100000",
         "net_external_principal_status": "available",
         "total_return_krw": "20000",
+        "total_return_pct": "20",
         "total_return_status": "available",
         "unrealized_pnl_krw": "15000",
+        "realized_pnl_krw": "0",
+        "realized_gain_krw": "0",
+        "realized_loss_krw": "0",
+        "realized_pnl_status": "available",
+        "realized_pnl_row_count": "0",
+        "realized_pnl_unavailable_row_count": "0",
+        "realized_closed_position_count": "0",
         "dividend_income_krw": "3000",
         "interest_income_krw": "500",
         "distribution_income_krw": "2000",
         "fee_expense_krw": "300",
         "tax_expense_krw": "200",
-        "realized_pnl_status": "unavailable",
         "fx_pnl_status": "unavailable",
         "explained_profit_krw": "20000",
+        "explained_profit_status": "available",
         "residual_krw": "0",
         "residual_status": "available",
         "fx_missing_row_count": "0",
@@ -1193,8 +1209,10 @@ def test_quality_gate_requires_reconciliation_summary_metrics():
     ])
     assert any("missing required metrics" in finding and "distribution_income_krw" in finding for finding in findings)
 
-    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_status="available"))
-    assert any("realized_pnl_status must remain unavailable" in finding for finding in findings)
+    assert reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_status="available")) == []
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_status="fx_missing", explained_profit_status="available"))
+    assert any("explained_profit_status is available but realized_pnl_status is not available" in finding for finding in findings)
 
     findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(fx_pnl_status="available"))
     assert any("fx_pnl_status must remain unavailable" in finding for finding in findings)
@@ -2362,18 +2380,22 @@ def test_holdings_file_makes_portfolio_summary_available(tmp_path: Path):
 def write_reconciliation_baseline(
     processed: Path,
     holdings_rows: list[dict[str, object]],
+    transaction_rows: list[dict[str, object]] | None = None,
     cashflow_rows: list[dict[str, object]] | None = None,
     income_rows: list[dict[str, object]] | None = None,
     expense_rows: list[dict[str, object]] | None = None,
     fx_rows: list[dict[str, object]] | None = None,
 ) -> None:
     processed.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame([
+    source_rows = [
         {"source_file": "source_balance.csv", "source_file_type": "holdings", "account_type": "ISA"},
         {"source_file": "source_cashflow.csv", "source_file_type": "cashflow", "account_type": "ISA"},
-    ]).to_csv(processed / "source_file_index.csv", index=False)
+    ]
+    if transaction_rows is not None:
+        source_rows.append({"source_file": "source_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA"})
+    pd.DataFrame(source_rows).to_csv(processed / "source_file_index.csv", index=False)
     pd.DataFrame(holdings_rows).to_csv(processed / "processed_holdings.csv", index=False)
-    pd.DataFrame(columns=["ticker"]).to_csv(processed / "processed_transactions.csv", index=False)
+    pd.DataFrame(transaction_rows or [], columns=None).to_csv(processed / "processed_transactions.csv", index=False)
     pd.DataFrame(cashflow_rows or []).to_csv(processed / "processed_cashflows.csv", index=False)
     pd.DataFrame(income_rows or [], columns=INCOME_OUTPUT_COLUMNS).to_csv(processed / "processed_income.csv", index=False)
     pd.DataFrame(expense_rows or [], columns=EXPENSE_OUTPUT_COLUMNS).to_csv(processed / "processed_expenses.csv", index=False)
@@ -2494,6 +2516,75 @@ def test_reconciliation_income_breakdown_does_not_change_net_principal(tmp_path:
     assert float(metrics["fee_expense_krw"]) == 100
     assert float(metrics["tax_expense_krw"]) == 200
     assert float(metrics["explained_profit_krw"]) == 5900
+
+
+def test_realized_pnl_ledger_handles_closed_positions_without_recreating_holdings(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[
+            {"ticker": "CASH_KRW", "security_name": "KRW Cash", "account_type": "ISA", "market": "KR", "asset_type": "cash", "currency": "KRW", "currency_native": "KRW", "balance_quantity": 1, "evaluation_amount": 102000, "evaluation_amount_krw": 102000, "source_file_type": "holdings"},
+        ],
+        transaction_rows=[
+            {"import_id": "buy-tsla-1", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "US", "asset_type": "stock", "ticker": "TSLA", "security_name": "Tesla", "trade_date": "2026-01-01", "transaction_type": "buy", "quantity": 5, "trade_amount_krw": 4000, "amount_krw": 4000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "buy-tsla-2", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "US", "asset_type": "stock", "ticker": "TSLA", "security_name": "Tesla", "trade_date": "2026-01-02", "transaction_type": "buy", "quantity": 5, "trade_amount_krw": 5000, "amount_krw": 5000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "sell-tsla", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "US", "asset_type": "stock", "ticker": "TSLA", "security_name": "Tesla", "trade_date": "2026-01-03", "transaction_type": "sell", "quantity": 10, "trade_amount_krw": 13000, "amount_krw": 13000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "buy-rgtz", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "RGTZ", "security_name": "RGTZ", "trade_date": "2026-01-04", "transaction_type": "buy", "quantity": 5, "trade_amount_krw": 10000, "amount_krw": 10000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+            {"import_id": "sell-rgtz", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "KR", "asset_type": "stock", "ticker": "RGTZ", "security_name": "RGTZ", "trade_date": "2026-01-05", "transaction_type": "sell", "quantity": 5, "trade_amount_krw": 8000, "amount_krw": 8000, "currency_native": "KRW", "amount_review_status": "ok", "cashflow_role": "trade_settlement"},
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    metrics = reconciliation_metrics(processed)
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    holdings = read_processed_csv(processed, "processed_holdings.csv")
+
+    assert_columns_present(realized, REALIZED_PNL_OUTPUT_COLUMNS)
+    assert set(realized["ticker"]) == {"TSLA", "RGTZ"}
+    assert set(realized["position_status"]) == {"closed"}
+    assert set(holdings["ticker"]) == {"CASH_KRW"}
+    assert float(metrics["current_cash_krw"]) == 102000
+    assert float(metrics["current_holding_assets_krw"]) == 0
+    assert float(metrics["realized_pnl_krw"]) == 2000
+    assert float(metrics["realized_gain_krw"]) == 4000
+    assert float(metrics["realized_loss_krw"]) == -2000
+    assert metrics["realized_pnl_status"] == "available"
+    assert int(metrics["realized_closed_position_count"]) == 2
+    assert float(metrics["total_return_krw"]) == 2000
+    assert float(metrics["total_return_pct"]) == 2
+    assert float(metrics["explained_profit_krw"]) == 2000
+    assert float(metrics["residual_krw"]) == 0
+
+
+def test_realized_pnl_fx_missing_blocks_official_profit_decomposition(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[
+            {"ticker": "CASH_KRW", "security_name": "KRW Cash", "account_type": "ISA", "market": "KR", "asset_type": "cash", "currency": "KRW", "currency_native": "KRW", "balance_quantity": 1, "evaluation_amount": 100000, "evaluation_amount_krw": 100000, "source_file_type": "holdings"},
+        ],
+        transaction_rows=[
+            {"import_id": "buy-tsll", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "US", "asset_type": "stock", "ticker": "TSLL", "security_name": "TSLL", "trade_date": "2026-01-01", "transaction_type": "buy", "quantity": 1, "trade_amount": 100, "currency_native": "USD", "amount_review_status": "fx_missing", "cashflow_role": "trade_settlement"},
+            {"import_id": "sell-tsll", "source_file": "synthetic_transactions.csv", "source_file_type": "transaction_history", "account_type": "ISA", "market": "US", "asset_type": "stock", "ticker": "TSLL", "security_name": "TSLL", "trade_date": "2026-01-02", "transaction_type": "sell", "quantity": 1, "trade_amount": 120, "currency_native": "USD", "amount_review_status": "fx_missing", "cashflow_role": "trade_settlement"},
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    metrics = reconciliation_metrics(processed)
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+
+    assert metrics["realized_pnl_krw"] == ""
+    assert metrics["realized_pnl_status"] == "fx_missing"
+    assert int(metrics["realized_pnl_unavailable_row_count"]) == 1
+    assert metrics["explained_profit_status"] == "fx_missing"
+    assert metrics["residual_status"] == "unavailable"
+    assert set(realized["amount_review_status"]) == {"fx_missing"}
 
 
 def test_reconciliation_exchange_rows_do_not_change_principal(tmp_path: Path):
@@ -2775,11 +2866,13 @@ def write_stage8_output_inputs(
     income_rows: list[dict[str, object]] | None = None,
     expense_rows: list[dict[str, object]] | None = None,
     fx_rows: list[dict[str, object]] | None = None,
+    realized_rows: list[dict[str, object]] | None = None,
 ) -> None:
     processed.mkdir(parents=True, exist_ok=True)
     pd.DataFrame(income_rows or [], columns=INCOME_OUTPUT_COLUMNS).to_csv(processed / "processed_income.csv", index=False)
     pd.DataFrame(expense_rows or [], columns=EXPENSE_OUTPUT_COLUMNS).to_csv(processed / "processed_expenses.csv", index=False)
     pd.DataFrame(fx_rows or [], columns=FX_EVENT_COLUMNS).to_csv(processed / "processed_fx_events.csv", index=False)
+    pd.DataFrame(realized_rows or [], columns=REALIZED_PNL_OUTPUT_COLUMNS).to_csv(processed / "processed_realized_pnl.csv", index=False)
 
 
 def test_cashflow_dashboard_detail_displays_amount_krw_fallback(tmp_path: Path):
@@ -3069,13 +3162,16 @@ def test_reconciliation_dashboard_surfaces_unit_aware_summary(tmp_path: Path):
 
     content = dashboard_content("Reconciliation.md", processed)
 
-    assert "## Reconciliation Summary" in content
+    assert "## Total Performance" in content
     assert "total_assets_krw" in content
     assert "net_external_principal_krw" in content
     assert "total_return_krw" in content
-    assert "## Income and Expense Breakdown" in content
+    assert "total_return_pct" in content
+    assert "## Profit Breakdown" in content
     assert "distribution_income_krw" in content
+    assert "realized_pnl_krw" in content
     assert "## Residual" in content
+    assert "## Realized PnL Ledger" in content
     assert "## Unresolved Status Counts" in content
     assert "| fx_missing_row_count | 1 |" in content
     assert "| unit_ambiguous_row_count | 2 |" in content
@@ -3473,6 +3569,24 @@ def test_qa_reconciliation_residual_threshold_creates_advisory(tmp_path: Path):
 
     qa = qa_for_processed(tmp_path)
     severities = set(qa.loc[qa["exception_id"].eq("REC-EX-07"), "severity"])
+
+    assert severities == {"advisory"}
+
+
+def test_qa_reconciliation_realized_unavailable_is_advisory(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, reconciliation_rows=valid_reconciliation_summary_rows(
+        realized_pnl_krw="",
+        realized_gain_krw="",
+        realized_loss_krw="",
+        realized_pnl_status="transaction_history_missing",
+        explained_profit_status="transaction_history_missing",
+        residual_krw="",
+        residual_status="unavailable",
+    ))
+
+    qa = qa_for_processed(tmp_path)
+    severities = set(qa.loc[qa["exception_id"].eq("REC-EX-10"), "severity"])
 
     assert severities == {"advisory"}
 

@@ -339,6 +339,8 @@ def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: st
         snapshot_card("Total Value", metric(summary, "total_portfolio_value", "-")),
         snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-"), "preliminary"),
         snapshot_card("Return", metric(summary, "pnl_pct", "-"), "preliminary pnl_pct"),
+        snapshot_card("Total Return", metric(reconciliation, "total_return_krw", "-"), "assets - net principal"),
+        snapshot_card("Total Return %", metric(reconciliation, "total_return_pct", "-"), "total return / net principal"),
         snapshot_card("Profit Status", profit_status),
         snapshot_card("Recon Status", reconciliation_status),
         snapshot_card("Unit-aware Value Status", unit_value_status),
@@ -941,6 +943,31 @@ def reconciliation_metric_table(reconciliation: pd.DataFrame, metrics: list[str]
     return markdown_table(pd.DataFrame(records))
 
 
+def realized_pnl_table(realized: pd.DataFrame, limit: int = 50) -> str:
+    if realized.empty:
+        return EMPTY_DATA
+    view = realized.copy()
+    if "sell_date" in view.columns:
+        view = view.sort_values("sell_date", ascending=False)
+    return markdown_table(
+        view,
+        [
+            "sell_date",
+            "ticker",
+            "security_name",
+            "account_type",
+            "quantity_sold",
+            "proceeds_krw",
+            "cost_basis_krw",
+            "realized_pnl_krw",
+            "realized_result",
+            "position_status",
+            "amount_review_status",
+        ],
+        limit,
+    )
+
+
 def reconciliation_status_warning(reconciliation: pd.DataFrame) -> str:
     total_assets_status = metric(reconciliation, "total_assets_status", "unknown")
     principal_status = metric(reconciliation, "net_external_principal_status", "unknown")
@@ -956,42 +983,59 @@ def reconciliation_status_warning(reconciliation: pd.DataFrame) -> str:
     )
 
 
-def reconciliation_content(reconciliation: pd.DataFrame, summary: pd.DataFrame | None = None) -> str:
+def reconciliation_content(
+    reconciliation: pd.DataFrame,
+    summary: pd.DataFrame | None = None,
+    realized: pd.DataFrame | None = None,
+) -> str:
     summary = summary if summary is not None else pd.DataFrame()
+    realized = realized if realized is not None else pd.DataFrame()
     parts = []
     warning = reconciliation_status_warning(reconciliation)
     if warning:
         parts.append(warning)
     parts.extend([
-        "## Reconciliation Summary",
+        "## Total Performance",
         reconciliation_metric_table(reconciliation, [
             "total_assets_krw",
             "total_assets_status",
+            "current_cash_krw",
+            "current_holding_assets_krw",
             "net_external_principal_krw",
             "net_external_principal_status",
             "total_return_krw",
+            "total_return_pct",
             "total_return_status",
         ]),
-        "## Income and Expense Breakdown",
+        "## Profit Breakdown",
         reconciliation_metric_table(reconciliation, [
             "unrealized_pnl_krw",
+            "realized_pnl_krw",
+            "realized_gain_krw",
+            "realized_loss_krw",
+            "realized_pnl_status",
             "dividend_income_krw",
             "interest_income_krw",
             "distribution_income_krw",
             "fee_expense_krw",
             "tax_expense_krw",
-            "realized_pnl_status",
             "fx_pnl_status",
             "explained_profit_krw",
+            "explained_profit_status",
         ]),
         "## Residual",
         reconciliation_metric_table(reconciliation, ["residual_krw", "residual_status"]),
+        "## Realized PnL Ledger",
+        realized_pnl_table(realized),
         "## Unresolved Status Counts",
         reconciliation_metric_table(reconciliation, [
             "fx_missing_row_count",
             "currency_ambiguous_row_count",
             "unit_ambiguous_row_count",
             "amount_review_needed_row_count",
+            "realized_pnl_row_count",
+            "realized_pnl_unavailable_row_count",
+            "realized_closed_position_count",
         ]),
         "## FX Event Counts",
         reconciliation_metric_table(reconciliation, [
@@ -1123,6 +1167,11 @@ REQUIRED_OUTPUT_COLUMNS = {
         "leg", "from_currency", "to_currency", "currency_native", "amount_native", "amount_krw",
         "fx_rate_to_krw", "fx_rate_source", "fx_pair_status", "cashflow_role", "affects_principal",
         "affects_profit", "is_internal_transfer", "amount_review_status", "amount_review_reason", "raw_memo",
+    ],
+    "processed_realized_pnl.csv": [
+        "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
+        "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "realized_pnl_krw",
+        "realized_result", "position_status", "amount_review_status", "amount_review_reason", "source_file",
     ],
 }
 
@@ -1408,6 +1457,7 @@ def bootstrap_autogenerated_block(path: Path, heading: str = "Auto-generated upd
 def dashboard_content(name: str, processed_dir: Path) -> str:
     summary = read_csv(processed_dir / "portfolio_summary.csv")
     reconciliation = read_csv(processed_dir / "reconciliation_summary.csv")
+    realized = read_csv(processed_dir / "processed_realized_pnl.csv")
     holdings = read_csv(processed_dir / "processed_holdings.csv")
     risk = read_csv(processed_dir / "risk_watchlist.csv")
     review = read_csv(processed_dir / "review_queue.csv")
@@ -1428,7 +1478,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Portfolio.md":
         return portfolio_content(summary, holdings, warning, reconciliation)
     if name == "Reconciliation.md":
-        return reconciliation_content(reconciliation, summary)
+        return reconciliation_content(reconciliation, summary, realized)
     if name == "Companies.md":
         return companies_content(holdings)
     if name == "Exposure.md":

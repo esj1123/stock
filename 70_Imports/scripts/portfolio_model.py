@@ -19,8 +19,26 @@ RISK_COLUMNS = ["ticker", "security_name", "account_type", "risk_flags", "pnl_pc
 REVIEW_COLUMNS = ["ticker", "security_name", "reason", "severity", "suggested_action"]
 SUMMARY_COLUMNS = ["metric", "value"]
 RECONCILIATION_SUMMARY_COLUMNS = ["metric", "value"]
+REALIZED_PNL_COLUMNS = [
+    "account_type",
+    "market",
+    "ticker",
+    "security_name",
+    "currency_native",
+    "sell_date",
+    "sell_import_id",
+    "quantity_sold",
+    "proceeds_krw",
+    "cost_basis_krw",
+    "realized_pnl_krw",
+    "realized_result",
+    "position_status",
+    "amount_review_status",
+    "amount_review_reason",
+    "source_file",
+]
 BALANCE_SOURCE_TYPES = {"holdings", "overseas_balance"}
-REVIEW_NEEDED_STATUSES = {"fx_missing", "partial", "needs_review", "currency_ambiguous", "unit_ambiguous", "unclassified"}
+REVIEW_NEEDED_STATUSES = {"fx_missing", "partial", "needs_review", "currency_ambiguous", "unit_ambiguous", "unclassified", "lot_missing"}
 CURRENCY_NORMALIZATION_STATUS = "pending"
 AMOUNT_UNIT_CLASSIFICATION_STATUS = "pending"
 PROFIT_RESULT_STATUS = "preliminary"
@@ -300,7 +318,15 @@ def status_from_list(statuses: list[str], default: str = "available") -> str:
     cleaned = [status for status in statuses if status and status != "available"]
     if not cleaned:
         return default
-    for status in ["currency_ambiguous", "unit_ambiguous", "fx_missing", "balance_missing", "currency_normalization_pending"]:
+    for status in [
+        "currency_ambiguous",
+        "unit_ambiguous",
+        "fx_missing",
+        "lot_missing",
+        "transaction_history_missing",
+        "balance_missing",
+        "currency_normalization_pending",
+    ]:
         if status in cleaned:
             return status
     return cleaned[0]
@@ -359,17 +385,28 @@ def holding_asset_krw(row: pd.Series) -> tuple[float | None, str]:
 
 
 def total_assets_krw(holdings: pd.DataFrame) -> tuple[float | None, str, dict[str, int]]:
+    total, _cash, _invested, status, status_counts = total_assets_breakdown_krw(holdings)
+    return total, status, status_counts
+
+
+def total_assets_breakdown_krw(holdings: pd.DataFrame) -> tuple[float | None, float | None, float | None, str, dict[str, int]]:
     status_counts = {"fx_missing": 0, "currency_ambiguous": 0, "unit_ambiguous": 0, "amount_review_needed": 0}
     if holdings.empty:
-        return None, "balance_missing", status_counts
+        return None, None, None, "balance_missing", status_counts
 
     total = 0.0
+    cash_total = 0.0
+    invested_total = 0.0
     available_rows = 0
     blocking_statuses: list[str] = []
     for _, row in holdings.iterrows():
         amount, status = holding_asset_krw(row)
         if status == "available" and amount is not None:
             total += amount
+            if text_value(row.get("asset_type")).lower() == "cash":
+                cash_total += amount
+            else:
+                invested_total += amount
             available_rows += 1
             continue
         blocking_statuses.append(status)
@@ -381,10 +418,10 @@ def total_assets_krw(holdings: pd.DataFrame) -> tuple[float | None, str, dict[st
                 status_counts["amount_review_needed"] += 1
 
     if blocking_statuses:
-        return None, status_from_list(blocking_statuses), status_counts
+        return None, None, None, status_from_list(blocking_statuses), status_counts
     if available_rows == 0:
-        return None, "balance_missing", status_counts
-    return total, "available", status_counts
+        return None, None, None, "balance_missing", status_counts
+    return total, cash_total, invested_total, "available", status_counts
 
 
 def principal_direction(row: pd.Series) -> str:
@@ -453,6 +490,223 @@ def ok_amount_sum(df: pd.DataFrame, type_col: str, accepted_types: set[str]) -> 
         if amount is not None:
             total += abs(amount)
     return total
+
+
+def trade_identity(row: pd.Series) -> tuple[str, str, str]:
+    ticker = text_value(row.get("ticker")).upper()
+    name = text_value(row.get("security_name")).upper()
+    identity = ticker or (f"NAME:{name}" if name else "")
+    return (
+        text_value(row.get("account_type")).lower(),
+        text_value(row.get("market")).upper(),
+        identity,
+    )
+
+
+def current_holding_identities(holdings: pd.DataFrame) -> set[tuple[str, str, str]]:
+    identities: set[tuple[str, str, str]] = set()
+    if holdings.empty:
+        return identities
+    for _, row in holdings.iterrows():
+        if text_value(row.get("asset_type")).lower() == "cash":
+            continue
+        identity = trade_identity(row)
+        if identity[2]:
+            identities.add(identity)
+    return identities
+
+
+def trade_amount_krw(row: pd.Series) -> tuple[float | None, str, str]:
+    review_status = row_review_status(row) or "ok"
+    amount = first_number(row, ["trade_amount_krw", "amount_krw", "settlement_amount_krw"])
+    if amount is None and row_currency(row) == "KRW":
+        amount = first_number(row, ["trade_amount", "amount_native", "settlement_amount"])
+    if review_status != "ok":
+        return None, review_status, text_value(row.get("amount_review_reason"))
+    if amount is None:
+        status = "fx_missing" if row_currency(row) and row_currency(row) != "KRW" else "unit_ambiguous"
+        return None, status, "trade amount has no KRW-normalized value"
+    return abs(amount), "ok", ""
+
+
+def trade_quantity(row: pd.Series) -> float | None:
+    quantity = first_number(row, ["quantity"])
+    if quantity is None or abs(quantity) <= 1e-9:
+        return None
+    return abs(quantity)
+
+
+def sorted_trade_rows(transactions: pd.DataFrame) -> pd.DataFrame:
+    if transactions.empty or "transaction_type" not in transactions.columns:
+        return pd.DataFrame(columns=transactions.columns)
+    view = transactions.copy()
+    tx_type = view["transaction_type"].fillna("").astype(str).str.lower()
+    role = view.get("cashflow_role", pd.Series("", index=view.index)).fillna("").astype(str).str.lower()
+    view = view[tx_type.isin({"buy", "sell"}) & role.isin({"", "trade_settlement"})].copy()
+    if view.empty:
+        return view
+    view["_trade_order"] = range(len(view))
+    view["_trade_date_sort"] = pd.to_datetime(view.get("trade_date", ""), errors="coerce")
+    view["_trade_time_sort"] = view.get("trade_time", "").fillna("").astype(str) if "trade_time" in view.columns else ""
+    return view.sort_values(["_trade_date_sort", "_trade_time_sort", "_trade_order"], na_position="last")
+
+
+def transaction_history_source_available(processed_dir: Path, transactions: pd.DataFrame) -> bool:
+    if not sorted_trade_rows(transactions).empty:
+        return True
+    source_index = load_csv(processed_dir / "source_file_index.csv")
+    if source_index.empty or "source_file_type" not in source_index.columns:
+        return False
+    source_types = source_index["source_file_type"].fillna("").astype(str).str.lower()
+    return bool(source_types.isin({"transaction_history", "transactions"}).any())
+
+
+def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFrame:
+    trades = sorted_trade_rows(transactions)
+    if trades.empty:
+        return pd.DataFrame(columns=REALIZED_PNL_COLUMNS)
+
+    current_identities = current_holding_identities(holdings)
+    records: list[dict[str, Any]] = []
+    for _identity, group in trades.groupby(trades.apply(trade_identity, axis=1), sort=False):
+        lots: list[dict[str, Any]] = []
+        group_records: list[dict[str, Any]] = []
+        for _, row in group.iterrows():
+            tx_type = text_value(row.get("transaction_type")).lower()
+            quantity = trade_quantity(row)
+            amount, amount_status, amount_reason = trade_amount_krw(row)
+            if tx_type == "buy":
+                lots.append({
+                    "remaining_qty": quantity or 0.0,
+                    "unit_cost": (amount / quantity) if quantity and amount is not None else None,
+                    "status": amount_status if amount_status != "ok" or quantity is None else "ok",
+                    "reason": amount_reason if amount_status != "ok" else ("buy quantity missing" if quantity is None else ""),
+                })
+                continue
+            if tx_type != "sell":
+                continue
+
+            statuses: list[str] = []
+            reasons: list[str] = []
+            matched_cost = 0.0
+            remaining = quantity or 0.0
+            if quantity is None:
+                statuses.append("unit_ambiguous")
+                reasons.append("sell quantity missing")
+            if amount_status != "ok" or amount is None:
+                statuses.append(amount_status)
+                if amount_reason:
+                    reasons.append(amount_reason)
+
+            lot_index = 0
+            while remaining > 1e-9 and lot_index < len(lots):
+                lot = lots[lot_index]
+                lot_qty = float(lot.get("remaining_qty") or 0.0)
+                if lot_qty <= 1e-9:
+                    lot_index += 1
+                    continue
+                matched_qty = min(remaining, lot_qty)
+                if lot.get("unit_cost") is None or lot.get("status") != "ok":
+                    statuses.append(text_value(lot.get("status")) or "unit_ambiguous")
+                    if lot.get("reason"):
+                        reasons.append(text_value(lot.get("reason")))
+                else:
+                    matched_cost += float(lot["unit_cost"]) * matched_qty
+                lot["remaining_qty"] = lot_qty - matched_qty
+                remaining -= matched_qty
+                if lot["remaining_qty"] <= 1e-9:
+                    lot_index += 1
+
+            if remaining > 1e-9:
+                statuses.append("lot_missing")
+                reasons.append("sell quantity exceeds matched buy lots in imported transaction history")
+
+            status = status_from_list(statuses, default="ok")
+            proceeds = amount if amount is not None else None
+            realized = proceeds - matched_cost if status == "ok" and proceeds is not None else None
+            group_records.append({
+                "account_type": row.get("account_type", ""),
+                "market": row.get("market", ""),
+                "ticker": row.get("ticker", ""),
+                "security_name": row.get("security_name", ""),
+                "currency_native": row_currency(row),
+                "sell_date": row.get("trade_date", ""),
+                "sell_import_id": row.get("import_id", ""),
+                "quantity_sold": quantity if quantity is not None else "",
+                "proceeds_krw": proceeds if status == "ok" else "",
+                "cost_basis_krw": matched_cost if status == "ok" else "",
+                "realized_pnl_krw": realized if realized is not None else "",
+                "realized_result": "gain" if realized is not None and realized >= 0 else ("loss" if realized is not None else ""),
+                "position_status": "",
+                "amount_review_status": status,
+                "amount_review_reason": "; ".join(dict.fromkeys(reason for reason in reasons if reason)),
+                "source_file": row.get("source_file", ""),
+                "_identity": trade_identity(row),
+            })
+
+        final_remaining = sum(float(lot.get("remaining_qty") or 0.0) for lot in lots)
+        for record in group_records:
+            record["position_status"] = (
+                "current_or_open"
+                if final_remaining > 1e-9 or record["_identity"] in current_identities
+                else "closed"
+            )
+            records.append(record)
+
+    if not records:
+        return pd.DataFrame(columns=REALIZED_PNL_COLUMNS)
+    return pd.DataFrame(records).drop(columns=["_identity"], errors="ignore").reindex(columns=REALIZED_PNL_COLUMNS)
+
+
+def realized_pnl_summary(
+    ledger: pd.DataFrame,
+    transaction_source_available: bool,
+) -> dict[str, Any]:
+    if ledger.empty:
+        if transaction_source_available:
+            return {
+                "realized_pnl_krw": 0.0,
+                "realized_gain_krw": 0.0,
+                "realized_loss_krw": 0.0,
+                "realized_pnl_status": "available",
+                "realized_pnl_row_count": 0,
+                "realized_pnl_unavailable_row_count": 0,
+                "realized_closed_position_count": 0,
+            }
+        return {
+            "realized_pnl_krw": None,
+            "realized_gain_krw": None,
+            "realized_loss_krw": None,
+            "realized_pnl_status": "transaction_history_missing",
+            "realized_pnl_row_count": 0,
+            "realized_pnl_unavailable_row_count": 0,
+            "realized_closed_position_count": 0,
+        }
+
+    status = ledger.get("amount_review_status", pd.Series("", index=ledger.index)).fillna("").astype(str).str.lower()
+    unavailable = status.ne("ok")
+    if unavailable.any():
+        blocking = [value for value in status[unavailable].tolist() if value]
+        return {
+            "realized_pnl_krw": None,
+            "realized_gain_krw": None,
+            "realized_loss_krw": None,
+            "realized_pnl_status": status_from_list(blocking, default="unavailable"),
+            "realized_pnl_row_count": len(ledger),
+            "realized_pnl_unavailable_row_count": int(unavailable.sum()),
+            "realized_closed_position_count": int(ledger.get("position_status", pd.Series("", index=ledger.index)).fillna("").astype(str).str.lower().eq("closed").sum()),
+        }
+
+    pnl = pd.to_numeric(ledger.get("realized_pnl_krw", pd.Series(dtype=float)), errors="coerce").fillna(0.0)
+    return {
+        "realized_pnl_krw": float(pnl.sum()),
+        "realized_gain_krw": float(pnl[pnl > 0].sum()),
+        "realized_loss_krw": float(pnl[pnl < 0].sum()),
+        "realized_pnl_status": "available",
+        "realized_pnl_row_count": len(ledger),
+        "realized_pnl_unavailable_row_count": 0,
+        "realized_closed_position_count": int(ledger.get("position_status", pd.Series("", index=ledger.index)).fillna("").astype(str).str.lower().eq("closed").sum()),
+    }
 
 
 def unrealized_pnl_krw(holdings: pd.DataFrame) -> float:
@@ -544,19 +798,28 @@ def fx_event_counts(fx_events: pd.DataFrame) -> dict[str, int]:
     return counts
 
 
-def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) -> pd.DataFrame:
+def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame, realized_ledger: pd.DataFrame | None = None) -> pd.DataFrame:
     cashflows_path = processed_dir / "processed_cashflows.csv"
     cashflows = load_csv(cashflows_path)
     income = load_csv(processed_dir / "processed_income.csv")
     expenses = load_csv(processed_dir / "processed_expenses.csv")
     fx_events = load_csv(processed_dir / "processed_fx_events.csv")
+    transactions = load_csv(processed_dir / "processed_transactions.csv")
 
-    asset_total, asset_status, asset_status_counts = total_assets_krw(holdings)
+    asset_total, current_cash, current_holding_assets, asset_status, asset_status_counts = total_assets_breakdown_krw(holdings)
     deposits, withdrawals, net_principal, principal_status, principal_status_counts = net_external_principal_krw(cashflows, source_available=cashflows_path.exists())
+    if realized_ledger is None:
+        realized_ledger = realized_pnl_ledger(transactions, holdings)
+    realized_metrics = realized_pnl_summary(
+        realized_ledger,
+        transaction_source_available=transaction_history_source_available(processed_dir, transactions),
+    )
 
     total_return = None
+    total_return_pct = None
     if asset_status == "available" and principal_status == "available" and asset_total is not None and net_principal is not None:
         total_return = asset_total - net_principal
+        total_return_pct = round(total_return / net_principal * 100, 6) if abs(net_principal) > 1e-9 else None
         total_return_status = "available"
     elif asset_status != "available":
         total_return_status = asset_status
@@ -569,11 +832,13 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) ->
     distribution_income = ok_amount_sum(income, "income_type", {"distribution"})
     fee_expense = ok_amount_sum(expenses, "expense_type", {"fee"})
     tax_expense = ok_amount_sum(expenses, "expense_type", {"tax"})
-    explained_profit = unrealized + dividend_income + interest_income + distribution_income - fee_expense - tax_expense
+    realized_pnl = realized_metrics["realized_pnl_krw"] if realized_metrics["realized_pnl_status"] == "available" else 0.0
+    explained_profit = unrealized + realized_pnl + dividend_income + interest_income + distribution_income - fee_expense - tax_expense
+    explained_profit_status = "available" if realized_metrics["realized_pnl_status"] == "available" else realized_metrics["realized_pnl_status"]
 
     residual = None
     residual_status = "unavailable"
-    if total_return is not None:
+    if total_return is not None and explained_profit_status == "available":
         residual = total_return - explained_profit
         residual_status = "available"
 
@@ -581,26 +846,40 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame) ->
     for key, value in principal_status_counts.items():
         seeded_counts[key] = seeded_counts.get(key, 0) + int(value or 0)
     counts = review_status_counts([holdings, cashflows, income, expenses, fx_events], seeded_counts)
+    if realized_metrics["realized_pnl_status"] in counts:
+        counts[realized_metrics["realized_pnl_status"]] += int(realized_metrics["realized_pnl_unavailable_row_count"] or 0)
+    if realized_metrics["realized_pnl_status"] in REVIEW_NEEDED_STATUSES:
+        counts["amount_review_needed"] += int(realized_metrics["realized_pnl_unavailable_row_count"] or 0)
     fx_counts = fx_event_counts(fx_events)
 
     return summary_metric_rows({
         "total_assets_krw": asset_total,
         "total_assets_status": asset_status,
+        "current_cash_krw": current_cash,
+        "current_holding_assets_krw": current_holding_assets,
         "external_deposit_krw": deposits,
         "external_withdrawal_krw": withdrawals,
         "net_external_principal_krw": net_principal,
         "net_external_principal_status": principal_status,
         "total_return_krw": total_return,
+        "total_return_pct": total_return_pct,
         "total_return_status": total_return_status,
         "unrealized_pnl_krw": unrealized,
+        "realized_pnl_krw": realized_metrics["realized_pnl_krw"],
+        "realized_gain_krw": realized_metrics["realized_gain_krw"],
+        "realized_loss_krw": realized_metrics["realized_loss_krw"],
+        "realized_pnl_status": realized_metrics["realized_pnl_status"],
+        "realized_pnl_row_count": realized_metrics["realized_pnl_row_count"],
+        "realized_pnl_unavailable_row_count": realized_metrics["realized_pnl_unavailable_row_count"],
+        "realized_closed_position_count": realized_metrics["realized_closed_position_count"],
         "dividend_income_krw": dividend_income,
         "interest_income_krw": interest_income,
         "distribution_income_krw": distribution_income,
         "fee_expense_krw": fee_expense,
         "tax_expense_krw": tax_expense,
-        "realized_pnl_status": "unavailable",
         "fx_pnl_status": "unavailable",
         "explained_profit_krw": explained_profit,
+        "explained_profit_status": explained_profit_status,
         "residual_krw": residual,
         "residual_status": residual_status,
         "fx_missing_row_count": counts["fx_missing"],
@@ -834,7 +1113,9 @@ def build_portfolio(processed_dir: Path, vault_root: Path) -> tuple[pd.DataFrame
 def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = False) -> dict[str, int]:
     processed_dir = processed_dir or vault_root / "70_Imports" / "processed"
     summary, holdings, risk, review, history = build_portfolio_outputs(processed_dir, vault_root)
-    reconciliation = build_reconciliation_summary(processed_dir, holdings)
+    transactions = load_csv(processed_dir / "processed_transactions.csv")
+    realized = realized_pnl_ledger(transactions, holdings)
+    reconciliation = build_reconciliation_summary(processed_dir, holdings, realized)
     if dry_run:
         return {
             "summary_rows": len(summary),
@@ -842,11 +1123,13 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
             "history_rows": len(history),
             "risk_rows": len(risk),
             "review_rows": len(review),
+            "realized_rows": len(realized),
             "reconciliation_rows": len(reconciliation),
         }
     processed_dir.mkdir(parents=True, exist_ok=True)
     summary.to_csv(processed_dir / "portfolio_summary.csv", index=False, encoding="utf-8-sig")
     reconciliation.to_csv(processed_dir / "reconciliation_summary.csv", index=False, encoding="utf-8-sig")
+    realized.to_csv(processed_dir / "processed_realized_pnl.csv", index=False, encoding="utf-8-sig")
     holdings.to_csv(processed_dir / "processed_holdings.csv", index=False, encoding="utf-8-sig")
     risk.to_csv(processed_dir / "risk_watchlist.csv", index=False, encoding="utf-8-sig")
     review.to_csv(processed_dir / "review_queue.csv", index=False, encoding="utf-8-sig")
@@ -858,5 +1141,6 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
         "history_rows": len(history),
         "risk_rows": len(risk),
         "review_rows": len(review),
+        "realized_rows": len(realized),
         "reconciliation_rows": len(reconciliation),
     }

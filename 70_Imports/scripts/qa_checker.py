@@ -349,6 +349,17 @@ def add_reconciliation_summary_exceptions(rows: list[dict[str, Any]], processed_
             "Review realized PnL, FX PnL, income, expenses, and principal classifications for unexplained difference.",
         )
 
+    realized_status = lower_value(metrics.get("realized_pnl_status", ""))
+    if realized_status and realized_status != "available":
+        add(
+            rows,
+            "REC-EX-10",
+            "advisory",
+            "70_Imports/processed/reconciliation_summary.csv",
+            "Realized PnL ledger is incomplete or unavailable.",
+            "Review processed_realized_pnl.csv and imported transaction history before treating profit decomposition as complete.",
+        )
+
 
 def add_reconciliation_quality_exceptions(rows: list[dict[str, Any]], processed_dir: Path) -> None:
     amount_audit = read_csv(processed_dir / "amount_unit_audit.csv")

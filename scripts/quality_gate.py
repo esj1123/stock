@@ -79,26 +79,41 @@ REQUIRED_OUTPUT_SCHEMAS = {
         "fx_rate_to_krw", "fx_rate_source", "fx_pair_status", "cashflow_role", "affects_principal",
         "affects_profit", "is_internal_transfer", "amount_review_status", "amount_review_reason", "raw_memo",
     ],
+    "processed_realized_pnl.csv": [
+        "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
+        "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "realized_pnl_krw",
+        "realized_result", "position_status", "amount_review_status", "amount_review_reason", "source_file",
+    ],
 }
 
 REQUIRED_RECONCILIATION_METRICS = [
     "total_assets_krw",
     "total_assets_status",
+    "current_cash_krw",
+    "current_holding_assets_krw",
     "external_deposit_krw",
     "external_withdrawal_krw",
     "net_external_principal_krw",
     "net_external_principal_status",
     "total_return_krw",
+    "total_return_pct",
     "total_return_status",
     "unrealized_pnl_krw",
+    "realized_pnl_krw",
+    "realized_gain_krw",
+    "realized_loss_krw",
+    "realized_pnl_status",
+    "realized_pnl_row_count",
+    "realized_pnl_unavailable_row_count",
+    "realized_closed_position_count",
     "dividend_income_krw",
     "interest_income_krw",
     "distribution_income_krw",
     "fee_expense_krw",
     "tax_expense_krw",
-    "realized_pnl_status",
     "fx_pnl_status",
     "explained_profit_krw",
+    "explained_profit_status",
     "residual_krw",
     "residual_status",
     "fx_missing_row_count",
@@ -120,6 +135,9 @@ RECONCILIATION_COUNT_METRICS = {
     "currency_ambiguous_row_count",
     "unit_ambiguous_row_count",
     "amount_review_needed_row_count",
+    "realized_pnl_row_count",
+    "realized_pnl_unavailable_row_count",
+    "realized_closed_position_count",
     "fx_event_id_count",
     "fx_event_leg_count",
     "fx_paired_event_count",
@@ -132,11 +150,17 @@ RECONCILIATION_COUNT_METRICS = {
 
 RECONCILIATION_MONEY_METRICS = {
     "total_assets_krw",
+    "current_cash_krw",
+    "current_holding_assets_krw",
     "external_deposit_krw",
     "external_withdrawal_krw",
     "net_external_principal_krw",
     "total_return_krw",
+    "total_return_pct",
     "unrealized_pnl_krw",
+    "realized_pnl_krw",
+    "realized_gain_krw",
+    "realized_loss_krw",
     "dividend_income_krw",
     "interest_income_krw",
     "distribution_income_krw",
@@ -610,22 +634,30 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
         if value is None or value < 0 or value != int(value):
             findings.append(f"reconciliation_summary.csv count metric {metric} must be a non-negative integer: {metrics.get(metric)}")
 
-    if str(metrics.get("realized_pnl_status", "")).strip().lower() != "unavailable":
-        findings.append("reconciliation_summary.csv realized_pnl_status must remain unavailable")
     if str(metrics.get("fx_pnl_status", "")).strip().lower() != "unavailable":
         findings.append("reconciliation_summary.csv fx_pnl_status must remain unavailable")
 
     assets = optional_float(metrics.get("total_assets_krw"))
+    cash_assets = optional_float(metrics.get("current_cash_krw"))
+    holding_assets = optional_float(metrics.get("current_holding_assets_krw"))
     principal = optional_float(metrics.get("net_external_principal_krw"))
     total_return = optional_float(metrics.get("total_return_krw"))
+    total_return_pct = optional_float(metrics.get("total_return_pct"))
     total_assets_status = str(metrics.get("total_assets_status", "")).strip().lower()
     principal_status = str(metrics.get("net_external_principal_status", "")).strip().lower()
     total_return_status = str(metrics.get("total_return_status", "")).strip().lower()
+    realized_status = str(metrics.get("realized_pnl_status", "")).strip().lower()
+    explained_status = str(metrics.get("explained_profit_status", "")).strip().lower()
     residual_status = str(metrics.get("residual_status", "")).strip().lower()
     if total_assets_status == "available" and assets is None:
         findings.append("reconciliation_summary.csv total_assets_status is available but total_assets_krw is blank")
+    if total_assets_status == "available" and all(value is not None for value in [assets, cash_assets, holding_assets]):
+        if abs(assets - (cash_assets + holding_assets)) > 0.0001:
+            findings.append("reconciliation_summary.csv total_assets_krw formula mismatch")
     if principal_status == "available" and principal is None:
         findings.append("reconciliation_summary.csv net_external_principal_status is available but net_external_principal_krw is blank")
+    if realized_status == "available" and optional_float(metrics.get("realized_pnl_krw")) is None:
+        findings.append("reconciliation_summary.csv realized_pnl_status is available but realized_pnl_krw is blank")
     if total_return_status == "available":
         unresolved_counts = {
             metric: optional_float(metrics.get(metric))
@@ -650,11 +682,17 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
             findings.append("reconciliation_summary.csv total_return_status is available but required KRW values are blank")
         elif abs(total_return - (assets - principal)) > 0.0001:
             findings.append("reconciliation_summary.csv total_return_krw formula mismatch")
+        if principal not in {None, 0.0} and total_return is not None:
+            if total_return_pct is None:
+                findings.append("reconciliation_summary.csv total_return_pct is blank despite available non-zero principal")
+            elif abs(total_return_pct - (total_return / principal * 100)) > 0.0001:
+                findings.append("reconciliation_summary.csv total_return_pct formula mismatch")
     elif residual_status == "available":
         findings.append("reconciliation_summary.csv residual_status must not be available when total_return_status is not available")
 
     explained_inputs = [
         "unrealized_pnl_krw",
+        "realized_pnl_krw",
         "dividend_income_krw",
         "interest_income_krw",
         "distribution_income_krw",
@@ -663,9 +701,12 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
     ]
     explained_values = {metric: optional_float(metrics.get(metric)) for metric in explained_inputs}
     explained = optional_float(metrics.get("explained_profit_krw"))
-    if all(value is not None for value in explained_values.values()) and explained is not None:
+    if realized_status != "available" and explained_status == "available":
+        findings.append("reconciliation_summary.csv explained_profit_status is available but realized_pnl_status is not available")
+    if explained_status == "available" and all(value is not None for value in explained_values.values()) and explained is not None:
         expected = (
             explained_values["unrealized_pnl_krw"]
+            + explained_values["realized_pnl_krw"]
             + explained_values["dividend_income_krw"]
             + explained_values["interest_income_krw"]
             + explained_values["distribution_income_krw"]
@@ -679,6 +720,8 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
     if residual_status == "available":
         if total_return_status != "available":
             findings.append("reconciliation_summary.csv residual_status is available but total_return_status is not available")
+        if explained_status != "available":
+            findings.append("reconciliation_summary.csv residual_status is available but explained_profit_status is not available")
         if total_return is None or explained is None or residual is None:
             findings.append("reconciliation_summary.csv residual_status is available but required KRW values are blank")
         elif abs(residual - (total_return - explained)) > 0.0001:
