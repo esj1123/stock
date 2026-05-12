@@ -10,10 +10,14 @@ This baseline separates current holdings from performance accounting.
 
 ## Total Performance
 
+- `performance_summary.csv` is the user-facing whole-investment performance summary.
+- `portfolio_summary.csv` remains current-holdings-focused.
+- `reconciliation_summary.csv` remains the audit/status/reconciliation layer until the next role-separation pass.
 - Current total assets are current cash plus current non-cash holding valuation.
 - Total cumulative PnL is `current total assets - net external principal`.
 - Total cumulative return is `total cumulative PnL / net external principal`.
 - Current holding `pnl_pct` remains a separate current-position metric and is not the same as total cumulative return.
+- FX PnL is not modeled yet; unresolved FX effects may remain in `fx_status`, unavailable official values, and residual interpretation.
 
 ## Profit Decomposition
 
