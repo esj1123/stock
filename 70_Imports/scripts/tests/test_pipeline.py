@@ -3246,14 +3246,39 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
         {"ticker": "AAA", "security_name": "AAA", "account_type": "ISA", "asset_type": "stock", "currency": "KRW", "evaluation_amount": 1000, "unrealized_pnl": 100, "pnl_pct": 11.11, "weight_pct": 55.56},
         {"ticker": "BBB", "security_name": "BBB", "account_type": "ISA", "asset_type": "stock", "currency": "KRW", "evaluation_amount": 800, "unrealized_pnl": 200, "pnl_pct": 33.33, "weight_pct": 44.44},
     ]).to_csv(processed / "processed_holdings.csv", index=False)
+    pd.DataFrame(valid_reconciliation_summary_rows(
+        total_assets_krw="1800",
+        current_cash_krw="0",
+        current_holding_assets_krw="1800",
+        net_external_principal_krw="1500",
+        total_return_krw="300",
+        total_return_pct="20",
+        unrealized_pnl_krw="300",
+        realized_pnl_krw="0",
+        dividend_income_krw="100",
+        interest_income_krw="20",
+        distribution_income_krw="30",
+        fee_expense_krw="10",
+        tax_expense_krw="5",
+        residual_krw="0",
+    )).to_csv(processed / "reconciliation_summary.csv", index=False)
 
     content = dashboard_content("Portfolio.md", processed)
 
-    assert "Portfolio Cost Basis" in content
-    assert "preliminary; not net external principal" in content
-    assert "Total Value" in content
-    assert "Unrealized PnL" in content
-    assert "Return" in content
+    assert "## 전체 투자 성과" in content
+    assert "## 현재 보유분" in content
+    assert "현재 보유분 원가" in content
+    assert "current holdings cost basis; not net external principal" in content
+    assert "현재 보유분 평가금액" in content
+    assert "현재 보유분 미실현손익" in content
+    assert "현재 보유분 평가수익률" in content
+    assert "전체 누적손익" in content
+    assert "전체 누적수익률" in content
+    assert "배당/이자/분배금" in content
+    assert "수수료/세금" in content
+    assert "Portfolio Cost Basis" not in content
+    assert '<span class="stock-kpi-label">Return</span>' not in content
+    assert "Total Return %" not in content
     assert "Preliminary profit and reconciliation" in content
     assert "Final total return should not be considered official until unit/currency-aware processing is complete." in content
     assert "profit_result_status=preliminary" in content
@@ -3289,9 +3314,9 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
 
     content = dashboard_content("Portfolio.md", processed)
 
-    assert "Unit-aware Value Status" in content
+    assert "현재 총자산 상태" in content
     assert "fx_missing" in content
-    assert "Total Return Status" in content
+    assert "성과 상태" in content
     assert "not official" in content
     assert "## Normalized Currency Exposure" in content
     assert "| USD | 1 |  | 1 | 44.44 |" in content

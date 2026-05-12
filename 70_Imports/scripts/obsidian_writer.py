@@ -135,6 +135,13 @@ def optional_number_value(value: Any) -> float | None:
         return None
 
 
+def metric_sum(summary: pd.DataFrame, metrics: list[str], default: str = "-") -> Any:
+    values = [optional_number_value(metric(summary, name)) for name in metrics]
+    if any(value is None for value in values):
+        return default
+    return round(sum(value for value in values if value is not None), 6)
+
+
 def percent_bar(value: Any, width: int = 20) -> str:
     pct = max(0.0, min(100.0, number_value(value)))
     filled = int(round(pct / 100 * width))
@@ -331,27 +338,40 @@ def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: st
     total_return_status = metric(reconciliation, "total_return_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS))
     profit_status = metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)
     reconciliation_status = metric(summary, "reconciliation_status", RECONCILIATION_STATUS)
-    snapshot = [
-        "## Snapshot",
+    performance = [
+        "## 전체 투자 성과",
         '<div class="stock-kpi-grid">',
-        snapshot_card("Holdings", metric(summary, "holding_count", "0")),
-        snapshot_card("Portfolio Cost Basis", metric(summary, "total_cost", "-"), "preliminary; not net external principal"),
-        snapshot_card("Total Value", metric(summary, "total_portfolio_value", "-")),
-        snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-"), "preliminary"),
-        snapshot_card("Return", metric(summary, "pnl_pct", "-"), "preliminary pnl_pct"),
-        snapshot_card("Total Return", metric(reconciliation, "total_return_krw", "-"), "assets - net principal"),
-        snapshot_card("Total Return %", metric(reconciliation, "total_return_pct", "-"), "total return / net principal"),
-        snapshot_card("Profit Status", profit_status),
-        snapshot_card("Recon Status", reconciliation_status),
-        snapshot_card("Unit-aware Value Status", unit_value_status),
-        snapshot_card("Total Return Status", total_return_status),
+        snapshot_card("순투입원금", metric(reconciliation, "net_external_principal_krw", "-"), "external deposits - withdrawals"),
+        snapshot_card("현재 총자산", metric(reconciliation, "total_assets_krw", metric(summary, "total_portfolio_value", "-")), "current cash + current holdings"),
+        snapshot_card("전체 누적손익", metric(reconciliation, "total_return_krw", "-"), "current assets - net principal"),
+        snapshot_card("전체 누적수익률", metric(reconciliation, "total_return_pct", "-"), "cumulative PnL / net principal"),
+        snapshot_card("실현손익", metric(reconciliation, "realized_pnl_krw", "-"), "realized ledger"),
+        snapshot_card("미실현손익", metric(reconciliation, "unrealized_pnl_krw", metric(summary, "total_unrealized_pnl", "-")), "current holdings unrealized PnL"),
+        snapshot_card("배당/이자/분배금", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"])),
+        snapshot_card("수수료/세금", metric_sum(reconciliation, ["fee_expense_krw", "tax_expense_krw"])),
+        snapshot_card("설명되지 않은 차이", metric(reconciliation, "residual_krw", "-"), "total PnL - explained profit"),
+        snapshot_card("성과 상태", total_return_status),
+        "</div>",
+    ]
+    current_position_snapshot = [
+        "## 현재 보유분",
+        '<div class="stock-kpi-grid">',
+        snapshot_card("현재 보유종목", metric(summary, "holding_count", "0")),
+        snapshot_card("현재 보유분 원가", metric(summary, "total_cost", "-"), "current holdings cost basis; not net external principal"),
+        snapshot_card("현재 보유분 평가금액", metric(summary, "total_portfolio_value", "-")),
+        snapshot_card("현재 보유분 미실현손익", metric(summary, "total_unrealized_pnl", "-"), "current holdings only"),
+        snapshot_card("현재 보유분 평가수익률", metric(summary, "pnl_pct", "-"), "current holdings pnl_pct"),
+        snapshot_card("수익 집계 상태", profit_status),
+        snapshot_card("대사 상태", reconciliation_status),
+        snapshot_card("현재 총자산 상태", unit_value_status),
         snapshot_card("Loss Review", metric(summary, "loss_review_required_count", "0"), "candidate count"),
         snapshot_card("Leveraged ETF", metric(summary, "leveraged_etf_count", "0")),
         snapshot_card("Largest Position", largest_position_label(holdings)),
         snapshot_card("Value Status", value_status),
         "</div>",
     ]
-    parts.append("\n".join(snapshot))
+    parts.append("\n".join(performance))
+    parts.append("\n".join(current_position_snapshot))
     if value_status.lower() == "unknown":
         parts.append("> [!warning] Portfolio value status\n> Total portfolio value status is `unknown`. Add current balance files before relying on value-based summaries.")
     if unit_value_status.lower() != "available" or total_return_status.lower() != "available":
