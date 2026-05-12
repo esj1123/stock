@@ -21,6 +21,21 @@ SUMMARY_COLUMNS = ["metric", "value"]
 RECONCILIATION_SUMMARY_COLUMNS = ["metric", "value"]
 REALIZED_COST_BASIS_METHOD = "fifo"
 REALIZED_PNL_BASIS = "gross_trade_pnl_krw_fee_tax_separate"
+INCOME_TYPES = ["dividend", "interest", "distribution"]
+INCOME_SUMMARY_COLUMNS = [
+    "income_type",
+    "currency_native",
+    "amount_native_sum",
+    "amount_krw_sum",
+    "tax_native_sum",
+    "tax_krw_sum",
+    "net_income_native",
+    "net_income_krw",
+    "row_count",
+    "fx_missing_row_count",
+    "amount_review_needed_row_count",
+    "income_status",
+]
 REALIZED_PNL_COLUMNS = [
     "account_type",
     "market",
@@ -503,6 +518,83 @@ def ok_amount_sum(df: pd.DataFrame, type_col: str, accepted_types: set[str]) -> 
         if amount is not None:
             total += abs(amount)
     return total
+
+
+def sum_optional_amounts(
+    rows: list[pd.Series],
+    field: str,
+    *,
+    ok_only: bool = False,
+) -> float | None:
+    values: list[float] = []
+    for row in rows:
+        if ok_only and (row_review_status(row) or "ok") != "ok":
+            continue
+        amount = first_number(row, [field])
+        if amount is not None:
+            values.append(abs(amount))
+    if not values:
+        return None
+    return float(sum(values))
+
+
+def income_status_from_rows(rows: list[pd.Series]) -> str:
+    statuses = [(row_review_status(row) or "ok") for row in rows]
+    blocking = [status for status in statuses if status != "ok"]
+    return status_from_list(blocking, default="available")
+
+
+def build_income_summary(income: pd.DataFrame) -> pd.DataFrame:
+    if income.empty or "income_type" not in income.columns:
+        return pd.DataFrame(columns=INCOME_SUMMARY_COLUMNS)
+
+    records: list[dict[str, Any]] = []
+    view = income.copy()
+    view["_income_type"] = view["income_type"].fillna("").astype(str).str.strip().str.lower()
+    view["_currency_native"] = (
+        view["currency_native"].fillna("").astype(str).str.strip().str.upper()
+        if "currency_native" in view.columns
+        else ""
+    )
+    view = view[view["_income_type"].isin(INCOME_TYPES)].copy()
+    if view.empty:
+        return pd.DataFrame(columns=INCOME_SUMMARY_COLUMNS)
+
+    type_order = {income_type: index for index, income_type in enumerate(INCOME_TYPES)}
+    for (income_type, currency), group in view.groupby(["_income_type", "_currency_native"], dropna=False, sort=True):
+        rows = [row for _, row in group.iterrows()]
+        status = income_status_from_rows(rows)
+        status_values = [(row_review_status(row) or "ok") for row in rows]
+        fx_missing_count = sum(1 for value in status_values if value == "fx_missing")
+        review_needed_count = sum(1 for value in status_values if value in REVIEW_NEEDED_STATUSES)
+        amount_native = sum_optional_amounts(rows, "amount_native")
+        tax_native = sum_optional_amounts(rows, "tax_native")
+        amount_krw = sum_optional_amounts(rows, "amount_krw", ok_only=True)
+        tax_krw = sum_optional_amounts(rows, "tax_krw", ok_only=True)
+        tax_native_for_net = tax_native if tax_native is not None else (0.0 if amount_native is not None else None)
+        tax_krw_for_net = tax_krw if tax_krw is not None else (0.0 if amount_krw is not None else None)
+        records.append({
+            "income_type": income_type,
+            "currency_native": currency,
+            "amount_native_sum": amount_native if amount_native is not None else "",
+            "amount_krw_sum": amount_krw if amount_krw is not None else "",
+            "tax_native_sum": tax_native_for_net if tax_native_for_net is not None else "",
+            "tax_krw_sum": tax_krw_for_net if tax_krw_for_net is not None else "",
+            "net_income_native": (amount_native - tax_native_for_net) if amount_native is not None and tax_native_for_net is not None else "",
+            "net_income_krw": (amount_krw - tax_krw_for_net) if amount_krw is not None and tax_krw_for_net is not None else "",
+            "row_count": len(group),
+            "fx_missing_row_count": fx_missing_count,
+            "amount_review_needed_row_count": review_needed_count,
+            "income_status": status,
+            "_type_order": type_order.get(str(income_type), len(type_order)),
+        })
+
+    return (
+        pd.DataFrame(records)
+        .sort_values(["_type_order", "currency_native"])
+        .drop(columns=["_type_order"], errors="ignore")
+        .reindex(columns=INCOME_SUMMARY_COLUMNS)
+    )
 
 
 def trade_identity(row: pd.Series) -> tuple[str, str, str]:
@@ -1303,6 +1395,8 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     processed_dir = processed_dir or vault_root / "70_Imports" / "processed"
     summary, holdings, risk, review, history = build_portfolio_outputs(processed_dir, vault_root)
     transactions = load_csv(processed_dir / "processed_transactions.csv")
+    income = load_csv(processed_dir / "processed_income.csv")
+    income_summary = build_income_summary(income)
     realized = realized_pnl_ledger(transactions, holdings)
     reconciliation = build_reconciliation_summary(processed_dir, holdings, realized)
     if dry_run:
@@ -1313,11 +1407,13 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
             "risk_rows": len(risk),
             "review_rows": len(review),
             "realized_rows": len(realized),
+            "income_summary_rows": len(income_summary),
             "reconciliation_rows": len(reconciliation),
         }
     processed_dir.mkdir(parents=True, exist_ok=True)
     summary.to_csv(processed_dir / "portfolio_summary.csv", index=False, encoding="utf-8-sig")
     reconciliation.to_csv(processed_dir / "reconciliation_summary.csv", index=False, encoding="utf-8-sig")
+    income_summary.to_csv(processed_dir / "income_summary.csv", index=False, encoding="utf-8-sig")
     realized.to_csv(processed_dir / "processed_realized_pnl.csv", index=False, encoding="utf-8-sig")
     holdings.to_csv(processed_dir / "processed_holdings.csv", index=False, encoding="utf-8-sig")
     risk.to_csv(processed_dir / "risk_watchlist.csv", index=False, encoding="utf-8-sig")
@@ -1331,5 +1427,6 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
         "risk_rows": len(risk),
         "review_rows": len(review),
         "realized_rows": len(realized),
+        "income_summary_rows": len(income_summary),
         "reconciliation_rows": len(reconciliation),
     }

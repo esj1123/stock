@@ -876,6 +876,25 @@ def native_amount_total_if_single_currency(view: pd.DataFrame) -> tuple[str, Any
 def income_summary_table(income: pd.DataFrame) -> str:
     if income.empty or "income_type" not in income.columns:
         return EMPTY_DATA
+    if "amount_krw_sum" in income.columns:
+        return markdown_table(
+            income,
+            [
+                "income_type",
+                "currency_native",
+                "amount_native_sum",
+                "amount_krw_sum",
+                "tax_native_sum",
+                "tax_krw_sum",
+                "net_income_native",
+                "net_income_krw",
+                "row_count",
+                "fx_missing_row_count",
+                "amount_review_needed_row_count",
+                "income_status",
+            ],
+            50,
+        )
     records = []
     for income_type, group in income.groupby("income_type", dropna=False, sort=True):
         currency, native_total = native_amount_total_if_single_currency(group)
@@ -891,6 +910,41 @@ def income_summary_table(income: pd.DataFrame) -> str:
             "amount_review_status_counts": status_counts,
         })
     return markdown_table(pd.DataFrame(records))
+
+
+def income_summary_field_total(income_summary: pd.DataFrame, field: str, income_type: str | None = None) -> Any:
+    if income_summary.empty or field not in income_summary.columns:
+        return ""
+    view = income_summary
+    if income_type is not None and "income_type" in view.columns:
+        view = view[view["income_type"].fillna("").astype(str).str.lower().eq(income_type)]
+    values = [optional_number_value(value) for value in view[field]]
+    values = [value for value in values if value is not None]
+    return round(sum(values), 6) if values else ""
+
+
+def income_summary_native_text(income_summary: pd.DataFrame) -> str:
+    if income_summary.empty or "currency_native" not in income_summary.columns or "net_income_native" not in income_summary.columns:
+        return ""
+    records = []
+    for currency, group in income_summary.groupby("currency_native", dropna=False, sort=True):
+        values = [optional_number_value(value) for value in group["net_income_native"]]
+        values = [value for value in values if value is not None]
+        if values:
+            records.append(f"{currency or 'UNKNOWN'} {round(sum(values), 6)}")
+    return " / ".join(records)
+
+
+def cash_income_cards(income_summary: pd.DataFrame) -> str:
+    return dashboard_kpi_grid([
+        snapshot_card("배당", income_summary_field_total(income_summary, "amount_krw_sum", "dividend"), "official KRW rows only"),
+        snapshot_card("이자", income_summary_field_total(income_summary, "amount_krw_sum", "interest"), "official KRW rows only"),
+        snapshot_card("분배금", income_summary_field_total(income_summary, "amount_krw_sum", "distribution"), "official KRW rows only"),
+        snapshot_card("원천징수세", income_summary_field_total(income_summary, "tax_krw_sum"), "official KRW rows only"),
+        snapshot_card("FX 누락 건수", income_summary_field_total(income_summary, "fx_missing_row_count")),
+        snapshot_card("native 기준 수익", income_summary_native_text(income_summary)),
+        snapshot_card("KRW 환산 가능 수익", income_summary_field_total(income_summary, "net_income_krw"), "status ok rows only"),
+    ])
 
 
 def expense_summary_table(expenses: pd.DataFrame) -> str:
@@ -1099,11 +1153,13 @@ def cashflow_content(
     dividends: pd.DataFrame,
     summary: pd.DataFrame | None = None,
     income: pd.DataFrame | None = None,
+    income_summary: pd.DataFrame | None = None,
     expenses: pd.DataFrame | None = None,
     fx_events: pd.DataFrame | None = None,
 ) -> str:
     summary = summary if summary is not None else pd.DataFrame()
     income = income if income is not None else pd.DataFrame()
+    income_summary = income_summary if income_summary is not None else pd.DataFrame()
     expenses = expenses if expenses is not None else pd.DataFrame()
     fx_events = fx_events if fx_events is not None else pd.DataFrame()
     principal_cash = cashflow_principal_view(cash)
@@ -1130,8 +1186,9 @@ def cashflow_content(
         cashflow_principal_summary_table(principal_cash),
         "## Principal exclusions and unresolved amounts",
         cashflow_exclusion_status_table(cash, income, expenses, fx_events),
-        "## Income summary",
-        income_summary_table(income),
+        "## 현금성 수익",
+        cash_income_cards(income_summary),
+        income_summary_table(income_summary if not income_summary.empty else income),
         "### Income status counts",
         status_count_table(income, "amount_review_status", "income"),
         "## Expense summary",
@@ -1185,6 +1242,11 @@ REQUIRED_OUTPUT_COLUMNS = {
         "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
         "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
         "affects_profit", "raw_memo",
+    ],
+    "income_summary.csv": [
+        "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",
+        "tax_krw_sum", "net_income_native", "net_income_krw", "row_count", "fx_missing_row_count",
+        "amount_review_needed_row_count", "income_status",
     ],
     "processed_expenses.csv": [
         "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
@@ -1500,6 +1562,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     cash = read_csv(processed_dir / "processed_cashflows.csv")
     dividends = read_csv(processed_dir / "processed_dividends.csv")
     income = read_csv(processed_dir / "processed_income.csv")
+    income_summary = read_csv(processed_dir / "income_summary.csv")
     expenses = read_csv(processed_dir / "processed_expenses.csv")
     fx_events = read_csv(processed_dir / "processed_fx_events.csv")
     sources = read_csv(processed_dir / "source_file_index.csv")
@@ -1519,7 +1582,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Exposure.md":
         return exposure_content(summary, holdings, warning)
     if name == "Cashflows.md":
-        return cashflow_content(cash, dividends, summary, income, expenses, fx_events)
+        return cashflow_content(cash, dividends, summary, income, income_summary, expenses, fx_events)
     if name == "Import_Review.md":
         return import_review_content(summary, sources, skipped, unclassified, warning, holdings, income, expenses, fx_events, amount_audit, unit_mismatch, processed_dir)
     if name == "Risk_Watchlist.md":
