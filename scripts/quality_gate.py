@@ -37,6 +37,7 @@ BLANK_VALUES = {"", "nan", "none", "na", "n/a", "<na>"}
 COMPANY_QA_EXCEPTION_IDS = {"INV-EX-03", "INV-EX-08"}
 CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
 BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
+REALIZED_COST_BASIS_METHOD = "fifo"
 DISALLOWED_CASHFLOW_TYPES = {
     "buy",
     "sell",
@@ -56,6 +57,7 @@ AMBIGUOUS_OR_UNRESOLVED_STATUSES = {
     "needs_review",
     "partial",
     "unclassified",
+    "lot_missing",
 }
 
 REQUIRED_OUTPUT_SCHEMAS = {
@@ -81,8 +83,9 @@ REQUIRED_OUTPUT_SCHEMAS = {
     ],
     "processed_realized_pnl.csv": [
         "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
-        "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "realized_pnl_krw",
-        "realized_result", "position_status", "amount_review_status", "amount_review_reason", "source_file",
+        "sell_import_id", "quantity_sold", "proceeds_krw", "cost_basis_krw", "cost_basis_method",
+        "realized_pnl_krw", "realized_result", "position_status", "amount_review_status",
+        "amount_review_reason", "source_file",
     ],
 }
 
@@ -102,6 +105,7 @@ REQUIRED_RECONCILIATION_METRICS = [
     "realized_pnl_krw",
     "realized_gain_krw",
     "realized_loss_krw",
+    "realized_cost_basis_method",
     "realized_pnl_status",
     "realized_pnl_row_count",
     "realized_pnl_unavailable_row_count",
@@ -428,6 +432,26 @@ def processed_output_schema_findings(processed_dir: Path) -> list[str]:
     return findings
 
 
+def realized_pnl_cost_basis_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        method = lower_value(row.get("cost_basis_method"))
+        if method != REALIZED_COST_BASIS_METHOD:
+            findings.append(
+                f"processed_realized_pnl.csv row {idx} cost_basis_method must be {REALIZED_COST_BASIS_METHOD}: "
+                f"{row.get('cost_basis_method')}"
+            )
+
+        status = lower_value(row.get("amount_review_status"))
+        if is_blank(status):
+            findings.append(f"processed_realized_pnl.csv row {idx} has blank amount_review_status")
+        if status == "ok" and is_blank(row.get("realized_pnl_krw", "")):
+            findings.append(f"processed_realized_pnl.csv row {idx} has status ok but blank realized_pnl_krw")
+        if status == "lot_missing" and not is_blank(row.get("realized_pnl_krw", "")):
+            findings.append(f"processed_realized_pnl.csv row {idx} has lot_missing status but realized_pnl_krw is populated")
+    return findings
+
+
 def audit_output_schema_findings(processed_dir: Path) -> list[str]:
     findings: list[str] = []
     required_by_file = {
@@ -633,6 +657,13 @@ def reconciliation_summary_findings(rows: list[dict[str, str]]) -> list[str]:
         value = optional_float(metrics.get(metric))
         if value is None or value < 0 or value != int(value):
             findings.append(f"reconciliation_summary.csv count metric {metric} must be a non-negative integer: {metrics.get(metric)}")
+
+    realized_cost_basis_method = str(metrics.get("realized_cost_basis_method", "") or "").strip().lower()
+    if realized_cost_basis_method != REALIZED_COST_BASIS_METHOD:
+        findings.append(
+            f"reconciliation_summary.csv realized_cost_basis_method must be {REALIZED_COST_BASIS_METHOD}: "
+            f"{metrics.get('realized_cost_basis_method')}"
+        )
 
     if str(metrics.get("fx_pnl_status", "")).strip().lower() != "unavailable":
         findings.append("reconciliation_summary.csv fx_pnl_status must remain unavailable")
@@ -1025,6 +1056,7 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     income = read_csv_rows(processed_dir / "processed_income.csv")
     expenses = read_csv_rows(processed_dir / "processed_expenses.csv")
     fx_events = read_csv_rows(processed_dir / "processed_fx_events.csv")
+    realized = read_csv_rows(processed_dir / "processed_realized_pnl.csv")
     amount_audit = read_csv_rows(processed_dir / "amount_unit_audit.csv")
     unit_mismatch_audit = read_csv_rows(processed_dir / "unit_mismatch_audit.csv")
     unclassified_rows = read_csv_rows(processed_dir / "unclassified_rows.csv")
@@ -1047,6 +1079,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "reconciliation_summary metric contract", "FAIL", "; ".join(reconciliation_findings[:5]))
     else:
         write_result(results, "reconciliation_summary metric contract", "PASS", "required reconciliation metrics exist and formulas/statuses are guarded.")
+
+    realized_cost_basis_findings = realized_pnl_cost_basis_findings(realized)
+    if realized_cost_basis_findings:
+        write_result(results, "realized PnL FIFO cost-basis contract", "FAIL", "; ".join(realized_cost_basis_findings[:5]))
+    else:
+        write_result(results, "realized PnL FIFO cost-basis contract", "PASS", f"{len(realized)} realized PnL rows use FIFO cost basis or no rows are present.")
 
     if not source_index:
         if not raw_excel_files(raw_dir):

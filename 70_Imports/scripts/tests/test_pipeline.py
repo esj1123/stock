@@ -53,6 +53,7 @@ from quality_gate import (
     principal_unit_misuse_findings,
     processed_cashflows_contract_findings,
     processed_output_schema_findings,
+    realized_pnl_cost_basis_findings,
     reconciliation_summary_findings,
     scan_generated_markdown_sensitive,
     snapshot_raw_files,
@@ -1116,6 +1117,41 @@ def test_quality_gate_requires_stage8_output_schemas(tmp_path: Path):
     findings = processed_output_schema_findings(processed)
     assert any("processed_income.csv missing required columns" in finding for finding in findings)
 
+    pd.DataFrame(columns=[col for col in REALIZED_PNL_OUTPUT_COLUMNS if col != "cost_basis_method"]).to_csv(processed / "processed_realized_pnl.csv", index=False)
+    findings = processed_output_schema_findings(processed)
+    assert any("processed_realized_pnl.csv missing required columns" in finding and "cost_basis_method" in finding for finding in findings)
+
+
+def test_quality_gate_validates_realized_pnl_fifo_cost_basis_rows():
+    valid_row = {
+        "ticker": "FIFO",
+        "sell_import_id": "sell-1",
+        "cost_basis_method": "fifo",
+        "realized_pnl_krw": "1500",
+        "amount_review_status": "ok",
+    }
+    assert realized_pnl_cost_basis_findings([valid_row]) == []
+
+    invalid_method_findings = realized_pnl_cost_basis_findings([{**valid_row, "cost_basis_method": "average"}])
+    assert any("cost_basis_method must be fifo" in finding for finding in invalid_method_findings)
+
+    blank_method_findings = realized_pnl_cost_basis_findings([{**valid_row, "cost_basis_method": ""}])
+    assert any("cost_basis_method must be fifo" in finding for finding in blank_method_findings)
+
+    ok_without_pnl_findings = realized_pnl_cost_basis_findings([{**valid_row, "realized_pnl_krw": ""}])
+    assert any("status ok but blank realized_pnl_krw" in finding for finding in ok_without_pnl_findings)
+
+    lot_missing_row = {
+        **valid_row,
+        "cost_basis_method": "fifo",
+        "realized_pnl_krw": "",
+        "amount_review_status": "lot_missing",
+    }
+    assert realized_pnl_cost_basis_findings([lot_missing_row]) == []
+
+    populated_lot_missing_findings = realized_pnl_cost_basis_findings([{**lot_missing_row, "realized_pnl_krw": "1500"}])
+    assert any("lot_missing status but realized_pnl_krw is populated" in finding for finding in populated_lot_missing_findings)
+
 
 def test_quality_gate_requires_audit_output_schemas(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
@@ -1171,6 +1207,7 @@ def valid_reconciliation_summary_rows(**overrides: object) -> list[dict[str, str
         "realized_pnl_krw": "0",
         "realized_gain_krw": "0",
         "realized_loss_krw": "0",
+        "realized_cost_basis_method": "fifo",
         "realized_pnl_status": "available",
         "realized_pnl_row_count": "0",
         "realized_pnl_unavailable_row_count": "0",
@@ -1209,6 +1246,15 @@ def test_quality_gate_requires_reconciliation_summary_metrics():
         row for row in valid_reconciliation_summary_rows() if row["metric"] != "distribution_income_krw"
     ])
     assert any("missing required metrics" in finding and "distribution_income_krw" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings([
+        row for row in valid_reconciliation_summary_rows() if row["metric"] != "realized_cost_basis_method"
+    ])
+    assert any("missing required metrics" in finding and "realized_cost_basis_method" in finding for finding in findings)
+
+    for invalid_method in ["", "average", "avg", "moving_average", "unknown"]:
+        findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_cost_basis_method=invalid_method))
+        assert any("realized_cost_basis_method must be fifo" in finding for finding in findings)
 
     assert reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_status="available")) == []
 
