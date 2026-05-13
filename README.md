@@ -75,6 +75,30 @@ If no action is passed to a wrapper, it defaults to `all`. Supported actions are
 
 Do not commit local raw input files or generated outputs. The ignored local folders should be created by the operator only inside a private working vault.
 
+## Performance Accounting Outputs
+
+The pipeline separates current holdings valuation from whole-investment performance accounting:
+
+- `portfolio_summary.csv` remains current-holdings-focused. Its `pnl_pct` is the current holdings valuation return, not whole-investment cumulative return.
+- `processed_realized_pnl.csv` is the realized PnL ledger. It records sold-position PnL from imported buy/sell transaction history using FIFO cost basis and must not create current holdings.
+- `income_summary.csv` summarizes dividend, interest, and distribution income separately by `income_type` and `currency_native`. Native amounts are preserved; official KRW income uses status-ok KRW rows only.
+- `performance_summary.csv` is the user-facing whole-investment performance summary. It exposes net external principal, current total assets, cumulative return, realized/unrealized PnL, income, expenses, and residual.
+- `reconciliation_summary.csv` is the audit/status/residual layer. It keeps `total_return_krw` / `total_return_pct` as aliases of `performance_summary.cumulative_return_krw` / `performance_summary.cumulative_return_pct`.
+
+Accounting rules:
+
+- Net external principal is external deposits minus external withdrawals. Realized gains, realized losses, dividends, interest, distributions, fees, and taxes do not adjust principal.
+- Cumulative return is `current_total_assets_krw - net_external_principal_krw`; cumulative return percent is that value divided by net external principal.
+- Explained profit uses gross realized trade PnL plus unrealized PnL plus dividend/interest/distribution income minus fee/tax. Fee/tax must be deducted separately exactly once.
+- Residual is `cumulative_return_krw - explained_profit_krw`.
+- FX-missing rows must preserve native amounts and must not make official KRW performance available without FX or broker-provided KRW provenance.
+- Transaction-history rows must stay in transaction/realized ledgers and must not be promoted into current holdings.
+
+Repository safety for these outputs:
+
+- Do not commit raw broker files, processed CSVs, generated dashboards, DB files, Excel files, account identifiers, private notes, or live vault outputs.
+- Do not edit the live Google Drive vault directly. Modify the baseline, run tests, run the quality gate, run a live-vault dry-run, review expected changes, then apply an actual live write only with explicit user intent.
+
 ## Live Vault Modification Policy
 
 Modify and validate the GitHub baseline first. Do not start by editing the Google Drive live Vault.
