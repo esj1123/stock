@@ -12,7 +12,9 @@ This baseline separates current holdings from performance accounting.
 
 - `performance_summary.csv` is the user-facing whole-investment performance summary.
 - `portfolio_summary.csv` remains current-holdings-focused.
-- `reconciliation_summary.csv` remains the audit/status/reconciliation layer until the next role-separation pass.
+- `reconciliation_summary.csv` is the audit/status/residual reconciliation layer.
+- `total_return_krw` / `total_return_pct` in reconciliation are aliases of `performance_summary.cumulative_return_krw` / `performance_summary.cumulative_return_pct`.
+- Further file or metric naming cleanup can remain a follow-up, but the role separation is implemented.
 - Current total assets are current cash plus current non-cash holding valuation.
 - Total cumulative PnL is `current total assets - net external principal`.
 - Total cumulative return is `total cumulative PnL / net external principal`.
