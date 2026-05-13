@@ -31,6 +31,12 @@ This baseline separates current holdings from performance accounting.
 - Fees and taxes are expense events.
 - Unexplained difference is `total cumulative PnL - explained profit`.
 
+## QA and Quality Gate
+
+- QA and quality gate protect the performance accounting layer from schema drift, dashboard label regression, non-KRW KRW provenance errors, fee/tax double counting, and transaction-history/current-holdings mixing.
+- QA findings are review controls and must not become investment recommendations or trading automation.
+- Current holdings return and whole-investment cumulative return must remain separately labeled.
+
 ## Safety
 
 - Transaction history must never be used to create current holdings.
