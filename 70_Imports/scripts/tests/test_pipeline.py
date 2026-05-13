@@ -2837,6 +2837,389 @@ def performance_metrics(processed: Path) -> dict[str, str]:
     return dict(zip(df["metric"], df["value"].fillna("")))
 
 
+def stage9_cash_holding(amount_krw: int | float) -> dict[str, object]:
+    return {
+        "ticker": "CASH_KRW",
+        "security_name": "Synthetic KRW Cash",
+        "account_type": "SYNTH",
+        "market": "KR",
+        "asset_type": "cash",
+        "currency": "KRW",
+        "currency_native": "KRW",
+        "balance_quantity": 1,
+        "evaluation_amount": amount_krw,
+        "evaluation_amount_krw": amount_krw,
+        "source_file_type": "holdings",
+    }
+
+
+def stage9_trade(
+    import_id: str,
+    ticker: str,
+    transaction_type: str,
+    amount_krw: int | float,
+    *,
+    quantity: int | float = 1,
+    trade_date: str = "2026-01-01",
+    security_name: str | None = None,
+    market: str = "US",
+    fee_krw: int | float = 0,
+    tax_krw: int | float = 0,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "import_id": import_id,
+        "source_file": "synthetic_stage9_transactions.csv",
+        "source_file_type": "transaction_history",
+        "account_type": "SYNTH",
+        "market": market,
+        "asset_type": "stock",
+        "ticker": ticker,
+        "security_name": security_name or f"{ticker} Synthetic",
+        "trade_date": trade_date,
+        "transaction_type": transaction_type,
+        "quantity": quantity,
+        "trade_amount_krw": amount_krw,
+        "amount_krw": amount_krw,
+        "currency_native": "KRW",
+        "amount_review_status": "ok",
+        "cashflow_role": "trade_settlement",
+    }
+    if fee_krw:
+        row["fee_native"] = fee_krw
+        row["fee_krw"] = fee_krw
+    if tax_krw:
+        row["tax_native"] = tax_krw
+        row["tax_krw"] = tax_krw
+    return row
+
+
+def stage9_sold_position_rows() -> list[dict[str, object]]:
+    return [
+        stage9_trade("buy-tsla-loss", "TSLA", "buy", 10000, trade_date="2026-01-01"),
+        stage9_trade("sell-tsla-loss", "TSLA", "sell", 7000, trade_date="2026-01-02"),
+        stage9_trade("buy-tsll-gain", "TSLL", "buy", 2000, trade_date="2026-01-03"),
+        stage9_trade("sell-tsll-gain", "TSLL", "sell", 2500, trade_date="2026-01-04"),
+        stage9_trade("buy-rgtz-loss", "RGTZ", "buy", 3000, trade_date="2026-01-05", market="KR"),
+        stage9_trade("sell-rgtz-loss", "RGTZ", "sell", 1500, trade_date="2026-01-06", market="KR"),
+    ]
+
+
+def test_stage9_loss_sales_do_not_change_principal_and_populate_realized_loss_metrics(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[stage9_cash_holding(96000)],
+        transaction_rows=stage9_sold_position_rows(),
+        cashflow_rows=[
+            {
+                "transaction_type": "deposit",
+                "cashflow_role": "external_principal",
+                "settlement_amount_krw": 100000,
+                "amount_krw": 100000,
+                "amount_review_status": "ok",
+                "affects_principal": True,
+            },
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    reconciliation = reconciliation_metrics(processed)
+    performance = performance_metrics(processed)
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    holdings = read_processed_csv(processed, "processed_holdings.csv")
+    realized_by_ticker = realized.set_index("ticker")
+
+    assert set(realized["ticker"]) == {"TSLA", "TSLL", "RGTZ"}
+    assert set(realized["position_status"]) == {"closed"}
+    assert set(realized["cost_basis_method"]) == {"fifo"}
+    assert set(holdings["ticker"]) == {"CASH_KRW"}
+    assert not {"TSLA", "TSLL", "RGTZ"}.intersection(set(holdings["ticker"]))
+
+    assert float(realized_by_ticker.loc["TSLA", "realized_trade_pnl_gross_krw"]) == -3000
+    assert realized_by_ticker.loc["TSLA", "realized_result"] == "loss"
+    assert float(realized_by_ticker.loc["TSLL", "realized_trade_pnl_gross_krw"]) == 500
+    assert realized_by_ticker.loc["TSLL", "realized_result"] == "gain"
+    assert float(realized_by_ticker.loc["RGTZ", "realized_trade_pnl_gross_krw"]) == -1500
+    assert realized_by_ticker.loc["RGTZ", "realized_result"] == "loss"
+
+    assert float(reconciliation["net_external_principal_krw"]) == 100000
+    assert float(performance["net_external_principal_krw"]) == 100000
+    assert float(reconciliation["realized_trade_pnl_gross_krw"]) == -4000
+    assert float(performance["realized_trade_pnl_gross_krw"]) == -4000
+    assert float(performance["realized_gain_krw"]) == 500
+    assert float(performance["realized_loss_krw"]) == -4500
+    assert float(performance["realized_loss_abs_krw"]) == 4500
+    assert float(performance["cumulative_return_krw"]) == -4000
+    assert float(performance["explained_profit_krw"]) == -4000
+    assert float(performance["reconciliation_residual_krw"]) == 0
+    assert reconciliation["realized_cost_basis_method"] == "fifo"
+    assert reconciliation["realized_pnl_status"] == "available"
+
+    principles = (Path(__file__).resolve().parents[3] / "05_Principles" / "Portfolio_Return_Principal_Rules.md").read_text(encoding="utf-8")
+    assert "FIFO cost-basis ledger" in principles
+
+
+def test_stage9_income_summary_separates_dividend_interest_and_distribution(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[stage9_cash_holding(104200)],
+        transaction_rows=[],
+        cashflow_rows=[
+            {
+                "transaction_type": "deposit",
+                "cashflow_role": "external_principal",
+                "settlement_amount_krw": 100000,
+                "amount_krw": 100000,
+                "amount_review_status": "ok",
+                "affects_principal": True,
+            },
+        ],
+        income_rows=[
+            {"income_type": "dividend", "currency_native": "KRW", "amount_native": 3000, "amount_krw": 3000, "tax_native": 0, "tax_krw": 0, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+            {"income_type": "interest", "currency_native": "KRW", "amount_native": 500, "amount_krw": 500, "tax_native": 0, "tax_krw": 0, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+            {"income_type": "distribution", "currency_native": "KRW", "amount_native": 700, "amount_krw": 700, "tax_native": 0, "tax_krw": 0, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    income_summary = read_processed_csv(processed, "income_summary.csv")
+    performance = performance_metrics(processed)
+    summary_by_type = income_summary.set_index("income_type")
+
+    assert set(income_summary["income_type"]) == {"dividend", "interest", "distribution"}
+    assert float(summary_by_type.loc["dividend", "amount_krw_sum"]) == 3000
+    assert float(summary_by_type.loc["interest", "amount_krw_sum"]) == 500
+    assert float(summary_by_type.loc["distribution", "amount_krw_sum"]) == 700
+    assert set(income_summary["income_status"]) == {"available"}
+    assert float(performance["dividend_income_krw"]) == 3000
+    assert float(performance["interest_income_krw"]) == 500
+    assert float(performance["distribution_income_krw"]) == 700
+    assert float(performance["income_total_krw"]) == 4200
+
+
+def test_stage9_fee_tax_are_separate_and_explained_profit_uses_gross_once(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[stage9_cash_holding(101820)],
+        transaction_rows=[
+            stage9_trade("buy-fee-tax-stage9", "FTX", "buy", 1000, trade_date="2026-01-01", market="KR"),
+            stage9_trade(
+                "sell-fee-tax-stage9",
+                "FTX",
+                "sell",
+                3000,
+                trade_date="2026-01-02",
+                market="KR",
+                fee_krw=120,
+                tax_krw=60,
+            ),
+        ],
+        cashflow_rows=[
+            {
+                "transaction_type": "deposit",
+                "cashflow_role": "external_principal",
+                "settlement_amount_krw": 100000,
+                "amount_krw": 100000,
+                "amount_review_status": "ok",
+                "affects_principal": True,
+            },
+        ],
+        expense_rows=[
+            {"expense_type": "fee", "currency_native": "KRW", "amount_native": 120, "amount_krw": 120, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+            {"expense_type": "tax", "currency_native": "KRW", "amount_native": 60, "amount_krw": 60, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    reconciliation = reconciliation_metrics(processed)
+    performance = performance_metrics(processed)
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    row = realized.iloc[0]
+
+    assert float(row["realized_trade_pnl_gross_krw"]) == 2000
+    assert float(row["realized_trade_pnl_net_krw"]) == 1820
+    assert float(performance["fee_expense_krw"]) == 120
+    assert float(performance["tax_expense_krw"]) == 60
+    assert float(performance["explained_profit_krw"]) == 1820
+    assert float(performance["explained_profit_krw"]) != 1640
+    assert float(reconciliation["explained_profit_krw"]) == 1820
+    assert float(reconciliation["residual_krw"]) == 0
+    assert float(performance["reconciliation_residual_krw"]) == 0
+
+
+def test_stage9_current_holdings_return_and_cumulative_return_stay_separately_labeled(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[
+            {
+                "ticker": "CURR",
+                "security_name": "Current Holding Synthetic",
+                "account_type": "SYNTH",
+                "market": "KR",
+                "asset_type": "stock",
+                "currency": "KRW",
+                "currency_native": "KRW",
+                "balance_quantity": 1,
+                "evaluation_amount": 100000,
+                "evaluation_amount_krw": 100000,
+                "unrealized_pnl": 1000,
+                "unrealized_pnl_krw": 1000,
+                "source_file_type": "holdings",
+            },
+        ],
+        transaction_rows=[],
+        cashflow_rows=[
+            {
+                "transaction_type": "deposit",
+                "cashflow_role": "external_principal",
+                "settlement_amount_krw": 70000,
+                "amount_krw": 70000,
+                "amount_review_status": "ok",
+                "affects_principal": True,
+            },
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    portfolio_summary = read_processed_csv(processed, "portfolio_summary.csv")
+    performance = performance_metrics(processed)
+    content = dashboard_content("Portfolio.md", processed)
+    holdings_return = float(portfolio_summary.loc[portfolio_summary["metric"].eq("pnl_pct"), "value"].iloc[0])
+    cumulative_return_pct = float(performance["cumulative_return_pct"])
+
+    assert holdings_return == round(1000 / 99000 * 100, 4)
+    assert round(cumulative_return_pct, 6) == round(30000 / 70000 * 100, 6)
+    assert round(holdings_return, 6) != round(cumulative_return_pct, 6)
+    assert '<span class="stock-kpi-label">Return</span>' not in content
+    assert "Portfolio Cost Basis" not in content
+    assert "Total Return %" not in content
+
+
+def test_stage9_transaction_history_only_does_not_create_current_holdings(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "source_file": "synthetic_stage9_transactions.csv",
+            "source_file_type": "transaction_history",
+            "account_type": "SYNTH",
+        },
+    ]).to_csv(processed / "source_file_index.csv", index=False)
+    pd.DataFrame([
+        stage9_trade("buy-history-only", "HIST", "buy", 1000, trade_date="2026-01-01", market="KR"),
+        stage9_trade("sell-history-only", "HIST", "sell", 1500, trade_date="2026-01-02", market="KR"),
+    ]).to_csv(processed / "processed_transactions.csv", index=False)
+    pd.DataFrame(columns=["ticker", "security_name", "asset_type", "source_file_type", "balance_quantity", "evaluation_amount", "pnl_pct"]).to_csv(processed / "processed_holdings.csv", index=False)
+    pd.DataFrame(columns=["transaction_type", "cashflow_role", "amount_krw", "amount_review_status", "affects_principal"]).to_csv(processed / "processed_cashflows.csv", index=False)
+    pd.DataFrame(columns=INCOME_OUTPUT_COLUMNS).to_csv(processed / "processed_income.csv", index=False)
+    pd.DataFrame(columns=EXPENSE_OUTPUT_COLUMNS).to_csv(processed / "processed_expenses.csv", index=False)
+    pd.DataFrame(columns=FX_EVENT_COLUMNS).to_csv(processed / "processed_fx_events.csv", index=False)
+
+    result = generate_reports(tmp_path, processed_dir=processed)
+    holdings = read_processed_csv(processed, "processed_holdings.csv")
+    portfolio_summary = read_processed_csv(processed, "portfolio_summary.csv")
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    summary = dict(zip(portfolio_summary["metric"], portfolio_summary["value"].fillna("")))
+
+    assert result["holding_rows"] == 0
+    assert holdings.empty
+    assert summary["holding_count"] == "0"
+    assert summary["balance_data_available"] in {False, "False", "false"}
+    assert set(realized["ticker"]) == {"HIST"}
+
+
+def test_stage9_fx_missing_preserves_native_realized_amounts_and_blocks_official_krw(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[stage9_cash_holding(100000)],
+        transaction_rows=[
+            {
+                "import_id": "buy-fx-stage9",
+                "source_file": "synthetic_stage9_transactions.csv",
+                "source_file_type": "transaction_history",
+                "account_type": "SYNTH",
+                "market": "US",
+                "asset_type": "stock",
+                "ticker": "FXMISS",
+                "security_name": "FX Missing Synthetic",
+                "trade_date": "2026-01-01",
+                "transaction_type": "buy",
+                "quantity": 1,
+                "trade_amount": 100,
+                "currency_native": "USD",
+                "amount_review_status": "fx_missing",
+                "cashflow_role": "trade_settlement",
+            },
+            {
+                "import_id": "sell-fx-stage9",
+                "source_file": "synthetic_stage9_transactions.csv",
+                "source_file_type": "transaction_history",
+                "account_type": "SYNTH",
+                "market": "US",
+                "asset_type": "stock",
+                "ticker": "FXMISS",
+                "security_name": "FX Missing Synthetic",
+                "trade_date": "2026-01-02",
+                "transaction_type": "sell",
+                "quantity": 1,
+                "trade_amount": 120,
+                "currency_native": "USD",
+                "amount_review_status": "fx_missing",
+                "cashflow_role": "trade_settlement",
+            },
+        ],
+        cashflow_rows=[
+            {
+                "transaction_type": "deposit",
+                "cashflow_role": "external_principal",
+                "settlement_amount_krw": 100000,
+                "amount_krw": 100000,
+                "amount_review_status": "ok",
+                "affects_principal": True,
+            },
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    reconciliation = reconciliation_metrics(processed)
+    performance = performance_metrics(processed)
+    row = realized.iloc[0]
+
+    assert float(row["proceeds_native"]) == 120
+    assert float(row["cost_basis_native"]) == 100
+    assert float(row["realized_trade_pnl_gross_native"]) == 20
+    assert is_blank_or_na(row["proceeds_krw"])
+    assert is_blank_or_na(row["realized_trade_pnl_gross_krw"])
+    assert row["amount_review_status"] == "fx_missing"
+    assert row["fx_status"] == "fx_missing"
+    assert reconciliation["realized_pnl_status"] == "fx_missing"
+    assert reconciliation["explained_profit_status"] == "fx_missing"
+    assert performance["realized_pnl_status"] == "fx_missing"
+    assert performance["performance_status"] == "fx_missing"
+    assert performance["explained_profit_krw"] == ""
+
+
+def test_stage9_markdown_update_preserves_user_content_outside_auto_generated(tmp_path: Path):
+    note = tmp_path / "10_Dashboard" / "Portfolio.md"
+    note.parent.mkdir(parents=True)
+    before = "# Portfolio\n\nmanual before\n\n<!-- AUTO-GENERATED:START -->\nold\n<!-- AUTO-GENERATED:END -->\n\nmanual after\n"
+    note.write_text(before, encoding="utf-8")
+
+    ok, _ = replace_autogenerated_block(note, "new generated dashboard")
+    text = note.read_text(encoding="utf-8")
+
+    assert ok
+    assert "new generated dashboard" in text
+    assert "manual before" in text
+    assert "manual after" in text
+    assert "old" not in text
+
+
 def test_reconciliation_total_return_available_with_krw_assets_and_principal(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     write_reconciliation_baseline(
