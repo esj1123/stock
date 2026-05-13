@@ -24,6 +24,28 @@ BLANK_VALUES = {"", "nan", "none", "na", "n/a", "<na>", "-", "--"}
 BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
 FX_KRW_SOURCES = {"fx_rate_to_krw", "derived_krw_from_fx"}
 RESIDUAL_EXCEPTION_THRESHOLD_KRW = 1000.0
+REQUIRED_QA_OUTPUT_SCHEMAS = {
+    "income_summary.csv": {
+        "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",
+        "tax_krw_sum", "net_income_native", "net_income_krw", "row_count", "fx_missing_row_count",
+        "amount_review_needed_row_count", "income_status",
+    },
+    "performance_summary.csv": {"metric", "value"},
+    "processed_realized_pnl.csv": {
+        "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
+        "sell_import_id", "quantity_sold", "proceeds_native", "proceeds_krw", "cost_basis_native",
+        "cost_basis_krw", "fee_native", "fee_krw", "tax_native", "tax_krw",
+        "realized_trade_pnl_gross_native", "realized_trade_pnl_gross_krw",
+        "realized_trade_pnl_net_native", "realized_trade_pnl_net_krw", "realized_result",
+        "position_status", "cost_basis_method", "amount_review_status", "fx_status",
+        "amount_review_reason", "source_file",
+    },
+}
+DASHBOARD_RETURN_LABEL_PATTERNS = [
+    '<span class="stock-kpi-label">Return</span>',
+    "Portfolio Cost Basis",
+    "Total Return %",
+]
 
 
 def read_csv(path: Path) -> pd.DataFrame:
@@ -139,7 +161,15 @@ def active_company_note_targets(vault_root: Path, processed_dir: Path) -> dict[s
 
 
 def reconciliation_summary_metrics(processed_dir: Path) -> dict[str, str]:
-    summary = read_csv(processed_dir / "reconciliation_summary.csv")
+    return metric_summary(processed_dir / "reconciliation_summary.csv")
+
+
+def performance_summary_metrics(processed_dir: Path) -> dict[str, str]:
+    return metric_summary(processed_dir / "performance_summary.csv")
+
+
+def metric_summary(path: Path) -> dict[str, str]:
+    summary = read_csv(path)
     if summary.empty or "metric" not in summary.columns or "value" not in summary.columns:
         return {}
     return {
@@ -222,6 +252,32 @@ def add_non_krw_provenance_exceptions(rows: list[dict[str, Any]], df: pd.DataFra
                 processed_row_ref(file_name, idx),
                 "Non-KRW amount has amount_krw populated without FX rate or broker KRW provenance.",
                 "Add fx_rate_to_krw or broker KRW source metadata before treating the KRW amount as official.",
+            )
+
+
+def add_holding_non_krw_official_total_exceptions(rows: list[dict[str, Any]], holdings: pd.DataFrame) -> None:
+    if holdings.empty:
+        return
+    for idx, row in holdings.reset_index(drop=True).iterrows():
+        currency = row_currency(row)
+        if not currency or currency == "KRW" or is_blank(row.get("evaluation_amount_krw", "")):
+            continue
+        fx_rate = row.get("fx_rate_to_krw", row.get("fx_rate", ""))
+        amount_source = lower_value(row.get("amount_krw_source", ""))
+        amount_basis = lower_value(row.get("amount_basis", ""))
+        has_provenance = (
+            not is_blank(fx_rate)
+            or amount_source in BROKER_KRW_SOURCES | FX_KRW_SOURCES
+            or amount_basis in BROKER_KRW_SOURCES | FX_KRW_SOURCES
+        )
+        if not has_provenance:
+            add(
+                rows,
+                "REC-EX-08",
+                "blocking",
+                processed_row_ref("processed_holdings.csv", idx),
+                "Non-KRW current holding has official KRW valuation without FX rate or broker KRW provenance.",
+                "Add fx_rate_to_krw or broker KRW source metadata before treating the KRW valuation as official.",
             )
 
 
@@ -360,6 +416,168 @@ def add_reconciliation_summary_exceptions(rows: list[dict[str, Any]], processed_
             "Review processed_realized_pnl.csv and imported transaction history before treating profit decomposition as complete.",
         )
 
+    realized_basis = lower_value(metrics.get("realized_pnl_basis", ""))
+    fee_tax_treatment = lower_value(metrics.get("fee_tax_treatment", ""))
+    if (
+        realized_basis
+        and realized_basis != "gross_trade_pnl_krw_fee_tax_separate"
+    ) or (
+        fee_tax_treatment
+        and fee_tax_treatment != "gross_realized_pnl_minus_fee_tax_separate"
+    ):
+        add(
+            rows,
+            "REC-EX-14",
+            "blocking",
+            "70_Imports/processed/reconciliation_summary.csv",
+            "Realized PnL fee/tax treatment is not the expected gross-PnL-minus-fee-tax-separate basis.",
+            "Use gross realized trade PnL in explained profit and deduct fee/tax separately exactly once.",
+        )
+
+    gross = optional_number(metrics.get("realized_trade_pnl_gross_krw", ""))
+    net = optional_number(metrics.get("realized_trade_pnl_net_krw", ""))
+    unrealized = optional_number(metrics.get("unrealized_pnl_krw", ""))
+    dividend = optional_number(metrics.get("dividend_income_krw", ""))
+    interest = optional_number(metrics.get("interest_income_krw", ""))
+    distribution = optional_number(metrics.get("distribution_income_krw", ""))
+    fee = optional_number(metrics.get("fee_expense_krw", ""))
+    tax = optional_number(metrics.get("tax_expense_krw", ""))
+    explained = optional_number(metrics.get("explained_profit_krw", ""))
+    if all(value is not None for value in [gross, net, unrealized, dividend, interest, distribution, fee, tax, explained]):
+        expected_gross_basis = gross + unrealized + dividend + interest + distribution - fee - tax
+        expected_double_count = net + unrealized + dividend + interest + distribution - fee - tax
+        if abs(explained - expected_double_count) <= 0.0001 and abs(expected_gross_basis - expected_double_count) > 0.0001:
+            add(
+                rows,
+                "REC-EX-14",
+                "blocking",
+                "70_Imports/processed/reconciliation_summary.csv",
+                "Explained profit appears to use net realized PnL and deduct fee/tax again.",
+                "Use gross realized trade PnL and deduct fee/tax separately to avoid double counting.",
+            )
+
+
+def add_performance_summary_exceptions(rows: list[dict[str, Any]], processed_dir: Path) -> None:
+    metrics = performance_summary_metrics(processed_dir)
+    if not metrics:
+        return
+    residual = optional_number(metrics.get("reconciliation_residual_krw", ""))
+    if residual is not None and abs(residual) > RESIDUAL_EXCEPTION_THRESHOLD_KRW:
+        add(
+            rows,
+            "REC-EX-15",
+            "advisory",
+            "70_Imports/processed/performance_summary.csv",
+            "Whole-investment cumulative return and explained profit residual exceeds configured threshold.",
+            "Review realized PnL, income, expenses, FX status, and principal classifications for unexplained difference.",
+        )
+    status = lower_value(metrics.get("performance_status", ""))
+    if status and status != "available":
+        add(
+            rows,
+            "REC-EX-16",
+            "advisory",
+            "70_Imports/processed/performance_summary.csv",
+            "Whole-investment performance summary is not fully available.",
+            "Resolve realized PnL, income, FX, and amount review statuses before treating performance as official.",
+        )
+
+
+def add_output_schema_exceptions(rows: list[dict[str, Any]], processed_dir: Path) -> None:
+    for file_name, required_columns in REQUIRED_QA_OUTPUT_SCHEMAS.items():
+        path = processed_dir / file_name
+        if not path.exists():
+            add(
+                rows,
+                "REC-EX-11",
+                "blocking",
+                f"70_Imports/processed/{file_name}",
+                f"{file_name} is missing from processed outputs.",
+                "Regenerate processed outputs before relying on performance accounting dashboards.",
+            )
+            continue
+        df = read_csv(path)
+        missing = sorted(required_columns.difference(df.columns))
+        if missing:
+            add(
+                rows,
+                "REC-EX-11",
+                "blocking",
+                f"70_Imports/processed/{file_name}",
+                f"{file_name} is missing required columns: {', '.join(missing)}.",
+                "Regenerate processed outputs with the current schema before relying on performance accounting dashboards.",
+            )
+
+
+def add_realized_ledger_exceptions(rows: list[dict[str, Any]], realized: pd.DataFrame) -> None:
+    if realized.empty:
+        return
+    for idx, row in realized.reset_index(drop=True).iterrows():
+        status = row_status(row, "amount_review_status")
+        fx_status = row_status(row, "fx_status")
+        reason = lower_value(row.get("amount_review_reason", ""))
+        if status and status != "ok":
+            add(
+                rows,
+                "REC-EX-12",
+                "advisory",
+                processed_row_ref("processed_realized_pnl.csv", idx),
+                "Realized PnL ledger row requires review before official profit decomposition.",
+                "Review amount_review_status/fx_status and keep official KRW realized PnL blank until resolved.",
+            )
+        elif fx_status == "fx_missing":
+            add(
+                rows,
+                "REC-EX-12",
+                "advisory",
+                processed_row_ref("processed_realized_pnl.csv", idx),
+                "Realized PnL ledger row has missing FX status.",
+                "Review FX source or broker KRW amount provenance before relying on official realized PnL.",
+            )
+        if status == "lot_missing" or "sell quantity exceeds" in reason:
+            add(
+                rows,
+                "REC-EX-13",
+                "advisory",
+                processed_row_ref("processed_realized_pnl.csv", idx),
+                "Sell quantity exceeds matched FIFO buy lots.",
+                "Review imported transaction history coverage; do not treat this realized PnL row as official until prior buy lots are available.",
+            )
+
+
+def add_current_holdings_source_exceptions(rows: list[dict[str, Any]], holdings: pd.DataFrame) -> None:
+    if holdings.empty:
+        return
+    for idx, row in holdings.reset_index(drop=True).iterrows():
+        source_type = lower_value(row.get("source_file_type", ""))
+        if source_type in {"transaction_history", "transactions"}:
+            add(
+                rows,
+                "REC-EX-18",
+                "blocking",
+                processed_row_ref("processed_holdings.csv", idx),
+                "Transaction-history row appears in current holdings.",
+                "Use only balance/holdings source rows for current holdings; keep transaction history in ledgers only.",
+            )
+
+
+def add_dashboard_label_exceptions(rows: list[dict[str, Any]], vault_root: Path) -> None:
+    path = vault_root / "10_Dashboard" / "Portfolio.md"
+    if not path.exists():
+        return
+    text = path.read_text(encoding="utf-8-sig", errors="ignore")
+    for block in generated_blocks(text):
+        if any(pattern in block for pattern in DASHBOARD_RETURN_LABEL_PATTERNS):
+            add(
+                rows,
+                "REC-EX-17",
+                "blocking",
+                "10_Dashboard/Portfolio.md",
+                "Portfolio dashboard has legacy return/cost labels that can confuse current holdings return with cumulative return.",
+                "Use current-holdings labels for portfolio_summary.pnl_pct and cumulative-return labels for performance_summary metrics.",
+            )
+            return
+
 
 def add_reconciliation_quality_exceptions(rows: list[dict[str, Any]], processed_dir: Path) -> None:
     amount_audit = read_csv(processed_dir / "amount_unit_audit.csv")
@@ -369,7 +587,10 @@ def add_reconciliation_quality_exceptions(rows: list[dict[str, Any]], processed_
     income = read_csv(processed_dir / "processed_income.csv")
     expenses = read_csv(processed_dir / "processed_expenses.csv")
     fx_events = read_csv(processed_dir / "processed_fx_events.csv")
+    holdings = read_csv(processed_dir / "processed_holdings.csv")
+    realized = read_csv(processed_dir / "processed_realized_pnl.csv")
 
+    add_output_schema_exceptions(rows, processed_dir)
     add_status_exceptions_from_frame(rows, amount_audit, "amount_unit_audit.csv", ("amount_review_status", "fx_rate_status"))
     add_status_exceptions_from_frame(rows, unit_mismatch, "unit_mismatch_audit.csv", ("amount_normalization_status",))
 
@@ -381,15 +602,20 @@ def add_reconciliation_quality_exceptions(rows: list[dict[str, Any]], processed_
         ("processed_income.csv", income),
         ("processed_expenses.csv", expenses),
         ("processed_fx_events.csv", fx_events),
+        ("processed_holdings.csv", holdings),
     ]:
         add_non_krw_provenance_exceptions(rows, df, file_name)
         add_quantity_price_exceptions(rows, df, file_name)
 
+    add_holding_non_krw_official_total_exceptions(rows, holdings)
+    add_realized_ledger_exceptions(rows, realized)
+    add_current_holdings_source_exceptions(rows, holdings)
     add_exchange_exceptions(rows, transactions, "processed_transactions.csv")
     add_exchange_exceptions(rows, cashflows, "processed_cashflows.csv")
     add_exchange_exceptions(rows, fx_events, "processed_fx_events.csv")
     add_income_exclusion_exceptions(rows, income, transactions)
     add_reconciliation_summary_exceptions(rows, processed_dir)
+    add_performance_summary_exceptions(rows, processed_dir)
 
 
 def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = False) -> pd.DataFrame:
@@ -443,6 +669,8 @@ def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = 
         for block in generated_blocks(text):
             if detect_sensitive(block):
                 add(rows, "INV-EX-12", "blocking", str(path.relative_to(vault_root)), "대시보드 generated block에 민감정보 후보가 있습니다.", "redaction을 적용하세요.")
+
+    add_dashboard_label_exceptions(rows, vault_root)
 
     holdings = read_csv(processed_dir / "processed_holdings.csv")
     if not holdings.empty:

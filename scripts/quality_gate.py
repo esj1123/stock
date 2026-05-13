@@ -431,6 +431,25 @@ def scan_generated_markdown_sensitive(vault_root: Path) -> list[str]:
     return findings
 
 
+def dashboard_return_label_findings(vault_root: Path) -> list[str]:
+    path = vault_root / "10_Dashboard" / "Portfolio.md"
+    if not path.exists():
+        return []
+    text = path.read_text(encoding="utf-8-sig", errors="ignore")
+    block_pattern = re.compile(re.escape(AUTO_START) + r"(.*?)" + re.escape(AUTO_END), re.S)
+    forbidden = [
+        '<span class="stock-kpi-label">Return</span>',
+        "Portfolio Cost Basis",
+        "Total Return %",
+    ]
+    findings: list[str] = []
+    for block in (match.group(1) for match in block_pattern.finditer(text)):
+        matches = [label for label in forbidden if label in block]
+        if matches:
+            findings.append("Portfolio.md generated block contains ambiguous return/cost labels: " + ", ".join(matches))
+    return findings
+
+
 def summary_map(processed_dir: Path) -> dict[str, str]:
     return {row.get("metric", ""): row.get("value", "") for row in read_csv_rows(processed_dir / "portfolio_summary.csv")}
 
@@ -583,6 +602,57 @@ def realized_pnl_cost_basis_findings(rows: list[dict[str, str]]) -> list[str]:
                 findings.append(f"processed_realized_pnl.csv row {idx} has fx_missing but amount_review_status is ok")
             if not is_blank(row.get("realized_trade_pnl_gross_krw", "")) or not is_blank(row.get("realized_trade_pnl_net_krw", "")):
                 findings.append(f"processed_realized_pnl.csv row {idx} has fx_missing but official KRW realized PnL is populated")
+    return findings
+
+
+def realized_pnl_review_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    review_statuses = {
+        "fx_missing",
+        "lot_missing",
+        "needs_review",
+        "amount_review_needed",
+        "currency_ambiguous",
+        "unit_ambiguous",
+    }
+    for idx, row in enumerate(rows, start=2):
+        status = lower_value(row.get("amount_review_status"))
+        fx_status = lower_value(row.get("fx_status"))
+        reason = lower_value(row.get("amount_review_reason"))
+        if status in review_statuses or fx_status == "fx_missing":
+            findings.append(f"processed_realized_pnl.csv row {idx} requires review: amount_review_status={status or '<blank>'} fx_status={fx_status or '<blank>'}")
+        if status == "lot_missing" or "sell quantity exceeds" in reason:
+            findings.append(f"processed_realized_pnl.csv row {idx} sell quantity exceeds matched FIFO buy lots")
+    return findings
+
+
+def official_krw_total_provenance_findings(holdings: list[dict[str, str]], realized: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(holdings, start=2):
+        currency = row_currency(row)
+        if is_blank(currency) or currency == "KRW" or is_blank(row.get("evaluation_amount_krw", "")):
+            continue
+        fx_rate = row.get("fx_rate_to_krw", "") or row.get("fx_rate", "")
+        amount_source = lower_value(row.get("amount_krw_source"))
+        amount_basis = lower_value(row.get("amount_basis"))
+        if is_blank(fx_rate) and amount_source not in BROKER_KRW_SOURCES | {"derived_krw_from_fx"} and amount_basis not in BROKER_KRW_SOURCES | {"derived_krw_from_fx"}:
+            findings.append(f"processed_holdings row {idx} non-KRW evaluation_amount_krw lacks FX or broker KRW provenance")
+    for idx, row in enumerate(realized, start=2):
+        currency = row_currency(row)
+        if is_blank(currency) or currency == "KRW":
+            continue
+        populated = [
+            field
+            for field in [
+                "proceeds_krw",
+                "cost_basis_krw",
+                "realized_trade_pnl_gross_krw",
+                "realized_trade_pnl_net_krw",
+            ]
+            if not is_blank(row.get(field, ""))
+        ]
+        if populated and lower_value(row.get("fx_status")) not in {"available", "broker_krw", "not_required"}:
+            findings.append(f"processed_realized_pnl.csv row {idx} non-KRW official KRW fields lack available FX/broker status: {', '.join(populated)}")
     return findings
 
 
@@ -1186,6 +1256,7 @@ def performance_summary_findings(
         optional_float(metrics.get("fee_expense_krw")),
         optional_float(metrics.get("tax_expense_krw")),
     ]
+    realized_net = optional_float(metrics.get("realized_trade_pnl_net_krw"))
     explained = optional_float(metrics.get("explained_profit_krw"))
     if all(value is not None for value in explained_inputs):
         expected_explained = (
@@ -1201,6 +1272,18 @@ def performance_summary_findings(
             findings.append("performance_summary.csv explained_profit_krw is blank despite available components")
         elif abs(explained - expected_explained) > 0.0001:
             findings.append("performance_summary.csv explained_profit_krw formula mismatch")
+        if realized_net is not None and explained is not None:
+            expected_double_count = (
+                realized_net
+                + explained_inputs[1]
+                + explained_inputs[2]
+                + explained_inputs[3]
+                + explained_inputs[4]
+                - explained_inputs[5]
+                - explained_inputs[6]
+            )
+            if abs(explained - expected_double_count) <= 0.0001 and abs(expected_explained - expected_double_count) > 0.0001:
+                findings.append("performance_summary.csv explained_profit_krw appears to double-count fee/tax by using net realized PnL and subtracting fee/tax again")
 
     residual = optional_float(metrics.get("reconciliation_residual_krw"))
     if cumulative_return is not None and explained is not None:
@@ -1593,6 +1676,18 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
             f"{len(realized)} processed_realized_pnl.csv ledger rows use FIFO cost basis and gross/net formula guards or no rows are present.",
         )
 
+    realized_review_findings = realized_pnl_review_findings(realized)
+    if realized_review_findings:
+        write_result(results, "realized PnL ledger review statuses", "WARN", "; ".join(realized_review_findings[:5]))
+    else:
+        write_result(results, "realized PnL ledger review statuses", "PASS", "no realized PnL ledger rows require amount/FX review.")
+
+    official_krw_provenance = official_krw_total_provenance_findings(holdings, realized)
+    if official_krw_provenance:
+        write_result(results, "official KRW total provenance", "FAIL", "; ".join(official_krw_provenance[:5]))
+    else:
+        write_result(results, "official KRW total provenance", "PASS", "non-KRW official KRW totals have FX or broker status/provenance.")
+
     if not source_index:
         if not raw_excel_files(raw_dir):
             write_result(results, "processed/source_file_index.csv", "PASS", "no raw broker Excel files present in clean baseline; processed integrity checks skipped.")
@@ -1798,6 +1893,11 @@ def quality_gate(vault_root: Path) -> int:
         write_result(results, "generated Markdown sensitive scan", "FAIL", "; ".join(sensitive_findings[:10]))
     else:
         write_result(results, "generated Markdown sensitive scan", "PASS", "no sensitive-data candidates in AUTO-GENERATED blocks.")
+    label_findings = dashboard_return_label_findings(vault_root)
+    if label_findings:
+        write_result(results, "Portfolio dashboard return label contract", "FAIL", "; ".join(label_findings[:5]))
+    else:
+        write_result(results, "Portfolio dashboard return label contract", "PASS", "Portfolio dashboard does not use legacy ambiguous return/cost labels.")
 
     final_status = worst_status(results)
     print(f"[{final_status}] quality_gate: {len(results)} checks completed.")

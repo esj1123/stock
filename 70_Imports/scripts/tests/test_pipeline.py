@@ -52,11 +52,14 @@ from quality_gate import (
     invalid_currency_findings,
     live_vault_actual_write_guard_findings,
     non_krw_amount_without_fx_findings,
+    dashboard_return_label_findings,
+    official_krw_total_provenance_findings,
     principal_unit_misuse_findings,
     processed_cashflows_contract_findings,
     processed_output_schema_findings,
     performance_summary_findings,
     realized_pnl_cost_basis_findings,
+    realized_pnl_review_findings,
     reconciliation_summary_findings,
     scan_generated_markdown_sensitive,
     snapshot_raw_files,
@@ -1323,6 +1326,76 @@ def test_quality_gate_validates_realized_pnl_fifo_cost_basis_rows():
     assert any("fx_missing but official KRW realized PnL is populated" in finding for finding in fx_missing_populated)
 
 
+def test_quality_gate_flags_realized_review_statuses_and_lot_missing_without_private_amounts():
+    rows = [
+        {
+            "ticker": "SYN",
+            "quantity_sold": "999",
+            "amount_review_status": "fx_missing",
+            "fx_status": "fx_missing",
+            "amount_review_reason": "broker reference synthetic-account-token amount synthetic-cash-token",
+        },
+        {
+            "ticker": "MISS",
+            "quantity_sold": "2",
+            "amount_review_status": "lot_missing",
+            "fx_status": "not_required",
+            "amount_review_reason": "sell quantity exceeds matched buy lots",
+        },
+    ]
+
+    findings = realized_pnl_review_findings(rows)
+    text = "\n".join(findings)
+
+    assert any("requires review" in finding for finding in findings)
+    assert any("sell quantity exceeds matched FIFO buy lots" in finding for finding in findings)
+    assert "synthetic-cash-token" not in text
+    assert "synthetic-account-token" not in text
+
+
+def test_quality_gate_flags_official_krw_totals_without_fx_or_broker_provenance():
+    findings = official_krw_total_provenance_findings(
+        holdings=[
+            {"ticker": "AAPL", "currency_native": "USD", "evaluation_amount_krw": "140000", "fx_rate_to_krw": "", "amount_basis": ""},
+        ],
+        realized=[
+            {"ticker": "TSLA", "currency_native": "USD", "proceeds_krw": "140000", "fx_status": "fx_missing"},
+        ],
+    )
+
+    assert any("processed_holdings row 2 non-KRW evaluation_amount_krw lacks FX or broker KRW provenance" in finding for finding in findings)
+    assert any("processed_realized_pnl.csv row 2 non-KRW official KRW fields lack available FX/broker status" in finding for finding in findings)
+    assert official_krw_total_provenance_findings(
+        holdings=[
+            {"ticker": "AAPL", "currency_native": "USD", "evaluation_amount_krw": "140000", "fx_rate_to_krw": "1400"},
+        ],
+        realized=[
+            {"ticker": "TSLA", "currency_native": "USD", "proceeds_krw": "140000", "fx_status": "available"},
+        ],
+    ) == []
+
+
+def test_quality_gate_flags_ambiguous_portfolio_dashboard_return_labels(tmp_path: Path):
+    dashboard = tmp_path / "10_Dashboard"
+    dashboard.mkdir(parents=True)
+    (dashboard / "Portfolio.md").write_text(
+        "# Portfolio\n\n"
+        f"{AUTO_START}\n"
+        '<span class="stock-kpi-label">Return</span>\n'
+        "Portfolio Cost Basis\n"
+        "Total Return %\n"
+        f"{AUTO_END}\n",
+        encoding="utf-8",
+    )
+
+    findings = dashboard_return_label_findings(tmp_path)
+
+    assert findings
+    assert "Return" in findings[0]
+    assert "Portfolio Cost Basis" in findings[0]
+    assert "Total Return %" in findings[0]
+
+
 def test_quality_gate_requires_audit_output_schemas(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     processed.mkdir(parents=True)
@@ -1471,6 +1544,21 @@ def test_quality_gate_requires_performance_summary_metrics_and_formulas():
 
     findings = performance_summary_findings(valid_performance_summary_rows(explained_profit_krw="19000"))
     assert any("explained_profit_krw formula mismatch" in finding for finding in findings)
+
+    findings = performance_summary_findings(valid_performance_summary_rows(
+        realized_trade_pnl_gross_krw="2000",
+        realized_trade_pnl_net_krw="1820",
+        unrealized_pnl_krw="0",
+        dividend_income_krw="0",
+        interest_income_krw="0",
+        distribution_income_krw="0",
+        income_total_krw="0",
+        fee_expense_krw="120",
+        tax_expense_krw="60",
+        explained_profit_krw="1640",
+        reconciliation_residual_krw="18360",
+    ))
+    assert any("double-count fee/tax" in finding for finding in findings)
 
     findings = performance_summary_findings(valid_performance_summary_rows(
         current_total_assets_krw="",
@@ -4089,9 +4177,18 @@ def write_reconciliation_qa_inputs(
     cashflow_rows: list[dict[str, object]] | None = None,
     income_rows: list[dict[str, object]] | None = None,
     fx_rows: list[dict[str, object]] | None = None,
+    holdings_rows: list[dict[str, object]] | None = None,
+    realized_rows: list[dict[str, object]] | None = None,
+    income_summary_rows: list[dict[str, object]] | None = None,
+    performance_rows: list[dict[str, object]] | None = None,
     reconciliation_rows: list[dict[str, object]] | None = None,
+    write_required_outputs: bool = True,
 ) -> None:
     processed.mkdir(parents=True, exist_ok=True)
+    if write_required_outputs:
+        pd.DataFrame(income_summary_rows or [], columns=INCOME_SUMMARY_OUTPUT_COLUMNS).to_csv(processed / "income_summary.csv", index=False)
+        pd.DataFrame(performance_rows or valid_performance_summary_rows()).to_csv(processed / "performance_summary.csv", index=False)
+        pd.DataFrame(realized_rows or [], columns=REALIZED_PNL_OUTPUT_COLUMNS).to_csv(processed / "processed_realized_pnl.csv", index=False)
     if amount_rows is not None:
         pd.DataFrame(amount_rows).to_csv(processed / "amount_unit_audit.csv", index=False)
     if unit_mismatch_rows is not None:
@@ -4102,6 +4199,8 @@ def write_reconciliation_qa_inputs(
         pd.DataFrame(income_rows).to_csv(processed / "processed_income.csv", index=False)
     if fx_rows is not None:
         pd.DataFrame(fx_rows).to_csv(processed / "processed_fx_events.csv", index=False)
+    if holdings_rows is not None:
+        pd.DataFrame(holdings_rows).to_csv(processed / "processed_holdings.csv", index=False)
     if reconciliation_rows is not None:
         pd.DataFrame(reconciliation_rows).to_csv(processed / "reconciliation_summary.csv", index=False)
 
@@ -4259,6 +4358,135 @@ def test_qa_reconciliation_non_krw_amount_without_provenance_creates_exception(t
     severities = set(qa.loc[qa["exception_id"].eq("REC-EX-08"), "severity"])
 
     assert severities == {"blocking"}
+
+
+def test_qa_flags_missing_performance_accounting_outputs_and_schema_gaps(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, write_required_outputs=False)
+    pd.DataFrame(columns=["metric"]).to_csv(processed / "performance_summary.csv", index=False)
+    pd.DataFrame(columns=[col for col in REALIZED_PNL_OUTPUT_COLUMNS if col != "cost_basis_method"]).to_csv(processed / "processed_realized_pnl.csv", index=False)
+
+    qa = qa_for_processed(tmp_path)
+    output_rows = qa[qa["exception_id"].eq("REC-EX-11")]
+    text = "\n".join(output_rows["issue"].astype(str))
+
+    assert set(output_rows["severity"]) == {"blocking"}
+    assert "income_summary.csv is missing" in text
+    assert "performance_summary.csv is missing required columns" in text
+    assert "processed_realized_pnl.csv is missing required columns" in text
+
+
+def test_qa_flags_realized_ledger_review_rows_and_lot_missing(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(
+        processed,
+        realized_rows=[
+            {
+                "ticker": "MISS",
+                "quantity_sold": "2",
+                "cost_basis_method": "fifo",
+                "amount_review_status": "lot_missing",
+                "fx_status": "not_required",
+                "amount_review_reason": "sell quantity exceeds matched buy lots",
+            },
+            {
+                "ticker": "FX",
+                "cost_basis_method": "fifo",
+                "amount_review_status": "fx_missing",
+                "fx_status": "fx_missing",
+            },
+        ],
+    )
+
+    qa = qa_for_processed(tmp_path)
+
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-12"), "severity"]) == {"advisory"}
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-13"), "severity"]) == {"advisory"}
+
+
+def test_qa_flags_fee_tax_double_count_and_large_performance_residual(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(
+        processed,
+        reconciliation_rows=valid_reconciliation_summary_rows(
+            realized_trade_pnl_gross_krw="2000",
+            realized_trade_pnl_net_krw="1820",
+            unrealized_pnl_krw="0",
+            dividend_income_krw="0",
+            interest_income_krw="0",
+            distribution_income_krw="0",
+            fee_expense_krw="120",
+            tax_expense_krw="60",
+            explained_profit_krw="1640",
+        ),
+        performance_rows=valid_performance_summary_rows(
+            reconciliation_residual_krw="5000",
+        ),
+    )
+
+    qa = qa_for_processed(tmp_path)
+
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-14"), "severity"]) == {"blocking"}
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-15"), "severity"]) == {"advisory"}
+
+
+def test_qa_flags_ambiguous_portfolio_dashboard_labels(tmp_path: Path):
+    dashboard = tmp_path / "10_Dashboard"
+    dashboard.mkdir(parents=True)
+    (dashboard / "Portfolio.md").write_text(
+        "# Portfolio\n\n"
+        f"{AUTO_START}\n"
+        '<span class="stock-kpi-label">Return</span>\n'
+        "Portfolio Cost Basis\n"
+        f"{AUTO_END}\n",
+        encoding="utf-8",
+    )
+    write_reconciliation_qa_inputs(tmp_path / "70_Imports" / "processed")
+
+    qa = qa_for_processed(tmp_path)
+
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-17"), "severity"]) == {"blocking"}
+
+
+def test_qa_flags_transaction_history_rows_in_current_holdings(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(
+        processed,
+        holdings_rows=[
+            {
+                "ticker": "TSLA",
+                "asset_type": "stock",
+                "source_file_type": "transaction_history",
+                "balance_quantity": "1",
+                "evaluation_amount": "100",
+            },
+        ],
+    )
+
+    qa = qa_for_processed(tmp_path)
+
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-18"), "severity"]) == {"blocking"}
+
+
+def test_qa_flags_non_krw_current_holding_official_value_without_provenance(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(
+        processed,
+        holdings_rows=[
+            {
+                "ticker": "AAPL",
+                "asset_type": "stock",
+                "source_file_type": "overseas_balance",
+                "currency_native": "USD",
+                "evaluation_amount_krw": "140000",
+                "fx_rate_to_krw": "",
+            },
+        ],
+    )
+
+    qa = qa_for_processed(tmp_path)
+
+    assert set(qa.loc[qa["exception_id"].eq("REC-EX-08"), "severity"]) == {"blocking"}
 
 
 def test_generate_qa_exception_for_missing_thesis(tmp_path: Path):
