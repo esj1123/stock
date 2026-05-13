@@ -1083,7 +1083,16 @@ def reconciliation_content(
     if warning:
         parts.append(warning)
     parts.extend([
-        "## Total Performance",
+        "## Reconciliation Scope",
+        reconciliation_metric_table(reconciliation, [
+            "reconciliation_summary_role",
+            "total_return_alias_of",
+            "total_return_pct_alias_of",
+            "explained_profit_formula",
+            "fee_tax_treatment",
+            "fx_pnl_treatment",
+        ]),
+        "## Audit Totals",
         reconciliation_metric_table(reconciliation, [
             "total_assets_krw",
             "total_assets_status",
@@ -1095,7 +1104,7 @@ def reconciliation_content(
             "total_return_pct",
             "total_return_status",
         ]),
-        "## Profit Breakdown",
+        "## Explained Profit Components",
         reconciliation_metric_table(reconciliation, [
             "unrealized_pnl_krw",
             "realized_pnl_krw",
@@ -1115,7 +1124,7 @@ def reconciliation_content(
             "explained_profit_krw",
             "explained_profit_status",
         ]),
-        "## Residual",
+        "## Residual Status",
         reconciliation_metric_table(reconciliation, ["residual_krw", "residual_status"]),
         "## Realized PnL Ledger (`processed_realized_pnl.csv`)",
         realized_pnl_table(realized),

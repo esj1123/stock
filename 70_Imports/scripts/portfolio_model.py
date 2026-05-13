@@ -21,6 +21,15 @@ SUMMARY_COLUMNS = ["metric", "value"]
 RECONCILIATION_SUMMARY_COLUMNS = ["metric", "value"]
 REALIZED_COST_BASIS_METHOD = "fifo"
 REALIZED_PNL_BASIS = "gross_trade_pnl_krw_fee_tax_separate"
+RECONCILIATION_SUMMARY_ROLE = "audit_status_residual"
+TOTAL_RETURN_ALIAS_OF = "performance_summary.cumulative_return_krw"
+TOTAL_RETURN_PCT_ALIAS_OF = "performance_summary.cumulative_return_pct"
+EXPLAINED_PROFIT_FORMULA = (
+    "realized_trade_pnl_gross_krw+unrealized_pnl_krw+dividend_income_krw+"
+    "interest_income_krw+distribution_income_krw-fee_expense_krw-tax_expense_krw"
+)
+FEE_TAX_TREATMENT = "gross_realized_pnl_minus_fee_tax_separate"
+FX_PNL_TREATMENT = "not_modeled_residual_context"
 INCOME_TYPES = ["dividend", "interest", "distribution"]
 INCOME_SUMMARY_COLUMNS = [
     "income_type",
@@ -1311,15 +1320,6 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame, re
     distribution_income = ok_amount_sum(income, "income_type", {"distribution"})
     fee_expense = ok_amount_sum(expenses, "expense_type", {"fee"})
     tax_expense = ok_amount_sum(expenses, "expense_type", {"tax"})
-    realized_pnl = realized_metrics["realized_trade_pnl_gross_krw"] if realized_metrics["realized_pnl_status"] == "available" else 0.0
-    explained_profit = unrealized + realized_pnl + dividend_income + interest_income + distribution_income - fee_expense - tax_expense
-    explained_profit_status = "available" if realized_metrics["realized_pnl_status"] == "available" else realized_metrics["realized_pnl_status"]
-
-    residual = None
-    residual_status = "unavailable"
-    if total_return is not None and explained_profit_status == "available":
-        residual = total_return - explained_profit
-        residual_status = "available"
 
     seeded_counts = asset_status_counts.copy()
     for key, value in principal_status_counts.items():
@@ -1331,7 +1331,49 @@ def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame, re
         counts["amount_review_needed"] += int(realized_metrics["realized_pnl_unavailable_row_count"] or 0)
     fx_counts = fx_event_counts(fx_events)
 
+    realized_pnl = realized_metrics["realized_trade_pnl_gross_krw"]
+    explained_status_inputs = [
+        realized_metrics["realized_pnl_status"] if realized_metrics["realized_pnl_status"] != "available" else "",
+        "currency_ambiguous" if counts["currency_ambiguous"] > 0 else "",
+        "unit_ambiguous" if counts["unit_ambiguous"] > 0 else "",
+        "fx_missing" if counts["fx_missing"] > 0 else "",
+        "needs_review" if counts["amount_review_needed"] > 0 else "",
+    ]
+    explained_profit = None
+    explained_profit_status = status_from_list(explained_status_inputs, default="available")
+    explained_inputs = [
+        unrealized,
+        realized_pnl,
+        dividend_income,
+        interest_income,
+        distribution_income,
+        fee_expense,
+        tax_expense,
+    ]
+    if explained_profit_status == "available" and all(value is not None for value in explained_inputs):
+        explained_profit = (
+            unrealized
+            + realized_pnl
+            + dividend_income
+            + interest_income
+            + distribution_income
+            - fee_expense
+            - tax_expense
+        )
+
+    residual = None
+    residual_status = "unavailable"
+    if total_return is not None and explained_profit_status == "available":
+        residual = total_return - explained_profit
+        residual_status = "available"
+
     return summary_metric_rows({
+        "reconciliation_summary_role": RECONCILIATION_SUMMARY_ROLE,
+        "total_return_alias_of": TOTAL_RETURN_ALIAS_OF,
+        "total_return_pct_alias_of": TOTAL_RETURN_PCT_ALIAS_OF,
+        "explained_profit_formula": EXPLAINED_PROFIT_FORMULA,
+        "fee_tax_treatment": FEE_TAX_TREATMENT,
+        "fx_pnl_treatment": FX_PNL_TREATMENT,
         "total_assets_krw": asset_total,
         "total_assets_status": asset_status,
         "current_cash_krw": current_cash,

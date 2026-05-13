@@ -1362,6 +1362,12 @@ def test_quality_gate_requires_unit_classification_for_official_amounts():
 
 def valid_reconciliation_summary_rows(**overrides: object) -> list[dict[str, str]]:
     values: dict[str, object] = {
+        "reconciliation_summary_role": "audit_status_residual",
+        "total_return_alias_of": "performance_summary.cumulative_return_krw",
+        "total_return_pct_alias_of": "performance_summary.cumulative_return_pct",
+        "explained_profit_formula": "realized_trade_pnl_gross_krw+unrealized_pnl_krw+dividend_income_krw+interest_income_krw+distribution_income_krw-fee_expense_krw-tax_expense_krw",
+        "fee_tax_treatment": "gross_realized_pnl_minus_fee_tax_separate",
+        "fx_pnl_treatment": "not_modeled_residual_context",
         "total_assets_krw": "120000",
         "total_assets_status": "available",
         "current_cash_krw": "5000",
@@ -1506,6 +1512,15 @@ def test_quality_gate_requires_reconciliation_summary_metrics():
     findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_basis="net_trade_pnl_krw"))
     assert any("realized_pnl_basis must be gross_trade_pnl_krw_fee_tax_separate" in finding for finding in findings)
 
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(reconciliation_summary_role="performance_summary"))
+    assert any("reconciliation_summary_role must be audit_status_residual" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(total_return_alias_of="standalone_total_return"))
+    assert any("total_return_alias_of must be performance_summary.cumulative_return_krw" in finding for finding in findings)
+
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(fee_tax_treatment="net_realized_pnl_includes_fee_tax"))
+    assert any("fee_tax_treatment must be gross_realized_pnl_minus_fee_tax_separate" in finding for finding in findings)
+
     findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(realized_pnl_krw="10", realized_trade_pnl_gross_krw="0"))
     assert any("realized_pnl_krw must equal realized_trade_pnl_gross_krw" in finding for finding in findings)
 
@@ -1520,6 +1535,19 @@ def test_quality_gate_requires_reconciliation_summary_metrics():
     findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(total_return_krw="21000"))
     assert any("total_return_krw formula mismatch" in finding for finding in findings)
 
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(
+        realized_trade_pnl_gross_krw="2000",
+        realized_trade_pnl_net_krw="1820",
+        unrealized_pnl_krw="0",
+        dividend_income_krw="0",
+        interest_income_krw="0",
+        distribution_income_krw="0",
+        fee_expense_krw="120",
+        tax_expense_krw="60",
+        explained_profit_krw="1640",
+    ))
+    assert any("explained_profit_krw formula mismatch" in finding for finding in findings)
+
 
 def test_quality_gate_reconciliation_status_consistency():
     assert reconciliation_summary_findings(valid_reconciliation_summary_rows()) == []
@@ -1533,8 +1561,17 @@ def test_quality_gate_reconciliation_status_consistency():
     findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(total_return_status="fx_missing", residual_status="available"))
     assert any("residual_status must not be available when total_return_status is not available" in finding for finding in findings)
 
+    findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(
+        realized_pnl_status="lot_missing",
+        explained_profit_status="lot_missing",
+        explained_profit_krw="15000",
+        residual_status="unavailable",
+    ))
+    assert any("explained_profit_krw must be blank when explained_profit_status is not available" in finding for finding in findings)
+
     findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(fx_missing_row_count="1"))
     assert any("total_return_status is available despite unresolved official-total rows" in finding for finding in findings)
+    assert any("explained_profit_status is available despite unresolved profit rows" in finding for finding in findings)
 
     findings = reconciliation_summary_findings(valid_reconciliation_summary_rows(total_assets_krw=""))
     assert any("total_assets_status is available but total_assets_krw is blank" in finding for finding in findings)
@@ -2748,6 +2785,9 @@ def test_reconciliation_total_return_available_with_krw_assets_and_principal(tmp
     assert float(metrics["external_withdrawal_krw"]) == 10000
     assert float(metrics["net_external_principal_krw"]) == 70000
     assert metrics["net_external_principal_status"] == "available"
+    assert metrics["reconciliation_summary_role"] == "audit_status_residual"
+    assert metrics["total_return_alias_of"] == "performance_summary.cumulative_return_krw"
+    assert metrics["total_return_pct_alias_of"] == "performance_summary.cumulative_return_pct"
     assert float(metrics["total_return_krw"]) == 30000
     assert metrics["total_return_status"] == "available"
     assert float(metrics["unrealized_pnl_krw"]) == 1000
@@ -2784,6 +2824,7 @@ def test_performance_summary_calculates_whole_investment_return_separate_from_ho
 
     generate_reports(tmp_path, processed_dir=processed)
     summary = read_processed_csv(processed, "portfolio_summary.csv")
+    reconciliation = reconciliation_metrics(processed)
     metrics = performance_metrics(processed)
 
     assert set(metrics) >= set(PERFORMANCE_SUMMARY_METRICS)
@@ -2799,6 +2840,9 @@ def test_performance_summary_calculates_whole_investment_return_separate_from_ho
     assert metrics["realized_pnl_status"] == "available"
     assert metrics["income_status"] == "available"
     assert metrics["fx_status"] == "available"
+    assert reconciliation["total_return_alias_of"] == "performance_summary.cumulative_return_krw"
+    assert float(reconciliation["total_return_krw"]) == float(metrics["cumulative_return_krw"])
+    assert float(reconciliation["total_return_pct"]) == float(metrics["cumulative_return_pct"])
     holdings_return = float(summary.loc[summary["metric"].eq("pnl_pct"), "value"].iloc[0])
     assert round(holdings_return, 4) == 1.0101
     assert round(holdings_return, 6) != round(float(metrics["cumulative_return_pct"]), 6)
@@ -2857,6 +2901,7 @@ def test_reconciliation_income_breakdown_does_not_change_net_principal(tmp_path:
         cashflow_rows=[
             {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
         ],
+        transaction_rows=[],
         income_rows=[
             {"income_type": "dividend", "currency_native": "KRW", "amount_native": 3000, "amount_krw": 3000, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
             {"income_type": "interest", "currency_native": "KRW", "amount_native": 500, "amount_krw": 500, "amount_review_status": "ok", "affects_principal": False, "affects_profit": True},
@@ -2905,12 +2950,17 @@ def test_performance_summary_reflects_income_fx_missing_without_treating_missing
 
     generate_reports(tmp_path, processed_dir=processed)
     income_summary = read_processed_csv(processed, "income_summary.csv")
+    reconciliation = reconciliation_metrics(processed)
     performance = performance_metrics(processed)
     row = income_summary.iloc[0]
 
     assert float(row["amount_native_sum"]) == 12.34
     assert is_blank_or_na(row["amount_krw_sum"])
     assert row["income_status"] == "fx_missing"
+    assert reconciliation["explained_profit_krw"] == ""
+    assert reconciliation["explained_profit_status"] == "fx_missing"
+    assert reconciliation["residual_krw"] == ""
+    assert reconciliation["residual_status"] == "unavailable"
     assert performance["dividend_income_krw"] == ""
     assert performance["income_total_krw"] == ""
     assert performance["explained_profit_krw"] == ""
@@ -3080,7 +3130,9 @@ def test_fifo_realized_pnl_lot_missing_stays_review_status_without_blocking_pipe
     assert metrics["realized_cost_basis_method"] == "fifo"
     assert metrics["realized_pnl_status"] == "lot_missing"
     assert int(metrics["realized_pnl_unavailable_row_count"]) == 1
+    assert metrics["explained_profit_krw"] == ""
     assert metrics["explained_profit_status"] == "lot_missing"
+    assert metrics["residual_krw"] == ""
     assert metrics["residual_status"] == "unavailable"
 
 
@@ -3108,7 +3160,9 @@ def test_realized_pnl_fx_missing_blocks_official_profit_decomposition(tmp_path: 
     assert metrics["realized_pnl_krw"] == ""
     assert metrics["realized_pnl_status"] == "fx_missing"
     assert int(metrics["realized_pnl_unavailable_row_count"]) == 1
+    assert metrics["explained_profit_krw"] == ""
     assert metrics["explained_profit_status"] == "fx_missing"
+    assert metrics["residual_krw"] == ""
     assert metrics["residual_status"] == "unavailable"
     assert set(realized["amount_review_status"]) == {"fx_missing"}
     assert set(realized["fx_status"]) == {"fx_missing"}
@@ -3710,15 +3764,24 @@ def test_reconciliation_dashboard_surfaces_unit_aware_summary(tmp_path: Path):
 
     content = dashboard_content("Reconciliation.md", processed)
 
-    assert "## Total Performance" in content
+    assert "## Reconciliation Scope" in content
+    assert "reconciliation_summary_role" in content
+    assert "audit_status_residual" in content
+    assert "total_return_alias_of" in content
+    assert "performance_summary.cumulative_return_krw" in content
+    assert "fee_tax_treatment" in content
+    assert "gross_realized_pnl_minus_fee_tax_separate" in content
+    assert "fx_pnl_treatment" in content
+    assert "not_modeled_residual_context" in content
+    assert "## Audit Totals" in content
     assert "total_assets_krw" in content
     assert "net_external_principal_krw" in content
     assert "total_return_krw" in content
     assert "total_return_pct" in content
-    assert "## Profit Breakdown" in content
+    assert "## Explained Profit Components" in content
     assert "distribution_income_krw" in content
     assert "realized_pnl_krw" in content
-    assert "## Residual" in content
+    assert "## Residual Status" in content
     assert "## Realized PnL Ledger" in content
     assert "## Unresolved Status Counts" in content
     assert "| fx_missing_row_count | 1 |" in content
