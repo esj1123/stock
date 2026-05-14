@@ -162,9 +162,28 @@ HOLDING_AMOUNT_REL_TOLERANCE = 0.001
 GENERIC_ACCOUNT_TYPES = {"", "comprehensive", "overseas", "generic"}
 
 TRANSACTION_TYPES = {
-    "buy", "sell", "deposit", "withdrawal", "dividend", "interest", "exchange",
+    "buy", "sell", "deposit", "withdrawal", "dividend", "distribution", "interest", "exchange",
     "fee", "tax", "transfer", "split", "rights", "unknown",
 }
+
+INCOME_DISTRIBUTION_KEYWORDS = [
+    "ETF분배금입금", "분배금입금", "분배금", "distribution", "dist",
+]
+INCOME_DIVIDEND_KEYWORDS = [
+    "외화배당금입금", "현금배당", "배당금입금", "배당금", "배당", "dividend", "div",
+]
+INCOME_INTEREST_KEYWORDS = [
+    "예탁금이용료", "이자", "interest",
+]
+INCOME_TAX_KEYWORDS = [
+    "배당소득세", "배당세", "원천징수", "withholding", "tax",
+]
+INCOME_REVERSAL_REVIEW_KEYWORDS = [
+    "취소", "정정", "환입", "환출", "reversal", "refund", "cancel",
+]
+TRANSACTION_DETAIL_ALIASES = [
+    "상세내용", "내용", "적요", "거래내용", "입출금구분",
+]
 
 VALID_CURRENCY_CODES = {
     "KRW", "USD", "JPY", "CNY", "HKD", "EUR", "GBP", "CAD", "AUD", "CHF", "SGD", "TWD",
@@ -679,6 +698,7 @@ def cashflow_role_for(tx_type: str, source_type: str, asset_type: str = "") -> s
         "deposit": "external_principal",
         "withdrawal": "external_principal",
         "dividend": "income_dividend",
+        "distribution": "income_distribution",
         "interest": "income_interest",
         "exchange": "internal_fx_exchange",
         "buy": "trade_settlement",
@@ -756,6 +776,8 @@ def amount_kind_for(
             return "unrealized_pnl"
     if tx == "dividend":
         return "dividend"
+    if tx == "distribution":
+        return "distribution"
     if tx == "interest":
         return "interest"
     if tx == "exchange":
@@ -796,6 +818,7 @@ def primary_amount_for_kind(
         "fee": fee or settlement_amount or trade_amount,
         "tax": tax or settlement_amount or trade_amount,
         "dividend": settlement_amount or trade_amount,
+        "distribution": settlement_amount or trade_amount,
         "interest": settlement_amount or trade_amount,
         "evaluation_amount": evaluation_amount,
         "unrealized_pnl": unrealized_pnl,
@@ -896,8 +919,17 @@ def normalize_amount_fields(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
     )
     fx_rate_source = "raw" if fx_rate_status == "available" else ""
     cashflow_role = classify_cashflow_role({**dict(row), "asset_type": asset_type, "transaction_type": tx_type, "source_file_type": source_type})
+    if cashflow_role.startswith("income_") and is_income_reversal_or_correction(
+        " ".join([
+            str(_row_value(row, "transaction_type") or ""),
+            str(_row_value(row, "raw_memo") or ""),
+            str(_row_value(row, "security_name") or ""),
+        ])
+    ):
+        amount_review_status = "needs_review"
+        amount_review_reason = combined_text_values(amount_review_reason, "income reversal/correction keyword detected")
     affects_principal = cashflow_role == "external_principal" and amount_review_status == "ok"
-    affects_profit = cashflow_role in {"income_dividend", "income_interest", "expense_fee", "expense_tax"} or amount_kind == "unrealized_pnl"
+    affects_profit = cashflow_role in {"income_dividend", "income_distribution", "income_interest", "expense_fee", "expense_tax"} or amount_kind == "unrealized_pnl"
     is_internal_transfer = cashflow_role in {"internal_fx_exchange", "internal_transfer"}
     is_valuation_snapshot = cashflow_role == "valuation_snapshot"
     is_trade_settlement = cashflow_role == "trade_settlement"
@@ -990,30 +1022,80 @@ def normalize_time(value: Any) -> str:
     return s
 
 
+def text_contains_any(text: Any, keywords: list[str]) -> bool:
+    s = str(text or "").lower()
+    return any(str(keyword).lower() in s for keyword in keywords)
+
+
+def is_income_reversal_or_correction(text: Any) -> bool:
+    return text_contains_any(text, INCOME_REVERSAL_REVIEW_KEYWORDS)
+
+
+def raw_transaction_detail_values(raw: pd.Series, cols: dict[str, Any | None]) -> list[str]:
+    used_columns = {
+        col
+        for col in [cols.get("transaction_raw"), cols.get("memo")]
+        if col is not None
+    }
+    values: list[str] = []
+    for col in raw.index:
+        if col in used_columns:
+            continue
+        parts = column_label_parts(col) or [str(col)]
+        if not any(
+            normalize_key(part) == normalize_key(alias)
+            for part in parts
+            for alias in TRANSACTION_DETAIL_ALIASES
+        ):
+            continue
+        value = str(raw.get(col, "") or "").strip()
+        if value and value.lower() != "nan":
+            values.append(value)
+    return values
+
+
+def combined_text_values(*values: Any) -> str:
+    parts: list[str] = []
+    for value in values:
+        if isinstance(value, list):
+            iterable = value
+        else:
+            iterable = [value]
+        for item in iterable:
+            text = str(item or "").strip()
+            if text and text.lower() != "nan" and text not in parts:
+                parts.append(text)
+    return "; ".join(parts)
+
+
 def classify_transaction_type(text: Any) -> str:
     s = str(text or "").lower()
     english_tokens = set(re.findall(r"[a-z]+", s))
     for name, keys in [
+        ("tax", ["tax"]),
+        ("fee", ["fee"]),
+        ("buy", ["buy"]),
+        ("sell", ["sell"]),
+        ("exchange", ["exchange"]),
+        ("distribution", ["distribution", "dist"]),
+        ("dividend", ["dividend", "div"]),
+        ("interest", ["interest"]),
         ("deposit", ["deposit"]),
         ("withdrawal", ["withdrawal", "withdraw"]),
-        ("exchange", ["exchange"]),
-        ("dividend", ["dividend", "div", "distribution", "dist"]),
-        ("interest", ["interest"]),
-        ("fee", ["fee"]),
-        ("tax", ["tax"]),
     ]:
         if any(k in english_tokens for k in keys):
             return name
     rules = [
         ("buy", ["매수", "buy", "매입"]),
         ("sell", ["매도", "sell"]),
+        ("fee", ["수수료"]),
+        ("tax", ["세금", "제세금", "거래세", *INCOME_TAX_KEYWORDS]),
+        ("distribution", INCOME_DISTRIBUTION_KEYWORDS),
+        ("dividend", INCOME_DIVIDEND_KEYWORDS),
+        ("interest", INCOME_INTEREST_KEYWORDS),
+        ("exchange", ["환전", "외화매수", "외화매도"]),
         ("deposit", ["입금", "대체입금", "현금입금"]),
         ("withdrawal", ["출금", "현금출금"]),
-        ("dividend", ["배당", "분배금", "dividend", "div"]),
-        ("interest", ["이자"]),
-        ("exchange", ["환전", "외화매수", "외화매도"]),
-        ("fee", ["수수료"]),
-        ("tax", ["세금", "제세금", "거래세"]),
         ("transfer", ["이체", "대체"]),
         ("split", ["액면분할", "split"]),
         ("rights", ["권리", "유상", "무상"]),
@@ -1728,7 +1810,12 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             ticker = ticker.zfill(6)
         raw_type = str(raw.get(cols["transaction_raw"]) if cols.get("transaction_raw") is not None else "").strip()
         memo = str(raw.get(cols["memo"]) if cols.get("memo") is not None else raw_type).strip()
-        tx_type = classify_transaction_type(" ".join([raw_type, memo, name]))
+        detail_values = raw_transaction_detail_values(raw, cols)
+        classification_text = " ".join([raw_type, memo, *detail_values, name])
+        tx_type = classify_transaction_type(classification_text)
+        memo = combined_text_values(memo, detail_values)
+        if not memo and cols.get("memo") is None:
+            memo = raw_type
         quantity = parse_korean_number(raw.get(cols["quantity"])) if cols.get("quantity") is not None else 0.0
         is_balance_source = row_source_type in BALANCE_SOURCE_TYPES
         balance_quantity_value = parse_korean_number(raw.get(cols["balance_quantity"])) if cols.get("balance_quantity") is not None else (quantity if is_balance_source else 0.0)
@@ -1818,7 +1905,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         fx_rate_source = "raw" if fx_rate_status == "available" else ""
         cashflow_role = cashflow_role_for(tx_type, row_source_type, asset_type)
         affects_principal = cashflow_role == "external_principal" and amount_review_status == "ok"
-        affects_profit = cashflow_role in {"income_dividend", "income_interest", "expense_fee", "expense_tax"} or amount_kind == "unrealized_pnl"
+        affects_profit = cashflow_role in {"income_dividend", "income_distribution", "income_interest", "expense_fee", "expense_tax"} or amount_kind == "unrealized_pnl"
         is_internal_transfer = cashflow_role in {"internal_fx_exchange", "internal_transfer"}
         is_valuation_snapshot = cashflow_role == "valuation_snapshot"
         is_trade_settlement = cashflow_role == "trade_settlement"
@@ -1879,6 +1966,9 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         is_valuation_snapshot = amount_fields["is_valuation_snapshot"]
         is_trade_settlement = amount_fields["is_trade_settlement"]
         fx_pair_status = amount_fields["fx_pair_status"]
+        if cashflow_role.startswith("income_") and is_income_reversal_or_correction(classification_text):
+            amount_review_status = "needs_review"
+            amount_review_reason = combined_text_values(amount_review_reason, "income reversal/correction keyword detected")
 
         if not any([date, ticker, name, raw_type, trade_amount, settlement_amount, evaluation_amount_value, balance_quantity_value]):
             continue
@@ -2038,8 +2128,8 @@ def unit_mismatch_audit_rows(rows: pd.DataFrame) -> pd.DataFrame:
     mask = (
         currency.ne("KRW")
         | status.isin({"fx_missing", "currency_ambiguous", "unit_ambiguous", "needs_review"})
-        | role.isin({"internal_fx_exchange", "income_dividend", "income_interest"})
-        | tx_type.isin({"exchange", "dividend", "interest"})
+        | role.isin({"internal_fx_exchange", "income_dividend", "income_distribution", "income_interest"})
+        | tx_type.isin({"exchange", "dividend", "distribution", "interest"})
         | principal_excluded
         | (
             amount_native.notna()
@@ -2118,11 +2208,13 @@ def income_type_for_row(row: dict[str, Any] | pd.Series) -> str:
     if tokens.intersection({"distribution", "dist"}):
         return "distribution"
     tx_type = str(_row_value(row, "transaction_type") or "").strip().lower()
-    if tx_type in {"dividend", "interest"}:
+    if tx_type in {"dividend", "distribution", "interest"}:
         return tx_type
     role = str(_row_value(row, "cashflow_role") or "").strip().lower()
     if role == "income_dividend":
         return "dividend"
+    if role == "income_distribution":
+        return "distribution"
     if role == "income_interest":
         return "interest"
     return ""
@@ -2141,6 +2233,13 @@ def income_event_rows(rows: pd.DataFrame) -> pd.DataFrame:
             native_amount = parse_korean_number(_row_value(row, "settlement_amount")) or parse_korean_number(_row_value(row, "trade_amount"))
         amount_kind = str(_row_value(row, "amount_kind") or "").strip() or income_type
         amount_fields = money_event_amount_fields(row, amount_kind, native_amount, _row_value(row, "amount_krw"))
+        source_amount_status = str(_row_value(row, "amount_review_status") or "").strip()
+        if source_amount_status and source_amount_status.lower() not in {"ok", "nan"}:
+            amount_fields["amount_review_status"] = source_amount_status
+            amount_fields["amount_review_reason"] = combined_text_values(
+                amount_fields.get("amount_review_reason", ""),
+                _row_value(row, "amount_review_reason"),
+            )
         tax_native = parse_korean_number(_row_value(row, "tax"))
         if abs(tax_native) <= 1e-9:
             tax_native = parse_korean_number(_row_value(row, "tax_native"))

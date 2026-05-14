@@ -190,6 +190,10 @@ def test_normalize_date_columns():
 def test_classify_transaction_types():
     assert classify_transaction_type("주식 매수") == "buy"
     assert classify_transaction_type("현금배당") == "dividend"
+    assert classify_transaction_type("입금 외화배당금입금") == "dividend"
+    assert classify_transaction_type("입금 ETF분배금입금") == "distribution"
+    assert classify_transaction_type("입금 예탁금이용료") == "interest"
+    assert classify_transaction_type("입금 배당소득세") == "tax"
     assert classify_transaction_type("알수없음") == "unknown"
 
 
@@ -509,6 +513,32 @@ def synthetic_transaction_row(
     return row
 
 
+def nh_detail_transaction_row(
+    *,
+    detail: str,
+    transaction_raw: str = "\uc785\uae08",
+    ticker: str = "",
+    security_name: str = "",
+    amount: str | int | float = 1000,
+    currency: str | None = "KRW",
+    tax: str | int | float | None = None,
+) -> dict[str, object]:
+    row = synthetic_transaction_row(
+        transaction_raw=transaction_raw,
+        ticker=ticker,
+        security_name=security_name,
+        quantity=0,
+        price=0,
+        trade_amount=amount,
+        settlement_amount=amount,
+        currency=currency,
+        tax=tax,
+    )
+    row[COLUMN_ALIASES["memo"][0]] = ""
+    row["\uc0c1\uc138\ub0b4\uc6a9"] = detail
+    return row
+
+
 def normalize_synthetic_transaction(tmp_path: Path, row: dict[str, object], file_name: str = "transaction_history.xlsx") -> pd.DataFrame:
     normalized, _, _ = normalize_dataframe(pd.DataFrame([row]), tmp_path / file_name, "Sheet1")
     assert len(normalized) == 1
@@ -813,6 +843,116 @@ def test_distribution_lands_in_processed_income_when_detected(tmp_path: Path):
     assert len(income) == 1
     assert income.iloc[0]["income_type"] == "distribution"
     assert income.iloc[0]["amount_review_status"] == "fx_missing"
+
+
+def test_nh_detail_foreign_dividend_deposit_lands_in_income_not_principal(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        nh_detail_transaction_row(
+            detail="외화배당금입금",
+            ticker="AAPL",
+            security_name="Apple",
+            amount=12.34,
+            currency="USD",
+        )
+    ])
+
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    income = read_processed_csv(processed, "processed_income.csv")
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+
+    tx = transactions.iloc[0]
+    assert tx["transaction_type"] == "dividend"
+    assert tx["cashflow_role"] == "income_dividend"
+    assert not boolish(tx["affects_principal"])
+    assert boolish(tx["affects_profit"])
+    assert len(income) == 1
+    assert income.iloc[0]["income_type"] == "dividend"
+    assert income.iloc[0]["currency_native"] == "USD"
+    assert income.iloc[0]["amount_review_status"] == "fx_missing"
+    assert cashflows.empty
+
+
+def test_nh_detail_dividend_deposit_does_not_increase_net_external_principal(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        nh_detail_transaction_row(detail="배당금입금", amount=3000, currency="KRW")
+    ])
+
+    generate_reports(tmp_path, processed_dir=processed)
+    metrics = reconciliation_metrics(processed)
+    income = read_processed_csv(processed, "processed_income.csv")
+    cashflows = read_processed_csv(processed, "processed_cashflows.csv")
+
+    assert len(income) == 1
+    assert income.iloc[0]["income_type"] == "dividend"
+    assert cashflows.empty
+    assert float(metrics["net_external_principal_krw"]) == 0
+
+
+def test_nh_detail_etf_distribution_deposit_lands_in_distribution_income(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        nh_detail_transaction_row(
+            detail="ETF분배금입금",
+            ticker="QQQI",
+            security_name="Synthetic ETF",
+            amount=700,
+            currency="KRW",
+        )
+    ])
+
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    income = read_processed_csv(processed, "processed_income.csv")
+
+    assert transactions.iloc[0]["transaction_type"] == "distribution"
+    assert transactions.iloc[0]["cashflow_role"] == "income_distribution"
+    assert len(income) == 1
+    assert income.iloc[0]["income_type"] == "distribution"
+    assert income.iloc[0]["amount_review_status"] == "ok"
+
+
+def test_nh_detail_interest_fee_lands_in_interest_income(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        nh_detail_transaction_row(detail="예탁금이용료", amount=1200, currency="KRW")
+    ])
+
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    income = read_processed_csv(processed, "processed_income.csv")
+
+    assert transactions.iloc[0]["transaction_type"] == "interest"
+    assert transactions.iloc[0]["cashflow_role"] == "income_interest"
+    assert len(income) == 1
+    assert income.iloc[0]["income_type"] == "interest"
+
+
+def test_nh_detail_dividend_tax_is_not_dividend_income(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        nh_detail_transaction_row(detail="배당소득세", amount=300, currency="KRW")
+    ])
+
+    transactions = read_processed_csv(processed, "processed_transactions.csv")
+    income = read_processed_csv(processed, "processed_income.csv")
+    expenses = read_processed_csv(processed, "processed_expenses.csv")
+
+    assert transactions.iloc[0]["transaction_type"] == "tax"
+    assert transactions.iloc[0]["cashflow_role"] == "expense_tax"
+    assert income.empty
+    assert len(expenses) == 1
+    assert expenses.iloc[0]["expense_type"] == "tax"
+
+
+def test_nh_detail_dividend_correction_is_review_income_not_official_krw(tmp_path: Path):
+    processed = import_synthetic_transactions(tmp_path, [
+        nh_detail_transaction_row(detail="배당금입금 취소", amount=3000, currency="KRW")
+    ])
+
+    income = read_processed_csv(processed, "processed_income.csv")
+    income_summary = build_income_summary(income)
+
+    assert len(income) == 1
+    assert income.iloc[0]["income_type"] == "dividend"
+    assert income.iloc[0]["amount_review_status"] == "needs_review"
+    assert "reversal/correction" in income.iloc[0]["amount_review_reason"]
+    assert income_summary.iloc[0]["income_status"] == "needs_review"
+    assert is_blank_or_na(income_summary.iloc[0]["amount_krw_sum"])
 
 
 def test_fx_exchange_is_internal_transfer_not_principal_cashflow(tmp_path: Path):
