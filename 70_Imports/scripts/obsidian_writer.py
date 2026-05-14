@@ -954,6 +954,37 @@ def income_summary_field_total(income_summary: pd.DataFrame, field: str, income_
     return round(sum(values), 6) if values else ""
 
 
+def income_summary_native_total(
+    income_summary: pd.DataFrame,
+    income_type: str,
+    currency: str,
+    field: str = "amount_native_sum",
+) -> Any:
+    if income_summary.empty or field not in income_summary.columns:
+        return ""
+    view = income_summary
+    if "income_type" in view.columns:
+        view = view[view["income_type"].fillna("").astype(str).str.lower().eq(income_type.lower())]
+    if "currency_native" in view.columns:
+        view = view[view["currency_native"].fillna("").astype(str).str.upper().eq(currency.upper())]
+    values = [optional_number_value(value) for value in view[field]]
+    values = [value for value in values if value is not None]
+    return round(sum(values), 6) if values else ""
+
+
+def income_summary_status_text(income_summary: pd.DataFrame) -> str:
+    if income_summary.empty or "income_status" not in income_summary.columns:
+        return ""
+    status = income_summary["income_status"].fillna("").astype(str).str.strip()
+    status = status[status.ne("")]
+    if status.empty:
+        return ""
+    counts = status.value_counts(sort=False)
+    if len(counts) == 1:
+        return str(counts.index[0])
+    return " / ".join(f"{index}: {count}" for index, count in counts.items())
+
+
 def income_summary_native_text(income_summary: pd.DataFrame) -> str:
     if income_summary.empty or "currency_native" not in income_summary.columns or "net_income_native" not in income_summary.columns:
         return ""
@@ -968,6 +999,10 @@ def income_summary_native_text(income_summary: pd.DataFrame) -> str:
 
 def cash_income_cards(income_summary: pd.DataFrame) -> str:
     return dashboard_kpi_grid([
+        snapshot_card("KRW 환산 가능 배당/이자/분배금", income_summary_field_total(income_summary, "amount_krw_sum"), "recognized official KRW rows only"),
+        snapshot_card("USD dividend native total", income_summary_native_total(income_summary, "dividend", "USD"), "native USD dividend rows; not KRW converted"),
+        snapshot_card("FX 미해결 income row count", income_summary_field_total(income_summary, "fx_missing_row_count")),
+        snapshot_card("income_status", income_summary_status_text(income_summary)),
         snapshot_card("수집된 배당", income_summary_field_total(income_summary, "amount_krw_sum", "dividend"), "recognized official KRW rows only"),
         snapshot_card("수집된 이자", income_summary_field_total(income_summary, "amount_krw_sum", "interest"), "recognized official KRW rows only"),
         snapshot_card("수집된 분배금", income_summary_field_total(income_summary, "amount_krw_sum", "distribution"), "recognized official KRW rows only"),
@@ -1279,9 +1314,9 @@ REQUIRED_OUTPUT_COLUMNS = {
     "processed_income.csv": [
         "source_file", "source_file_type", "account_type", "market", "trade_date", "trade_time",
         "ticker", "security_name", "income_type", "currency_native", "amount_native", "amount_krw",
-        "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
-        "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
-        "affects_profit", "raw_memo",
+        "amount_krw_source", "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source",
+        "amount_kind", "amount_basis", "amount_confidence", "amount_review_status",
+        "amount_review_reason", "affects_principal", "affects_profit", "raw_memo",
     ],
     "income_summary.csv": [
         "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",

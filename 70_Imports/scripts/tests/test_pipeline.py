@@ -594,9 +594,9 @@ def read_processed_csv(processed: Path, name: str) -> pd.DataFrame:
 INCOME_OUTPUT_COLUMNS = [
     "source_file", "source_file_type", "account_type", "market", "trade_date", "trade_time",
     "ticker", "security_name", "income_type", "currency_native", "amount_native", "amount_krw",
-    "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
-    "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
-    "affects_profit", "raw_memo",
+    "amount_krw_source", "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source",
+    "amount_kind", "amount_basis", "amount_confidence", "amount_review_status",
+    "amount_review_reason", "affects_principal", "affects_profit", "raw_memo",
 ]
 
 INCOME_SUMMARY_OUTPUT_COLUMNS = [
@@ -785,6 +785,7 @@ def test_foreign_dividend_lands_in_processed_income_only(tmp_path: Path):
     assert row["currency_native"] == "USD"
     assert row["amount_native"] == 12.34
     assert is_blank_or_na(row["amount_krw"])
+    assert is_blank_or_na(row["amount_krw_source"])
     assert row["tax_native"] == 0
     assert row["tax_krw"] == 0
     assert row["amount_review_status"] == "fx_missing"
@@ -818,6 +819,7 @@ def test_krw_interest_lands_in_processed_income_only(tmp_path: Path):
     assert row["currency_native"] == "KRW"
     assert row["amount_native"] == 1200
     assert row["amount_krw"] == 1200
+    assert row["amount_krw_source"] == "raw_native"
     assert row["amount_review_status"] == "ok"
     assert not boolish(row["affects_principal"])
     assert boolish(row["affects_profit"])
@@ -4429,6 +4431,10 @@ def test_cashflow_dashboard_surfaces_income_expense_and_fx_summaries(tmp_path: P
     assert "이자" in content
     assert "분배금" in content
     assert "원천징수세" in content
+    assert "KRW 환산 가능 배당/이자/분배금" in content
+    assert '<span class="stock-kpi-label">USD dividend native total</span><strong>12.34</strong>' in content
+    assert "FX 미해결 income row count" in content
+    assert '<span class="stock-kpi-label">income_status</span><strong>fx_missing: 1 / available: 1</strong>' in content
     assert "FX 누락 건수" in content
     assert "native 기준 수익" in content
     assert "KRW 환산 가능 수익" in content

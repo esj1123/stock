@@ -142,9 +142,9 @@ REQUIRED_OUTPUT_SCHEMAS = {
     "processed_income.csv": [
         "source_file", "source_file_type", "account_type", "market", "trade_date", "trade_time",
         "ticker", "security_name", "income_type", "currency_native", "amount_native", "amount_krw",
-        "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
-        "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
-        "affects_profit", "raw_memo",
+        "amount_krw_source", "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source",
+        "amount_kind", "amount_basis", "amount_confidence", "amount_review_status",
+        "amount_review_reason", "affects_principal", "affects_profit", "raw_memo",
     ],
     "income_summary.csv": [
         "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",
