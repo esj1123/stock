@@ -4595,6 +4595,36 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
         explained_profit_krw="445",
         reconciliation_residual_krw="-135",
     )).to_csv(processed / "performance_summary.csv", index=False)
+    pd.DataFrame([
+        {
+            "income_type": "dividend",
+            "currency_native": "KRW",
+            "amount_native_sum": "150",
+            "amount_krw_sum": "150",
+            "tax_native_sum": "0",
+            "tax_krw_sum": "0",
+            "net_income_native": "150",
+            "net_income_krw": "150",
+            "row_count": "3",
+            "fx_missing_row_count": "0",
+            "amount_review_needed_row_count": "0",
+            "income_status": "available",
+        },
+        {
+            "income_type": "dividend",
+            "currency_native": "USD",
+            "amount_native_sum": "175",
+            "amount_krw_sum": "",
+            "tax_native_sum": "0",
+            "tax_krw_sum": "",
+            "net_income_native": "175",
+            "net_income_krw": "",
+            "row_count": "19",
+            "fx_missing_row_count": "19",
+            "amount_review_needed_row_count": "19",
+            "income_status": "fx_missing",
+        },
+    ], columns=INCOME_SUMMARY_OUTPUT_COLUMNS).to_csv(processed / "income_summary.csv", index=False)
 
     content = dashboard_content("Portfolio.md", processed)
 
@@ -4607,7 +4637,12 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "현재 보유분 평가수익률" in content
     assert "전체 누적손익" in content
     assert "전체 누적수익률" in content
-    assert "배당/이자/분배금" in content
+    assert "KRW 환산 가능 배당/이자/분배금" in content
+    assert '<span class="stock-kpi-label">KRW 환산 가능 배당/이자/분배금</span><strong>150</strong>' in content
+    assert '<span class="stock-kpi-label">USD 배당</span><strong>175 USD</strong>' in content
+    assert '<span class="stock-kpi-label">FX 미해결 income row</span><strong>19</strong>' in content
+    assert '<span class="stock-kpi-label">현금성 수익 상태</span><strong>available: 1 / fx_missing: 1</strong>' in content
+    assert "수집된 배당/이자/분배금" not in content
     assert "수수료/세금" in content
     assert "Portfolio Cost Basis" not in content
     assert '<span class="stock-kpi-label">Return</span>' not in content
@@ -4617,8 +4652,8 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "profit_result_status=preliminary" in content
     assert "<strong>1500</strong>" in content
     assert "<strong>1810</strong>" in content
-    assert "<strong>310</strong>" in content
-    assert "<strong>20.666667</strong>" in content
+    assert '<span class="stock-kpi-label">전체 누적손익</span><strong>310</strong>' in content
+    assert '<span class="stock-kpi-label">전체 누적수익률</span><strong>20.666667</strong>' in content
     assert "<strong>-135</strong>" in content
 
 

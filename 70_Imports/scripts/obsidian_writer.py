@@ -343,9 +343,11 @@ def portfolio_content(
     warning: str,
     reconciliation: pd.DataFrame | None = None,
     performance_summary: pd.DataFrame | None = None,
+    income_summary: pd.DataFrame | None = None,
 ) -> str:
     reconciliation = reconciliation if reconciliation is not None else pd.DataFrame()
     performance_summary = performance_summary if performance_summary is not None else pd.DataFrame()
+    income_summary = income_summary if income_summary is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
@@ -369,6 +371,8 @@ def portfolio_content(
     holdings_value = official_kpi_value(current_value_status, metric(summary, "total_portfolio_value", "-"))
     holdings_unrealized_value = official_kpi_value(current_value_status, metric(summary, "total_unrealized_pnl", "-"))
     holdings_return_value = official_kpi_value(current_value_status, metric(summary, "pnl_pct", "-"))
+    usd_dividend_native = native_amount_label(income_summary_native_total(income_summary, "dividend", "USD"), "USD")
+    income_fx_missing_rows = plain_number_text(income_summary_field_total(income_summary, "fx_missing_row_count"))
     performance = [
         "## 전체 투자 성과",
         '<div class="stock-kpi-grid">',
@@ -378,7 +382,10 @@ def portfolio_content(
         snapshot_card("전체 누적수익률", metric(performance_summary, "cumulative_return_pct", metric(reconciliation, "total_return_pct", "-")), "cumulative PnL / net principal"),
         snapshot_card("실현손익", metric(performance_summary, "realized_trade_pnl_gross_krw", metric(reconciliation, "realized_pnl_krw", "-")), "realized ledger gross PnL"),
         snapshot_card("미실현손익", unrealized_pnl_value, "current holdings unrealized PnL"),
-        snapshot_card("수집된 배당/이자/분배금", metric(performance_summary, "income_total_krw", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"])), "recognized income rows only"),
+        snapshot_card("KRW 환산 가능 배당/이자/분배금", metric(performance_summary, "income_total_krw", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"])), "recognized official KRW rows only"),
+        snapshot_card("USD 배당", usd_dividend_native, "native USD dividend rows; not KRW converted"),
+        snapshot_card("FX 미해결 income row", income_fx_missing_rows),
+        snapshot_card("현금성 수익 상태", income_summary_status_text(income_summary)),
         snapshot_card("수수료/세금", metric_sum(performance_summary, ["fee_expense_krw", "tax_expense_krw"], metric_sum(reconciliation, ["fee_expense_krw", "tax_expense_krw"]))),
         snapshot_card("설명되지 않은 차이", metric(performance_summary, "reconciliation_residual_krw", metric(reconciliation, "residual_krw", "-")), "total PnL - explained profit"),
         snapshot_card("성과 상태", total_return_status),
@@ -970,6 +977,20 @@ def income_summary_native_total(
     values = [optional_number_value(value) for value in view[field]]
     values = [value for value in values if value is not None]
     return round(sum(values), 6) if values else ""
+
+
+def plain_number_text(value: Any) -> str:
+    number = optional_number_value(value)
+    if number is None:
+        return markdown_cell(value)
+    if float(number).is_integer():
+        return str(int(number))
+    return f"{number:.6f}".rstrip("0").rstrip(".")
+
+
+def native_amount_label(value: Any, currency: str) -> str:
+    amount = plain_number_text(value)
+    return f"{amount} {currency.upper()}" if amount else ""
 
 
 def income_summary_status_text(income_summary: pd.DataFrame) -> str:
@@ -1651,7 +1672,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
-        return portfolio_content(summary, holdings, warning, reconciliation, performance)
+        return portfolio_content(summary, holdings, warning, reconciliation, performance, income_summary)
     if name == "Reconciliation.md":
         return reconciliation_content(reconciliation, summary, realized)
     if name == "Companies.md":
