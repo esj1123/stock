@@ -1312,6 +1312,18 @@ def performance_summary_findings(
 
     if reconciliation_rows:
         reconciliation = metric_rows_to_map(reconciliation_rows)
+        total_assets_status = lower_value(reconciliation.get("total_assets_status"))
+        if total_assets_status and total_assets_status != "available":
+            for perf_metric in [
+                "current_total_assets_krw",
+                "current_cash_krw",
+                "current_holding_assets_krw",
+                "unrealized_pnl_krw",
+            ]:
+                if optional_float(metrics.get(perf_metric)) is not None:
+                    findings.append(
+                        f"performance_summary.csv {perf_metric} must be blank when reconciliation_summary.csv total_assets_status is {total_assets_status}"
+                    )
         mapping = {
             "current_total_assets_krw": "total_assets_krw",
             "cumulative_return_krw": "total_return_krw",

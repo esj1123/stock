@@ -26,6 +26,7 @@ from nh_importer import (
     normalize_currency_and_fx_rate,
     normalize_dataframe,
     normalize_date,
+    normalize_amount_fields,
     parse_korean_number,
     parse_korean_percent,
     classify_transaction_type,
@@ -261,6 +262,28 @@ def test_currency_fx_rate_split_from_overseas_balance(tmp_path: Path):
     assert normalized["source_file_type"].iloc[0] == "overseas_balance"
     assert normalized["currency"].iloc[0] == "USD"
     assert normalized["fx_rate"].iloc[0] == 1473.10
+
+
+def test_overseas_balance_broker_krw_evaluation_is_not_reconverted():
+    fields = normalize_amount_fields({
+        "source_file_type": "overseas_balance",
+        "market": "US",
+        "asset_type": "stock",
+        "transaction_type": "unknown",
+        "currency": "USD",
+        "fx_rate": 1450.8,
+        "quantity": 73,
+        "price": 107.87,
+        "evaluation_amount": 11424339,
+        "unrealized_pnl": 2374340,
+    })
+
+    assert fields["amount_basis"] == "broker_provided_krw"
+    assert fields["amount_krw_source"] == "broker_provided_krw"
+    assert fields["evaluation_amount_krw"] == 11424339
+    assert fields["unrealized_pnl_krw"] == 2374340
+    assert fields["evaluation_amount_krw"] != round(11424339 * 1450.8, 6)
+    assert fields["evaluation_amount_native"] == pytest.approx(7874.51, abs=0.01)
 
 
 def test_us_transaction_history_missing_currency_defaults_to_usd(tmp_path: Path):
@@ -1573,6 +1596,27 @@ def test_quality_gate_requires_performance_summary_metrics_and_formulas():
         income_status="fx_missing",
     ))
     assert any("performance_status is available despite unresolved inputs" in finding for finding in findings)
+
+    findings = performance_summary_findings(
+        valid_performance_summary_rows(
+            current_total_assets_krw="120000",
+            current_cash_krw="5000",
+            current_holding_assets_krw="115000",
+            unrealized_pnl_krw="15000",
+            performance_status="fx_missing",
+            fx_status="fx_missing",
+        ),
+        valid_reconciliation_summary_rows(
+            total_assets_krw="",
+            current_cash_krw="",
+            current_holding_assets_krw="",
+            total_assets_status="fx_missing",
+            unrealized_pnl_krw="15000",
+        ),
+    )
+    assert any("current_total_assets_krw must be blank" in finding for finding in findings)
+    assert any("current_holding_assets_krw must be blank" in finding for finding in findings)
+    assert any("unrealized_pnl_krw must be blank" in finding for finding in findings)
 
 
 def test_quality_gate_requires_reconciliation_summary_metrics():
@@ -3356,6 +3400,9 @@ def test_reconciliation_total_return_unavailable_when_usd_holding_lacks_fx(tmp_p
     assert metrics["residual_status"] == "unavailable"
     assert int(metrics["fx_missing_row_count"]) >= 1
     assert performance["current_total_assets_krw"] == ""
+    assert performance["current_cash_krw"] == ""
+    assert performance["current_holding_assets_krw"] == ""
+    assert performance["unrealized_pnl_krw"] == ""
     assert performance["cumulative_return_krw"] == ""
     assert performance["cumulative_return_pct"] == ""
     assert performance["performance_status"] == "fx_missing"
@@ -4422,6 +4469,9 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "fx_missing" in content
     assert "성과 상태" in content
     assert "not official" in content
+    assert "<strong>1800</strong>" not in content
+    assert "<strong>1500</strong>" not in content
+    assert "<strong>-</strong>" in content
     assert "## Normalized Currency Exposure" in content
     assert "| USD | 1 |  | 1 | 44.44 |" in content
 

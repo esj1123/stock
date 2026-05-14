@@ -616,6 +616,42 @@ def convert_native_to_krw(amount: float, currency_native: str, fx_rate_to_krw: A
     return amount, pd.NA, ""
 
 
+def amounts_close(left: float, right: float, abs_tolerance: float = 5.0, rel_tolerance: float = 0.005) -> bool:
+    if left is None or right is None:
+        return False
+    if abs(float(left) - float(right)) <= abs_tolerance:
+        return True
+    scale = max(abs(float(left)), abs(float(right)), 1.0)
+    return abs(float(left) - float(right)) / scale <= rel_tolerance
+
+
+def overseas_balance_uses_broker_krw_valuation(
+    source_type: str,
+    currency_native: str,
+    quantity: float,
+    price: float,
+    fx_rate_to_krw: Any,
+    evaluation_amount: float,
+) -> bool:
+    if str(source_type or "").strip().lower() != "overseas_balance":
+        return False
+    if str(currency_native or "").strip().upper() == "KRW":
+        return False
+    fx_rate = normalized_fx_rate_value(fx_rate_to_krw)
+    if fx_rate is None:
+        return False
+    if abs(float(quantity or 0)) <= 1e-9 or abs(float(price or 0)) <= 1e-9 or abs(float(evaluation_amount or 0)) <= 1e-9:
+        return False
+    return amounts_close(evaluation_amount, float(quantity) * float(price) * fx_rate)
+
+
+def broker_krw_to_native(amount: float, fx_rate_to_krw: Any) -> Any:
+    fx_rate = normalized_fx_rate_value(fx_rate_to_krw)
+    if fx_rate is None or abs(fx_rate) <= 1e-9:
+        return pd.NA
+    return round(float(amount or 0) / fx_rate, 6)
+
+
 def money_status(currency_native: str, fx_rate_to_krw: Any, amount: float) -> tuple[str, str]:
     currency = str(currency_native or "").strip().upper()
     if not currency:
@@ -798,6 +834,14 @@ def normalize_amount_fields(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
     fx_rate_to_krw = _row_value(row, "fx_rate_to_krw")
     if is_blank_text(fx_rate_to_krw):
         fx_rate_to_krw = _row_value(row, "fx_rate")
+    broker_krw_valuation = overseas_balance_uses_broker_krw_valuation(
+        source_type,
+        currency_native,
+        quantity,
+        price,
+        fx_rate_to_krw,
+        evaluation_amount,
+    )
     amount_native_value = primary_amount_for_kind(
         amount_kind,
         trade_amount,
@@ -810,6 +854,10 @@ def normalize_amount_fields(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
         price,
     )
     amount_native, amount_krw, amount_krw_source = convert_native_to_krw(amount_native_value, currency_native, fx_rate_to_krw)
+    if broker_krw_valuation and amount_kind in {"evaluation_amount", "unrealized_pnl", "cash_balance"}:
+        amount_native = broker_krw_to_native(amount_native_value, fx_rate_to_krw)
+        amount_krw = amount_native_value
+        amount_krw_source = "broker_provided_krw"
     amount_is_money = is_money_amount_kind(amount_kind)
     amount_review_status, amount_review_reason = (
         money_status(currency_native, fx_rate_to_krw, amount_native_value)
@@ -819,6 +867,9 @@ def normalize_amount_fields(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
     if not amount_is_money:
         amount_basis = "not_money" if amount_kind in {"quantity", "unit_price"} else "unknown"
         amount_confidence = "official_raw" if amount_kind in {"quantity", "unit_price"} else "unavailable"
+    elif broker_krw_valuation and amount_kind in {"evaluation_amount", "unrealized_pnl", "cash_balance"}:
+        amount_basis = "broker_provided_krw"
+        amount_confidence = "official_raw"
     elif amount_review_status == "ok" and currency_native == "KRW":
         amount_basis = "raw_native"
         amount_confidence = "official_raw"
@@ -847,6 +898,11 @@ def normalize_amount_fields(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
     tax_native, tax_krw, _ = convert_native_to_krw(tax, currency_native, fx_rate_to_krw)
     evaluation_amount_native, evaluation_amount_krw, _ = convert_native_to_krw(evaluation_amount, currency_native, fx_rate_to_krw)
     unrealized_pnl_native, unrealized_pnl_krw, _ = convert_native_to_krw(unrealized_pnl, currency_native, fx_rate_to_krw)
+    if broker_krw_valuation:
+        evaluation_amount_native = broker_krw_to_native(evaluation_amount, fx_rate_to_krw)
+        evaluation_amount_krw = evaluation_amount
+        unrealized_pnl_native = broker_krw_to_native(unrealized_pnl, fx_rate_to_krw)
+        unrealized_pnl_krw = unrealized_pnl
     source_type_key = source_type.strip().lower()
     is_balance_source = source_type_key in BALANCE_SOURCE_TYPES
     return {

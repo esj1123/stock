@@ -104,6 +104,16 @@ def metric(summary: pd.DataFrame, name: str, default: str = "") -> str:
     return value if value != "" else default
 
 
+def status_is_available(status: Any) -> bool:
+    return str(status or "").strip().lower() == "available"
+
+
+def official_kpi_value(status: Any, value: Any, default: str = "-") -> Any:
+    if not status_is_available(status):
+        return default
+    return value if markdown_cell(value) else default
+
+
 def number_value(value: Any, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -345,15 +355,29 @@ def portfolio_content(
     total_return_status = metric(performance_summary, "performance_status", metric(reconciliation, "total_return_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)))
     profit_status = metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)
     reconciliation_status = metric(summary, "reconciliation_status", RECONCILIATION_STATUS)
+    legacy_value_fallback = metric(summary, "total_portfolio_value", "-") if reconciliation.empty and performance_summary.empty else "-"
+    current_value_status = unit_value_status if not reconciliation.empty else value_status
+    current_total_assets_value = official_kpi_value(
+        unit_value_status,
+        metric(performance_summary, "current_total_assets_krw", metric(reconciliation, "total_assets_krw", legacy_value_fallback)),
+    )
+    unrealized_pnl_value = official_kpi_value(
+        unit_value_status,
+        metric(performance_summary, "unrealized_pnl_krw", metric(reconciliation, "unrealized_pnl_krw", metric(summary, "total_unrealized_pnl", "-") if reconciliation.empty and performance_summary.empty else "-")),
+    )
+    holdings_cost_value = official_kpi_value(current_value_status, metric(summary, "total_cost", "-"))
+    holdings_value = official_kpi_value(current_value_status, metric(summary, "total_portfolio_value", "-"))
+    holdings_unrealized_value = official_kpi_value(current_value_status, metric(summary, "total_unrealized_pnl", "-"))
+    holdings_return_value = official_kpi_value(current_value_status, metric(summary, "pnl_pct", "-"))
     performance = [
         "## 전체 투자 성과",
         '<div class="stock-kpi-grid">',
         snapshot_card("순투입원금", metric(performance_summary, "net_external_principal_krw", metric(reconciliation, "net_external_principal_krw", "-")), "external deposits - withdrawals"),
-        snapshot_card("현재 총자산", metric(performance_summary, "current_total_assets_krw", metric(reconciliation, "total_assets_krw", metric(summary, "total_portfolio_value", "-"))), "current cash + current holdings"),
+        snapshot_card("현재 총자산", current_total_assets_value, "current cash + current holdings"),
         snapshot_card("전체 누적손익", metric(performance_summary, "cumulative_return_krw", metric(reconciliation, "total_return_krw", "-")), "current assets - net principal"),
         snapshot_card("전체 누적수익률", metric(performance_summary, "cumulative_return_pct", metric(reconciliation, "total_return_pct", "-")), "cumulative PnL / net principal"),
         snapshot_card("실현손익", metric(performance_summary, "realized_trade_pnl_gross_krw", metric(reconciliation, "realized_pnl_krw", "-")), "realized ledger gross PnL"),
-        snapshot_card("미실현손익", metric(performance_summary, "unrealized_pnl_krw", metric(reconciliation, "unrealized_pnl_krw", metric(summary, "total_unrealized_pnl", "-"))), "current holdings unrealized PnL"),
+        snapshot_card("미실현손익", unrealized_pnl_value, "current holdings unrealized PnL"),
         snapshot_card("배당/이자/분배금", metric(performance_summary, "income_total_krw", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"]))),
         snapshot_card("수수료/세금", metric_sum(performance_summary, ["fee_expense_krw", "tax_expense_krw"], metric_sum(reconciliation, ["fee_expense_krw", "tax_expense_krw"]))),
         snapshot_card("설명되지 않은 차이", metric(performance_summary, "reconciliation_residual_krw", metric(reconciliation, "residual_krw", "-")), "total PnL - explained profit"),
@@ -364,10 +388,10 @@ def portfolio_content(
         "## 현재 보유분",
         '<div class="stock-kpi-grid">',
         snapshot_card("현재 보유종목", metric(summary, "holding_count", "0")),
-        snapshot_card("현재 보유분 원가", metric(summary, "total_cost", "-"), "current holdings cost basis; not net external principal"),
-        snapshot_card("현재 보유분 평가금액", metric(summary, "total_portfolio_value", "-")),
-        snapshot_card("현재 보유분 미실현손익", metric(summary, "total_unrealized_pnl", "-"), "current holdings only"),
-        snapshot_card("현재 보유분 평가수익률", metric(summary, "pnl_pct", "-"), "current holdings pnl_pct"),
+        snapshot_card("현재 보유분 원가", holdings_cost_value, "current holdings cost basis; not net external principal"),
+        snapshot_card("현재 보유분 평가금액", holdings_value),
+        snapshot_card("현재 보유분 미실현손익", holdings_unrealized_value, "current holdings only"),
+        snapshot_card("현재 보유분 평가수익률", holdings_return_value, "current holdings pnl_pct"),
         snapshot_card("수익 집계 상태", profit_status),
         snapshot_card("대사 상태", reconciliation_status),
         snapshot_card("현재 총자산 상태", unit_value_status),

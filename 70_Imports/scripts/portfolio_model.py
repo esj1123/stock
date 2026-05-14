@@ -706,7 +706,10 @@ def build_performance_summary(reconciliation: pd.DataFrame, income_summary: pd.D
     income_status = income_summary_status(income_summary)
     fx_status = performance_fx_status(rec)
 
-    current_total_assets = summary_number(rec, "total_assets_krw")
+    asset_values_available = total_assets_status == "available"
+    current_total_assets = summary_number(rec, "total_assets_krw") if asset_values_available else None
+    current_cash = summary_number(rec, "current_cash_krw") if asset_values_available else None
+    current_holding_assets = summary_number(rec, "current_holding_assets_krw") if asset_values_available else None
     net_principal = summary_number(rec, "net_external_principal_krw")
     cumulative_status = status_from_list(
         [
@@ -731,7 +734,7 @@ def build_performance_summary(reconciliation: pd.DataFrame, income_summary: pd.D
     realized_net = summary_number(rec, "realized_trade_pnl_net_krw")
     realized_gain = summary_number(rec, "realized_gain_krw")
     realized_loss = summary_number(rec, "realized_loss_krw")
-    unrealized = summary_number(rec, "unrealized_pnl_krw")
+    unrealized = summary_number(rec, "unrealized_pnl_krw") if asset_values_available else None
     fee_expense = summary_number(rec, "fee_expense_krw")
     tax_expense = summary_number(rec, "tax_expense_krw")
 
@@ -781,8 +784,8 @@ def build_performance_summary(reconciliation: pd.DataFrame, income_summary: pd.D
         "external_deposit_krw": summary_number(rec, "external_deposit_krw"),
         "external_withdrawal_krw": summary_number(rec, "external_withdrawal_krw"),
         "current_total_assets_krw": current_total_assets,
-        "current_cash_krw": summary_number(rec, "current_cash_krw"),
-        "current_holding_assets_krw": summary_number(rec, "current_holding_assets_krw"),
+        "current_cash_krw": current_cash,
+        "current_holding_assets_krw": current_holding_assets,
         "cumulative_return_krw": cumulative_return,
         "cumulative_return_pct": cumulative_return_pct,
         "realized_trade_pnl_gross_krw": realized_gross,
