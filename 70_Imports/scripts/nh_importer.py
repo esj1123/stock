@@ -625,24 +625,29 @@ def amounts_close(left: float, right: float, abs_tolerance: float = 5.0, rel_tol
     return abs(float(left) - float(right)) / scale <= rel_tolerance
 
 
-def overseas_balance_uses_broker_krw_valuation(
+def broker_krw_valuation_rate(
     source_type: str,
+    asset_type: str,
     currency_native: str,
     quantity: float,
     price: float,
     fx_rate_to_krw: Any,
     evaluation_amount: float,
-) -> bool:
-    if str(source_type or "").strip().lower() != "overseas_balance":
-        return False
+) -> float | None:
+    source = str(source_type or "").strip().lower()
+    asset = str(asset_type or "").strip().lower()
+    if source not in BALANCE_SOURCE_TYPES:
+        return None
     if str(currency_native or "").strip().upper() == "KRW":
-        return False
-    fx_rate = normalized_fx_rate_value(fx_rate_to_krw)
-    if fx_rate is None:
-        return False
+        return None
     if abs(float(quantity or 0)) <= 1e-9 or abs(float(price or 0)) <= 1e-9 or abs(float(evaluation_amount or 0)) <= 1e-9:
-        return False
-    return amounts_close(evaluation_amount, float(quantity) * float(price) * fx_rate)
+        return None
+    fx_rate = normalized_fx_rate_value(fx_rate_to_krw)
+    if source == "overseas_balance" and fx_rate is not None:
+        return fx_rate if amounts_close(evaluation_amount, float(quantity) * float(price) * fx_rate) else None
+    if asset == "cash" and abs(float(price)) >= 100:
+        return float(price) if amounts_close(evaluation_amount, float(quantity) * float(price), abs_tolerance=1000.0, rel_tolerance=0.03) else None
+    return None
 
 
 def broker_krw_to_native(amount: float, fx_rate_to_krw: Any) -> Any:
@@ -834,14 +839,18 @@ def normalize_amount_fields(row: dict[str, Any] | pd.Series) -> dict[str, Any]:
     fx_rate_to_krw = _row_value(row, "fx_rate_to_krw")
     if is_blank_text(fx_rate_to_krw):
         fx_rate_to_krw = _row_value(row, "fx_rate")
-    broker_krw_valuation = overseas_balance_uses_broker_krw_valuation(
+    broker_krw_rate = broker_krw_valuation_rate(
         source_type,
+        asset_type,
         currency_native,
         quantity,
         price,
         fx_rate_to_krw,
         evaluation_amount,
     )
+    broker_krw_valuation = broker_krw_rate is not None
+    if broker_krw_valuation and is_blank_text(fx_rate_to_krw):
+        fx_rate_to_krw = broker_krw_rate
     amount_native_value = primary_amount_for_kind(
         amount_kind,
         trade_amount,
@@ -1483,6 +1492,20 @@ def find_column(columns: list[Any], canonical: str) -> Any | None:
     return None
 
 
+def first_paired_column(columns: list[Any], targets: tuple[str, str]) -> Any | None:
+    for col in columns:
+        if paired_column_targets(col) == targets:
+            return col
+    return None
+
+
+def adjust_transaction_pair_columns(cols: dict[str, Any | None], columns: list[Any]) -> None:
+    quantity_price_col = first_paired_column(columns, ("quantity", "price"))
+    if quantity_price_col is not None and cols.get("quantity") is None and cols.get("price") == quantity_price_col:
+        cols["quantity"] = quantity_price_col
+        cols["price"] = None
+
+
 def table_has_position_snapshot_columns(columns: list[Any]) -> bool:
     has_identity = find_column(columns, "ticker") is not None or find_column(columns, "security_name") is not None
     has_quantity = find_column(columns, "balance_quantity") is not None or find_column(columns, "quantity") is not None
@@ -1684,6 +1707,8 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
     ]
 
     cols = {key: find_column(columns, key) for key in COLUMN_ALIASES}
+    if source_type in {"transaction_history", "transactions"}:
+        adjust_transaction_pair_columns(cols, columns)
     rows: list[dict[str, Any]] = []
     audit_rows: list[dict[str, Any]] = []
 

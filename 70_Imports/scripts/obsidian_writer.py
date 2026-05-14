@@ -378,7 +378,7 @@ def portfolio_content(
         snapshot_card("전체 누적수익률", metric(performance_summary, "cumulative_return_pct", metric(reconciliation, "total_return_pct", "-")), "cumulative PnL / net principal"),
         snapshot_card("실현손익", metric(performance_summary, "realized_trade_pnl_gross_krw", metric(reconciliation, "realized_pnl_krw", "-")), "realized ledger gross PnL"),
         snapshot_card("미실현손익", unrealized_pnl_value, "current holdings unrealized PnL"),
-        snapshot_card("배당/이자/분배금", metric(performance_summary, "income_total_krw", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"]))),
+        snapshot_card("수집된 배당/이자/분배금", metric(performance_summary, "income_total_krw", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"])), "recognized income rows only"),
         snapshot_card("수수료/세금", metric_sum(performance_summary, ["fee_expense_krw", "tax_expense_krw"], metric_sum(reconciliation, ["fee_expense_krw", "tax_expense_krw"]))),
         snapshot_card("설명되지 않은 차이", metric(performance_summary, "reconciliation_residual_krw", metric(reconciliation, "residual_krw", "-")), "total PnL - explained profit"),
         snapshot_card("성과 상태", total_return_status),
@@ -968,9 +968,9 @@ def income_summary_native_text(income_summary: pd.DataFrame) -> str:
 
 def cash_income_cards(income_summary: pd.DataFrame) -> str:
     return dashboard_kpi_grid([
-        snapshot_card("배당", income_summary_field_total(income_summary, "amount_krw_sum", "dividend"), "official KRW rows only"),
-        snapshot_card("이자", income_summary_field_total(income_summary, "amount_krw_sum", "interest"), "official KRW rows only"),
-        snapshot_card("분배금", income_summary_field_total(income_summary, "amount_krw_sum", "distribution"), "official KRW rows only"),
+        snapshot_card("수집된 배당", income_summary_field_total(income_summary, "amount_krw_sum", "dividend"), "recognized official KRW rows only"),
+        snapshot_card("수집된 이자", income_summary_field_total(income_summary, "amount_krw_sum", "interest"), "recognized official KRW rows only"),
+        snapshot_card("수집된 분배금", income_summary_field_total(income_summary, "amount_krw_sum", "distribution"), "recognized official KRW rows only"),
         snapshot_card("원천징수세", income_summary_field_total(income_summary, "tax_krw_sum"), "official KRW rows only"),
         snapshot_card("FX 누락 건수", income_summary_field_total(income_summary, "fx_missing_row_count")),
         snapshot_card("native 기준 수익", income_summary_native_text(income_summary)),

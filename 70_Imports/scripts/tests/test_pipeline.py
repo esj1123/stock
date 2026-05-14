@@ -285,6 +285,42 @@ def test_overseas_balance_broker_krw_evaluation_is_not_reconverted():
     assert fields["evaluation_amount_krw"] != round(11424339 * 1450.8, 6)
     assert fields["evaluation_amount_native"] == pytest.approx(7874.51, abs=0.01)
 
+    cash_fields = normalize_amount_fields({
+        "source_file_type": "holdings",
+        "market": "US",
+        "asset_type": "cash",
+        "transaction_type": "unknown",
+        "currency": "USD",
+        "quantity": 38.5,
+        "price": 1450.0,
+        "evaluation_amount": 55825.0,
+    })
+
+    assert cash_fields["amount_review_status"] == "ok"
+    assert cash_fields["fx_rate_to_krw"] == 1450.0
+    assert cash_fields["amount_basis"] == "broker_provided_krw"
+    assert cash_fields["evaluation_amount_krw"] == 55825.0
+
+
+def test_transaction_history_paired_quantity_price_column_maps_quantity(tmp_path: Path):
+    columns = pd.MultiIndex.from_tuples([
+        ("거래일자", ""),
+        ("거래유형", ""),
+        ("종목명", ""),
+        ("수량", "단가"),
+        ("거래금액", "정산금액"),
+    ])
+    df = pd.DataFrame([
+        ["2026-01-02", "매수", "Synthetic Position (SYN)", "7", "140000"],
+        ["2026-01-03", "매도", "Synthetic Position (SYN)", "3", "75000"],
+    ], columns=columns)
+
+    normalized, _, _ = normalize_dataframe(df, tmp_path / "transaction_history.xlsx", "Sheet1")
+    trades = normalized[normalized["transaction_type"].isin(["buy", "sell"])].reset_index(drop=True)
+
+    assert list(trades["quantity"]) == [7.0, 3.0]
+    assert list(trades["price"]) == [0.0, 0.0]
+
 
 def test_us_transaction_history_missing_currency_defaults_to_usd(tmp_path: Path):
     df = pd.DataFrame([
@@ -2634,8 +2670,8 @@ def test_multiindex_transaction_history_uses_leaf_headers_for_amount_columns(tmp
     row = normalized.iloc[0]
     assert row["source_file_type"] == "transaction_history"
     assert row["transaction_type"] == "buy"
-    assert row["quantity"] == 0
-    assert row["price"] == 123.45
+    assert row["quantity"] == 123.45
+    assert row["price"] == 0
     assert row["trade_amount"] == 0
     assert row["settlement_amount"] == 678.9
 
@@ -3211,6 +3247,7 @@ def test_stage9_fx_missing_preserves_native_realized_amounts_and_blocks_official
                 "transaction_type": "sell",
                 "quantity": 1,
                 "trade_amount": 120,
+                "trade_amount_krw": 0,
                 "currency_native": "USD",
                 "amount_review_status": "fx_missing",
                 "cashflow_role": "trade_settlement",

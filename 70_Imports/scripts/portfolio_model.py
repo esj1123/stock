@@ -355,6 +355,20 @@ def first_number(row: pd.Series, fields: list[str]) -> float | None:
     return None
 
 
+def first_nonzero_number(row: pd.Series, fields: list[str]) -> float | None:
+    fallback = None
+    for field in fields:
+        if field in row.index:
+            value = number_value(row.get(field))
+            if value is None:
+                continue
+            if fallback is None:
+                fallback = value
+            if abs(value) > 1e-9:
+                return value
+    return fallback
+
+
 def truthy_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
@@ -857,8 +871,8 @@ def trade_money_amounts(
 ) -> dict[str, Any]:
     currency = row_currency(row)
     review_status = row_review_status(row) or "ok"
-    native = first_number(row, native_fields)
-    krw = first_number(row, krw_fields)
+    native = first_nonzero_number(row, native_fields)
+    krw = first_nonzero_number(row, krw_fields)
 
     if default_zero and native is None and krw is None:
         native = 0.0
@@ -882,6 +896,8 @@ def trade_money_amounts(
     elif currency != "KRW" and krw is None:
         status = "fx_missing"
         reason = "trade amount has no KRW-normalized value"
+    if currency != "KRW" and status != "ok" and native not in {None, 0.0} and krw == 0.0:
+        krw = None
 
     if currency == "KRW":
         fx_status = "not_required"
