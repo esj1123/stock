@@ -104,6 +104,16 @@ def metric(summary: pd.DataFrame, name: str, default: str = "") -> str:
     return value if value != "" else default
 
 
+def status_is_available(status: Any) -> bool:
+    return str(status or "").strip().lower() == "available"
+
+
+def official_kpi_value(status: Any, value: Any, default: str = "-") -> Any:
+    if not status_is_available(status):
+        return default
+    return value if markdown_cell(value) else default
+
+
 def number_value(value: Any, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -133,6 +143,13 @@ def optional_number_value(value: Any) -> float | None:
         return float(text)
     except Exception:
         return None
+
+
+def metric_sum(summary: pd.DataFrame, metrics: list[str], default: str = "-") -> Any:
+    values = [optional_number_value(metric(summary, name)) for name in metrics]
+    if any(value is None for value in values):
+        return default
+    return round(sum(value for value in values if value is not None), 6)
 
 
 def percent_bar(value: Any, width: int = 20) -> str:
@@ -320,36 +337,79 @@ def preliminary_reconciliation_warning(summary: pd.DataFrame | None = None) -> s
     ])
 
 
-def portfolio_content(summary: pd.DataFrame, holdings: pd.DataFrame, warning: str, reconciliation: pd.DataFrame | None = None) -> str:
+def portfolio_content(
+    summary: pd.DataFrame,
+    holdings: pd.DataFrame,
+    warning: str,
+    reconciliation: pd.DataFrame | None = None,
+    performance_summary: pd.DataFrame | None = None,
+    income_summary: pd.DataFrame | None = None,
+) -> str:
     reconciliation = reconciliation if reconciliation is not None else pd.DataFrame()
+    performance_summary = performance_summary if performance_summary is not None else pd.DataFrame()
+    income_summary = income_summary if income_summary is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
     parts.append(preliminary_reconciliation_warning(summary))
     value_status = metric(summary, "total_portfolio_value_status", "unknown")
     unit_value_status = metric(reconciliation, "total_assets_status", value_status)
-    total_return_status = metric(reconciliation, "total_return_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS))
+    total_return_status = metric(performance_summary, "performance_status", metric(reconciliation, "total_return_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)))
     profit_status = metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)
     reconciliation_status = metric(summary, "reconciliation_status", RECONCILIATION_STATUS)
-    snapshot = [
-        "## Snapshot",
+    legacy_value_fallback = metric(summary, "total_portfolio_value", "-") if reconciliation.empty and performance_summary.empty else "-"
+    current_value_status = unit_value_status if not reconciliation.empty else value_status
+    current_total_assets_value = official_kpi_value(
+        unit_value_status,
+        metric(performance_summary, "current_total_assets_krw", metric(reconciliation, "total_assets_krw", legacy_value_fallback)),
+    )
+    unrealized_pnl_value = official_kpi_value(
+        unit_value_status,
+        metric(performance_summary, "unrealized_pnl_krw", metric(reconciliation, "unrealized_pnl_krw", metric(summary, "total_unrealized_pnl", "-") if reconciliation.empty and performance_summary.empty else "-")),
+    )
+    holdings_cost_value = official_kpi_value(current_value_status, metric(summary, "total_cost", "-"))
+    holdings_value = official_kpi_value(current_value_status, metric(summary, "total_portfolio_value", "-"))
+    holdings_unrealized_value = official_kpi_value(current_value_status, metric(summary, "total_unrealized_pnl", "-"))
+    holdings_return_value = official_kpi_value(current_value_status, metric(summary, "pnl_pct", "-"))
+    usd_dividend_native = native_amount_label(income_summary_native_total(income_summary, "dividend", "USD"), "USD")
+    income_fx_missing_rows = plain_number_text(income_summary_field_total(income_summary, "fx_missing_row_count"))
+    performance = [
+        "## 전체 투자 성과",
         '<div class="stock-kpi-grid">',
-        snapshot_card("Holdings", metric(summary, "holding_count", "0")),
-        snapshot_card("Portfolio Cost Basis", metric(summary, "total_cost", "-"), "preliminary; not net external principal"),
-        snapshot_card("Total Value", metric(summary, "total_portfolio_value", "-")),
-        snapshot_card("Unrealized PnL", metric(summary, "total_unrealized_pnl", "-"), "preliminary"),
-        snapshot_card("Return", metric(summary, "pnl_pct", "-"), "preliminary pnl_pct"),
-        snapshot_card("Profit Status", profit_status),
-        snapshot_card("Recon Status", reconciliation_status),
-        snapshot_card("Unit-aware Value Status", unit_value_status),
-        snapshot_card("Total Return Status", total_return_status),
+        snapshot_card("순투입원금", metric(performance_summary, "net_external_principal_krw", metric(reconciliation, "net_external_principal_krw", "-")), "external deposits - withdrawals"),
+        snapshot_card("현재 총자산", current_total_assets_value, "current cash + current holdings"),
+        snapshot_card("전체 누적손익", metric(performance_summary, "cumulative_return_krw", metric(reconciliation, "total_return_krw", "-")), "current assets - net principal"),
+        snapshot_card("전체 누적수익률", metric(performance_summary, "cumulative_return_pct", metric(reconciliation, "total_return_pct", "-")), "cumulative PnL / net principal"),
+        snapshot_card("실현손익", metric(performance_summary, "realized_trade_pnl_gross_krw", metric(reconciliation, "realized_pnl_krw", "-")), "realized ledger gross PnL"),
+        snapshot_card("미실현손익", unrealized_pnl_value, "current holdings unrealized PnL"),
+        snapshot_card("KRW 환산 가능 배당/이자/분배금", metric(performance_summary, "income_total_krw", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"])), "recognized official KRW rows only"),
+        snapshot_card("USD 배당", usd_dividend_native, "native USD dividend rows; not KRW converted"),
+        snapshot_card("FX 미해결 income row", income_fx_missing_rows),
+        snapshot_card("현금성 수익 상태", income_summary_status_text(income_summary)),
+        snapshot_card("수수료/세금", metric_sum(performance_summary, ["fee_expense_krw", "tax_expense_krw"], metric_sum(reconciliation, ["fee_expense_krw", "tax_expense_krw"]))),
+        snapshot_card("설명되지 않은 차이", metric(performance_summary, "reconciliation_residual_krw", metric(reconciliation, "residual_krw", "-")), "total PnL - explained profit"),
+        snapshot_card("성과 상태", total_return_status),
+        "</div>",
+    ]
+    current_position_snapshot = [
+        "## 현재 보유분",
+        '<div class="stock-kpi-grid">',
+        snapshot_card("현재 보유종목", metric(summary, "holding_count", "0")),
+        snapshot_card("현재 보유분 원가", holdings_cost_value, "current holdings cost basis; not net external principal"),
+        snapshot_card("현재 보유분 평가금액", holdings_value),
+        snapshot_card("현재 보유분 미실현손익", holdings_unrealized_value, "current holdings only"),
+        snapshot_card("현재 보유분 평가수익률", holdings_return_value, "current holdings pnl_pct"),
+        snapshot_card("수익 집계 상태", profit_status),
+        snapshot_card("대사 상태", reconciliation_status),
+        snapshot_card("현재 총자산 상태", unit_value_status),
         snapshot_card("Loss Review", metric(summary, "loss_review_required_count", "0"), "candidate count"),
         snapshot_card("Leveraged ETF", metric(summary, "leveraged_etf_count", "0")),
         snapshot_card("Largest Position", largest_position_label(holdings)),
         snapshot_card("Value Status", value_status),
         "</div>",
     ]
-    parts.append("\n".join(snapshot))
+    parts.append("\n".join(performance))
+    parts.append("\n".join(current_position_snapshot))
     if value_status.lower() == "unknown":
         parts.append("> [!warning] Portfolio value status\n> Total portfolio value status is `unknown`. Add current balance files before relying on value-based summaries.")
     if unit_value_status.lower() != "available" or total_return_status.lower() != "available":
@@ -854,6 +914,25 @@ def native_amount_total_if_single_currency(view: pd.DataFrame) -> tuple[str, Any
 def income_summary_table(income: pd.DataFrame) -> str:
     if income.empty or "income_type" not in income.columns:
         return EMPTY_DATA
+    if "amount_krw_sum" in income.columns:
+        return markdown_table(
+            income,
+            [
+                "income_type",
+                "currency_native",
+                "amount_native_sum",
+                "amount_krw_sum",
+                "tax_native_sum",
+                "tax_krw_sum",
+                "net_income_native",
+                "net_income_krw",
+                "row_count",
+                "fx_missing_row_count",
+                "amount_review_needed_row_count",
+                "income_status",
+            ],
+            50,
+        )
     records = []
     for income_type, group in income.groupby("income_type", dropna=False, sort=True):
         currency, native_total = native_amount_total_if_single_currency(group)
@@ -869,6 +948,90 @@ def income_summary_table(income: pd.DataFrame) -> str:
             "amount_review_status_counts": status_counts,
         })
     return markdown_table(pd.DataFrame(records))
+
+
+def income_summary_field_total(income_summary: pd.DataFrame, field: str, income_type: str | None = None) -> Any:
+    if income_summary.empty or field not in income_summary.columns:
+        return ""
+    view = income_summary
+    if income_type is not None and "income_type" in view.columns:
+        view = view[view["income_type"].fillna("").astype(str).str.lower().eq(income_type)]
+    values = [optional_number_value(value) for value in view[field]]
+    values = [value for value in values if value is not None]
+    return round(sum(values), 6) if values else ""
+
+
+def income_summary_native_total(
+    income_summary: pd.DataFrame,
+    income_type: str,
+    currency: str,
+    field: str = "amount_native_sum",
+) -> Any:
+    if income_summary.empty or field not in income_summary.columns:
+        return ""
+    view = income_summary
+    if "income_type" in view.columns:
+        view = view[view["income_type"].fillna("").astype(str).str.lower().eq(income_type.lower())]
+    if "currency_native" in view.columns:
+        view = view[view["currency_native"].fillna("").astype(str).str.upper().eq(currency.upper())]
+    values = [optional_number_value(value) for value in view[field]]
+    values = [value for value in values if value is not None]
+    return round(sum(values), 6) if values else ""
+
+
+def plain_number_text(value: Any) -> str:
+    number = optional_number_value(value)
+    if number is None:
+        return markdown_cell(value)
+    if float(number).is_integer():
+        return str(int(number))
+    return f"{number:.6f}".rstrip("0").rstrip(".")
+
+
+def native_amount_label(value: Any, currency: str) -> str:
+    amount = plain_number_text(value)
+    return f"{amount} {currency.upper()}" if amount else ""
+
+
+def income_summary_status_text(income_summary: pd.DataFrame) -> str:
+    if income_summary.empty or "income_status" not in income_summary.columns:
+        return ""
+    status = income_summary["income_status"].fillna("").astype(str).str.strip()
+    status = status[status.ne("")]
+    if status.empty:
+        return ""
+    counts = status.value_counts(sort=False)
+    if len(counts) == 1:
+        return str(counts.index[0])
+    return " / ".join(f"{index}: {count}" for index, count in counts.items())
+
+
+def income_summary_native_text(income_summary: pd.DataFrame) -> str:
+    if income_summary.empty or "currency_native" not in income_summary.columns or "net_income_native" not in income_summary.columns:
+        return ""
+    records = []
+    for currency, group in income_summary.groupby("currency_native", dropna=False, sort=True):
+        values = [optional_number_value(value) for value in group["net_income_native"]]
+        values = [value for value in values if value is not None]
+        if values:
+            records.append(f"{currency or 'UNKNOWN'} {round(sum(values), 6)}")
+    return " / ".join(records)
+
+
+def cash_income_cards(income_summary: pd.DataFrame) -> str:
+    return dashboard_kpi_grid([
+        snapshot_card("KRW 환산 가능 배당/이자/분배금", income_summary_field_total(income_summary, "amount_krw_sum"), "recognized official KRW rows only"),
+        snapshot_card("USD dividend native total", income_summary_native_total(income_summary, "dividend", "USD"), "native USD dividend rows; not KRW converted"),
+        snapshot_card("FX 미해결 income row count", income_summary_field_total(income_summary, "fx_missing_row_count")),
+        snapshot_card("income_status", income_summary_status_text(income_summary)),
+        snapshot_card("수집된 배당", income_summary_field_total(income_summary, "amount_krw_sum", "dividend"), "recognized official KRW rows only"),
+        snapshot_card("수집된 이자", income_summary_field_total(income_summary, "amount_krw_sum", "interest"), "recognized official KRW rows only"),
+        snapshot_card("수집된 분배금", income_summary_field_total(income_summary, "amount_krw_sum", "distribution"), "recognized official KRW rows only"),
+        snapshot_card("원천징수세", income_summary_field_total(income_summary, "tax_krw_sum"), "official KRW rows only"),
+        snapshot_card("FX 누락 건수", income_summary_field_total(income_summary, "fx_missing_row_count")),
+        snapshot_card("native 기준 수익", income_summary_native_text(income_summary)),
+        snapshot_card("KRW 환산 가능 수익", income_summary_field_total(income_summary, "net_income_krw"), "status ok rows only"),
+    ])
 
 
 def expense_summary_table(expenses: pd.DataFrame) -> str:
@@ -941,6 +1104,38 @@ def reconciliation_metric_table(reconciliation: pd.DataFrame, metrics: list[str]
     return markdown_table(pd.DataFrame(records))
 
 
+def realized_pnl_table(realized: pd.DataFrame, limit: int = 50) -> str:
+    if realized.empty:
+        return EMPTY_DATA
+    view = realized.copy()
+    if "sell_date" in view.columns:
+        view = view.sort_values("sell_date", ascending=False)
+    return markdown_table(
+        view,
+        [
+            "sell_date",
+            "ticker",
+            "security_name",
+            "account_type",
+            "quantity_sold",
+            "proceeds_native",
+            "proceeds_krw",
+            "cost_basis_native",
+            "cost_basis_krw",
+            "fee_krw",
+            "tax_krw",
+            "realized_trade_pnl_gross_krw",
+            "realized_trade_pnl_net_krw",
+            "realized_result",
+            "position_status",
+            "cost_basis_method",
+            "amount_review_status",
+            "fx_status",
+        ],
+        limit,
+    )
+
+
 def reconciliation_status_warning(reconciliation: pd.DataFrame) -> str:
     total_assets_status = metric(reconciliation, "total_assets_status", "unknown")
     principal_status = metric(reconciliation, "net_external_principal_status", "unknown")
@@ -956,42 +1151,72 @@ def reconciliation_status_warning(reconciliation: pd.DataFrame) -> str:
     )
 
 
-def reconciliation_content(reconciliation: pd.DataFrame, summary: pd.DataFrame | None = None) -> str:
+def reconciliation_content(
+    reconciliation: pd.DataFrame,
+    summary: pd.DataFrame | None = None,
+    realized: pd.DataFrame | None = None,
+) -> str:
     summary = summary if summary is not None else pd.DataFrame()
+    realized = realized if realized is not None else pd.DataFrame()
     parts = []
     warning = reconciliation_status_warning(reconciliation)
     if warning:
         parts.append(warning)
     parts.extend([
-        "## Reconciliation Summary",
+        "## Reconciliation Scope",
+        reconciliation_metric_table(reconciliation, [
+            "reconciliation_summary_role",
+            "total_return_alias_of",
+            "total_return_pct_alias_of",
+            "explained_profit_formula",
+            "fee_tax_treatment",
+            "fx_pnl_treatment",
+        ]),
+        "## Audit Totals",
         reconciliation_metric_table(reconciliation, [
             "total_assets_krw",
             "total_assets_status",
+            "current_cash_krw",
+            "current_holding_assets_krw",
             "net_external_principal_krw",
             "net_external_principal_status",
             "total_return_krw",
+            "total_return_pct",
             "total_return_status",
         ]),
-        "## Income and Expense Breakdown",
+        "## Explained Profit Components",
         reconciliation_metric_table(reconciliation, [
             "unrealized_pnl_krw",
+            "realized_pnl_krw",
+            "realized_trade_pnl_gross_krw",
+            "realized_trade_pnl_net_krw",
+            "realized_gain_krw",
+            "realized_loss_krw",
+            "realized_pnl_basis",
+            "realized_cost_basis_method",
+            "realized_pnl_status",
             "dividend_income_krw",
             "interest_income_krw",
             "distribution_income_krw",
             "fee_expense_krw",
             "tax_expense_krw",
-            "realized_pnl_status",
             "fx_pnl_status",
             "explained_profit_krw",
+            "explained_profit_status",
         ]),
-        "## Residual",
+        "## Residual Status",
         reconciliation_metric_table(reconciliation, ["residual_krw", "residual_status"]),
+        "## Realized PnL Ledger (`processed_realized_pnl.csv`)",
+        realized_pnl_table(realized),
         "## Unresolved Status Counts",
         reconciliation_metric_table(reconciliation, [
             "fx_missing_row_count",
             "currency_ambiguous_row_count",
             "unit_ambiguous_row_count",
             "amount_review_needed_row_count",
+            "realized_pnl_row_count",
+            "realized_pnl_unavailable_row_count",
+            "realized_closed_position_count",
         ]),
         "## FX Event Counts",
         reconciliation_metric_table(reconciliation, [
@@ -1024,11 +1249,13 @@ def cashflow_content(
     dividends: pd.DataFrame,
     summary: pd.DataFrame | None = None,
     income: pd.DataFrame | None = None,
+    income_summary: pd.DataFrame | None = None,
     expenses: pd.DataFrame | None = None,
     fx_events: pd.DataFrame | None = None,
 ) -> str:
     summary = summary if summary is not None else pd.DataFrame()
     income = income if income is not None else pd.DataFrame()
+    income_summary = income_summary if income_summary is not None else pd.DataFrame()
     expenses = expenses if expenses is not None else pd.DataFrame()
     fx_events = fx_events if fx_events is not None else pd.DataFrame()
     principal_cash = cashflow_principal_view(cash)
@@ -1055,8 +1282,9 @@ def cashflow_content(
         cashflow_principal_summary_table(principal_cash),
         "## Principal exclusions and unresolved amounts",
         cashflow_exclusion_status_table(cash, income, expenses, fx_events),
-        "## Income summary",
-        income_summary_table(income),
+        "## 현금성 수익",
+        cash_income_cards(income_summary),
+        income_summary_table(income_summary if not income_summary.empty else income),
         "### Income status counts",
         status_count_table(income, "amount_review_status", "income"),
         "## Expense summary",
@@ -1107,10 +1335,16 @@ REQUIRED_OUTPUT_COLUMNS = {
     "processed_income.csv": [
         "source_file", "source_file_type", "account_type", "market", "trade_date", "trade_time",
         "ticker", "security_name", "income_type", "currency_native", "amount_native", "amount_krw",
-        "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source", "amount_kind", "amount_basis",
-        "amount_confidence", "amount_review_status", "amount_review_reason", "affects_principal",
-        "affects_profit", "raw_memo",
+        "amount_krw_source", "tax_native", "tax_krw", "fx_rate_to_krw", "fx_rate_source",
+        "amount_kind", "amount_basis", "amount_confidence", "amount_review_status",
+        "amount_review_reason", "affects_principal", "affects_profit", "raw_memo",
     ],
+    "income_summary.csv": [
+        "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",
+        "tax_krw_sum", "net_income_native", "net_income_krw", "row_count", "fx_missing_row_count",
+        "amount_review_needed_row_count", "income_status",
+    ],
+    "performance_summary.csv": ["metric", "value"],
     "processed_expenses.csv": [
         "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
         "security_name", "expense_type", "currency_native", "amount_native", "amount_krw",
@@ -1123,6 +1357,15 @@ REQUIRED_OUTPUT_COLUMNS = {
         "leg", "from_currency", "to_currency", "currency_native", "amount_native", "amount_krw",
         "fx_rate_to_krw", "fx_rate_source", "fx_pair_status", "cashflow_role", "affects_principal",
         "affects_profit", "is_internal_transfer", "amount_review_status", "amount_review_reason", "raw_memo",
+    ],
+    "processed_realized_pnl.csv": [
+        "account_type", "market", "ticker", "security_name", "currency_native", "sell_date",
+        "sell_import_id", "quantity_sold", "proceeds_native", "proceeds_krw", "cost_basis_native",
+        "cost_basis_krw", "fee_native", "fee_krw", "tax_native", "tax_krw",
+        "realized_trade_pnl_gross_native", "realized_trade_pnl_gross_krw",
+        "realized_trade_pnl_net_native", "realized_trade_pnl_net_krw", "realized_result",
+        "position_status", "cost_basis_method", "amount_review_status", "fx_status",
+        "amount_review_reason", "source_file",
     ],
 }
 
@@ -1408,6 +1651,8 @@ def bootstrap_autogenerated_block(path: Path, heading: str = "Auto-generated upd
 def dashboard_content(name: str, processed_dir: Path) -> str:
     summary = read_csv(processed_dir / "portfolio_summary.csv")
     reconciliation = read_csv(processed_dir / "reconciliation_summary.csv")
+    performance = read_csv(processed_dir / "performance_summary.csv")
+    realized = read_csv(processed_dir / "processed_realized_pnl.csv")
     holdings = read_csv(processed_dir / "processed_holdings.csv")
     risk = read_csv(processed_dir / "risk_watchlist.csv")
     review = read_csv(processed_dir / "review_queue.csv")
@@ -1415,6 +1660,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     cash = read_csv(processed_dir / "processed_cashflows.csv")
     dividends = read_csv(processed_dir / "processed_dividends.csv")
     income = read_csv(processed_dir / "processed_income.csv")
+    income_summary = read_csv(processed_dir / "income_summary.csv")
     expenses = read_csv(processed_dir / "processed_expenses.csv")
     fx_events = read_csv(processed_dir / "processed_fx_events.csv")
     sources = read_csv(processed_dir / "source_file_index.csv")
@@ -1426,15 +1672,15 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
-        return portfolio_content(summary, holdings, warning, reconciliation)
+        return portfolio_content(summary, holdings, warning, reconciliation, performance, income_summary)
     if name == "Reconciliation.md":
-        return reconciliation_content(reconciliation, summary)
+        return reconciliation_content(reconciliation, summary, realized)
     if name == "Companies.md":
         return companies_content(holdings)
     if name == "Exposure.md":
         return exposure_content(summary, holdings, warning)
     if name == "Cashflows.md":
-        return cashflow_content(cash, dividends, summary, income, expenses, fx_events)
+        return cashflow_content(cash, dividends, summary, income, income_summary, expenses, fx_events)
     if name == "Import_Review.md":
         return import_review_content(summary, sources, skipped, unclassified, warning, holdings, income, expenses, fx_events, amount_audit, unit_mismatch, processed_dir)
     if name == "Risk_Watchlist.md":
