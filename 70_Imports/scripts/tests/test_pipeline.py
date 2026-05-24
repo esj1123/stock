@@ -4493,9 +4493,9 @@ def test_cashflow_dashboard_income_kpis_format_count_native_and_krw_values(tmp_p
             {
                 "income_type": "dividend",
                 "currency_native": "USD",
-                "amount_native_sum": "-13015.0",
+                "amount_native_sum": "175.0",
                 "amount_krw_sum": "",
-                "tax_native_sum": "0",
+                "tax_native_sum": "13190.0",
                 "tax_krw_sum": "",
                 "net_income_native": "-13015.0",
                 "net_income_krw": "",
@@ -4512,8 +4512,11 @@ def test_cashflow_dashboard_income_kpis_format_count_native_and_krw_values(tmp_p
     raw_by_currency = raw_income_summary.set_index("currency_native")
 
     assert '<span class="stock-kpi-label">FX 누락 건수</span><strong>19</strong>' in content
-    assert '<span class="stock-kpi-label">native 기준 수익</span><strong>KRW 31,751 / USD -13,015</strong>' in content
+    assert '<span class="stock-kpi-label">USD dividend native total</span><strong>175 USD</strong>' in content
+    assert '<span class="stock-kpi-label">FX 미해결 income row count</span><strong>19</strong>' in content
+    assert '<span class="stock-kpi-label">native 기준 수익</span><strong>KRW 31,751 / USD FX 검토 필요</strong>' in content
     assert '<span class="stock-kpi-label">KRW 환산 가능 수익</span><strong>31,751</strong>' in content
+    assert "USD -13,015" not in content
     assert "31751.0" not in content
     assert "-13015.0" not in content
     assert "19.0" not in content

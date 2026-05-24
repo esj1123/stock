@@ -1365,15 +1365,33 @@ def income_summary_status_text(income_summary: pd.DataFrame) -> str:
     return " / ".join(f"{index}: {count}" for index, count in counts.items())
 
 
+def income_summary_group_needs_fx_review(group: pd.DataFrame) -> bool:
+    for column in ["fx_missing_row_count", "amount_review_needed_row_count"]:
+        if column in group.columns:
+            values = [optional_number_value(value) for value in group[column]]
+            if sum(value for value in values if value is not None) > 0:
+                return True
+    if "income_status" in group.columns:
+        statuses = group["income_status"].fillna("").astype(str).str.strip().str.lower()
+        statuses = statuses[statuses.ne("")]
+        if not statuses.empty and any(status not in {"available", "ok"} for status in statuses):
+            return True
+    return False
+
+
 def income_summary_native_text(income_summary: pd.DataFrame) -> str:
     if income_summary.empty or "currency_native" not in income_summary.columns or "net_income_native" not in income_summary.columns:
         return ""
     records = []
     for currency, group in income_summary.groupby("currency_native", dropna=False, sort=True):
+        currency_text = markdown_cell(currency).upper() if markdown_cell(currency) else "UNKNOWN"
+        if currency_text != "KRW" and income_summary_group_needs_fx_review(group):
+            records.append(f"{currency_text} FX 검토 필요")
+            continue
         values = [optional_number_value(value) for value in group["net_income_native"]]
         values = [value for value in values if value is not None]
         if values:
-            records.append(f"{currency or 'UNKNOWN'} {round(sum(values), 6)}")
+            records.append(f"{currency_text} {format_number(round(sum(values), 6))}")
     return " / ".join(records)
 
 
