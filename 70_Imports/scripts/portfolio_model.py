@@ -74,6 +74,22 @@ PERFORMANCE_SUMMARY_METRICS = [
     "fx_status",
     "amount_review_needed_row_count",
 ]
+MONTHLY_CASHFLOW_SUMMARY_COLUMNS = [
+    "month",
+    "external_deposit_krw",
+    "external_withdrawal_krw",
+    "net_principal_flow_krw",
+    "cumulative_principal_krw",
+]
+PERFORMANCE_HISTORY_COLUMNS = [
+    "snapshot_month",
+    "snapshot_date",
+    "cumulative_principal_krw",
+    "current_total_assets_krw",
+    "cumulative_return_krw",
+    "cumulative_return_pct",
+    "performance_status",
+]
 REALIZED_PNL_COLUMNS = [
     "account_type",
     "market",
@@ -556,6 +572,48 @@ def net_external_principal_krw(cashflows: pd.DataFrame, source_available: bool =
     return deposits, withdrawals, deposits - withdrawals, "available", status_counts
 
 
+def build_monthly_cashflow_summary(cashflows: pd.DataFrame) -> pd.DataFrame:
+    if cashflows.empty or "trade_date" not in cashflows.columns:
+        return pd.DataFrame(columns=MONTHLY_CASHFLOW_SUMMARY_COLUMNS)
+
+    records: list[dict[str, Any]] = []
+    for _, row in cashflows.iterrows():
+        direction = principal_direction(row)
+        if not direction:
+            continue
+        month = text_value(row.get("trade_date"))[:7]
+        if len(month) != 7:
+            continue
+        role = text_value(row.get("cashflow_role")).lower()
+        review_status = row_review_status(row) or "ok"
+        amount = first_number(row, ["settlement_amount_krw", "amount_krw"])
+        if role != "external_principal" or not truthy_value(row.get("affects_principal")) or review_status != "ok" or amount is None:
+            continue
+        amount = abs(amount)
+        records.append({
+            "month": month,
+            "external_deposit_krw": amount if direction == "deposit" else 0.0,
+            "external_withdrawal_krw": amount if direction == "withdrawal" else 0.0,
+        })
+
+    if not records:
+        return pd.DataFrame(columns=MONTHLY_CASHFLOW_SUMMARY_COLUMNS)
+
+    monthly = (
+        pd.DataFrame(records)
+        .groupby("month", as_index=False, dropna=False)[["external_deposit_krw", "external_withdrawal_krw"]]
+        .sum()
+        .sort_values("month", ascending=True)
+        .reset_index(drop=True)
+    )
+    monthly["net_principal_flow_krw"] = monthly["external_deposit_krw"] - monthly["external_withdrawal_krw"]
+    monthly["cumulative_principal_krw"] = monthly["net_principal_flow_krw"].cumsum()
+    for column in MONTHLY_CASHFLOW_SUMMARY_COLUMNS:
+        if column != "month":
+            monthly[column] = monthly[column].round(2)
+    return monthly.reindex(columns=MONTHLY_CASHFLOW_SUMMARY_COLUMNS)
+
+
 def ok_amount_sum(df: pd.DataFrame, type_col: str, accepted_types: set[str]) -> float:
     if df.empty or type_col not in df.columns:
         return 0.0
@@ -823,6 +881,41 @@ def build_performance_summary(reconciliation: pd.DataFrame, income_summary: pd.D
         "amount_review_needed_row_count": summary_number(rec, "amount_review_needed_row_count") or 0,
     }
     return summary_metric_rows({metric: values.get(metric) for metric in PERFORMANCE_SUMMARY_METRICS})
+
+
+def build_performance_history(
+    performance_summary: pd.DataFrame,
+    existing_history: pd.DataFrame | None = None,
+    snapshot_date: date | None = None,
+) -> pd.DataFrame:
+    existing_history = existing_history if existing_history is not None else pd.DataFrame()
+    snapshot_date = snapshot_date or date.today()
+    metrics = summary_to_dict(performance_summary)
+    if not metrics:
+        return existing_history.reindex(columns=PERFORMANCE_HISTORY_COLUMNS)
+
+    snapshot_month = snapshot_date.isoformat()[:7]
+    current_row = {
+        "snapshot_month": snapshot_month,
+        "snapshot_date": snapshot_date.isoformat(),
+        "cumulative_principal_krw": summary_number(metrics, "net_external_principal_krw"),
+        "current_total_assets_krw": summary_number(metrics, "current_total_assets_krw"),
+        "cumulative_return_krw": summary_number(metrics, "cumulative_return_krw"),
+        "cumulative_return_pct": summary_number(metrics, "cumulative_return_pct"),
+        "performance_status": text_value(metrics.get("performance_status")) or "unavailable",
+    }
+
+    history = existing_history.copy()
+    if history.empty:
+        history = pd.DataFrame(columns=PERFORMANCE_HISTORY_COLUMNS)
+    else:
+        history = history.reindex(columns=PERFORMANCE_HISTORY_COLUMNS)
+        if "snapshot_month" in history.columns:
+            history = history[history["snapshot_month"].fillna("").astype(str) != snapshot_month]
+
+    history = pd.concat([history, pd.DataFrame([current_row])], ignore_index=True)
+    history = history[history["snapshot_month"].fillna("").astype(str).str.len() == 7]
+    return history.sort_values(["snapshot_month", "snapshot_date"], ascending=True).reindex(columns=PERFORMANCE_HISTORY_COLUMNS).reset_index(drop=True)
 
 
 def trade_identity(row: pd.Series) -> tuple[str, str, str]:
@@ -1658,11 +1751,14 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     processed_dir = processed_dir or vault_root / "70_Imports" / "processed"
     summary, holdings, risk, review, history = build_portfolio_outputs(processed_dir, vault_root)
     transactions = load_csv(processed_dir / "processed_transactions.csv")
+    cashflows = load_csv(processed_dir / "processed_cashflows.csv")
     income = load_csv(processed_dir / "processed_income.csv")
     income_summary = build_income_summary(income)
     realized = realized_pnl_ledger(transactions, holdings)
     reconciliation = build_reconciliation_summary(processed_dir, holdings, realized)
     performance = build_performance_summary(reconciliation, income_summary)
+    monthly_cashflow = build_monthly_cashflow_summary(cashflows)
+    performance_history = build_performance_history(performance, load_csv(processed_dir / "performance_history.csv"))
     if dry_run:
         return {
             "summary_rows": len(summary),
@@ -1673,12 +1769,16 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
             "realized_rows": len(realized),
             "income_summary_rows": len(income_summary),
             "performance_rows": len(performance),
+            "monthly_cashflow_rows": len(monthly_cashflow),
+            "performance_history_rows": len(performance_history),
             "reconciliation_rows": len(reconciliation),
         }
     processed_dir.mkdir(parents=True, exist_ok=True)
     summary.to_csv(processed_dir / "portfolio_summary.csv", index=False, encoding="utf-8-sig")
     reconciliation.to_csv(processed_dir / "reconciliation_summary.csv", index=False, encoding="utf-8-sig")
     performance.to_csv(processed_dir / "performance_summary.csv", index=False, encoding="utf-8-sig")
+    monthly_cashflow.to_csv(processed_dir / "monthly_cashflow_summary.csv", index=False, encoding="utf-8-sig")
+    performance_history.to_csv(processed_dir / "performance_history.csv", index=False, encoding="utf-8-sig")
     income_summary.to_csv(processed_dir / "income_summary.csv", index=False, encoding="utf-8-sig")
     realized.to_csv(processed_dir / "processed_realized_pnl.csv", index=False, encoding="utf-8-sig")
     holdings.to_csv(processed_dir / "processed_holdings.csv", index=False, encoding="utf-8-sig")
@@ -1695,5 +1795,7 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
         "realized_rows": len(realized),
         "income_summary_rows": len(income_summary),
         "performance_rows": len(performance),
+        "monthly_cashflow_rows": len(monthly_cashflow),
+        "performance_history_rows": len(performance_history),
         "reconciliation_rows": len(reconciliation),
     }

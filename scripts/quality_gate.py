@@ -152,6 +152,22 @@ REQUIRED_OUTPUT_SCHEMAS = {
         "amount_review_needed_row_count", "income_status",
     ],
     "performance_summary.csv": ["metric", "value"],
+    "monthly_cashflow_summary.csv": [
+        "month",
+        "external_deposit_krw",
+        "external_withdrawal_krw",
+        "net_principal_flow_krw",
+        "cumulative_principal_krw",
+    ],
+    "performance_history.csv": [
+        "snapshot_month",
+        "snapshot_date",
+        "cumulative_principal_krw",
+        "current_total_assets_krw",
+        "cumulative_return_krw",
+        "cumulative_return_pct",
+        "performance_status",
+    ],
     "processed_expenses.csv": [
         "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
         "security_name", "expense_type", "currency_native", "amount_native", "amount_krw",
