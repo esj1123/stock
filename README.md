@@ -83,6 +83,8 @@ The pipeline separates current holdings valuation from whole-investment performa
 - `processed_realized_pnl.csv` is the realized PnL ledger. It records sold-position PnL from imported buy/sell transaction history using FIFO cost basis and must not create current holdings.
 - `income_summary.csv` summarizes dividend, interest, and distribution income separately by `income_type` and `currency_native`. Native amounts are preserved; official KRW income uses status-ok KRW rows only.
 - `performance_summary.csv` is the user-facing whole-investment performance summary. It exposes net external principal, current total assets, cumulative return, realized/unrealized PnL, income, expenses, and residual.
+- `monthly_cashflow_summary.csv` summarizes monthly external principal deposits, withdrawals, net flow, and cumulative principal for dashboard trend charts.
+- `performance_history.csv` stores import-time performance snapshot rows for monthly principal/assets/return trend charts.
 - `reconciliation_summary.csv` is the audit/status/residual layer. It keeps `total_return_krw` / `total_return_pct` as aliases of `performance_summary.cumulative_return_krw` / `performance_summary.cumulative_return_pct`.
 
 Accounting rules:
@@ -93,6 +95,7 @@ Accounting rules:
 - Residual is `cumulative_return_krw - explained_profit_krw`.
 - FX-missing rows must preserve native amounts and must not make official KRW performance available without FX or broker-provided KRW provenance.
 - Transaction-history rows must stay in transaction/realized ledgers and must not be promoted into current holdings.
+- Historical total assets and cumulative return trend points require imported balance snapshots. Do not reconstruct past monthly total assets from raw transactions alone.
 
 Repository safety for these outputs:
 

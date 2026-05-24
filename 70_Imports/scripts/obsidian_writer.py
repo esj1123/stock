@@ -23,6 +23,110 @@ UTF8_BOM = b"\xef\xbb\xbf"
 EMPTY_DATA = "_No data to display._"
 
 
+def _optional_number(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    text = str(value).replace(",", "").strip()
+    if text.lower() in {"", "nan", "none", "na", "n/a", "<na>", "-", "--"}:
+        return None
+    try:
+        return float(text)
+    except Exception:
+        return None
+
+
+def format_number(value: Any, decimals: int | None = None) -> str:
+    number = _optional_number(value)
+    if number is None:
+        return markdown_cell(value)
+    if decimals is None:
+        decimals = 0 if float(number).is_integer() else 2
+    text = f"{number:,.{decimals}f}"
+    if decimals > 0:
+        text = text.rstrip("0").rstrip(".")
+    return text
+
+
+def format_krw(value: Any) -> str:
+    return format_number(value)
+
+
+def format_usd(value: Any) -> str:
+    text = markdown_cell(value)
+    if text.upper().endswith(" USD"):
+        return text
+    amount = format_number(value)
+    return f"{amount} USD" if amount else ""
+
+
+def format_pct(value: Any) -> str:
+    number = _optional_number(value)
+    if number is None:
+        return markdown_cell(value)
+    decimals = 0 if float(number).is_integer() else 2
+    text = f"{number:,.{decimals}f}"
+    if decimals > 0:
+        text = text.rstrip("0").rstrip(".")
+    return text + "%"
+
+
+def format_metric_value(metric_name: Any, value: Any, currency: Any = "") -> str:
+    text = markdown_cell(value)
+    if not text:
+        return ""
+    key = str(metric_name or "").strip().lower()
+    currency_code = str(currency or "").strip().upper()
+    if key in {"month", "snapshot_month", "snapshot_date", "trade_date", "trade_time"}:
+        return text
+    if "status" in key:
+        return text
+    if "currency" in key or key == "ccy":
+        return text
+    if any(token in key for token in ["ticker", "symbol", "file", "path", "memo", "reason", "action", "method", "basis", "formula", "treatment", "role", "name"]):
+        return text
+    if key.endswith("_id") or key == "id":
+        return text
+    if "pct" in key or "percent" in key or "pnl / net principal" in key:
+        return format_pct(value)
+    if currency_code == "USD" and "native" in key:
+        return f"{format_number(value)} USD"
+    if currency_code and currency_code != "KRW" and "native" in key:
+        amount = format_number(value)
+        return f"{amount} {currency_code}" if amount else ""
+    if "usd" in key and any(token in key for token in ["amount", "dividend", "income", "native"]):
+        return format_usd(value)
+    if (
+        "krw" in key
+        or any(token in key for token in [
+            "amount",
+            "principal",
+            "deposit",
+            "withdrawal",
+            "assets",
+            "cash",
+            "cost",
+            "value",
+            "pnl",
+            "return",
+            "profit",
+            "income",
+            "expense",
+            "fee",
+            "tax",
+            "residual",
+        ])
+    ):
+        return format_krw(value) if "krw" in key else format_number(value)
+    if "count" in key or key.endswith("_rows") or key == "rows":
+        return format_number(value, decimals=0)
+    return text
+
+
 def read_csv(path: Path) -> pd.DataFrame:
     if not path.exists():
         return pd.DataFrame()
@@ -44,6 +148,18 @@ def markdown_cell(value: Any) -> str:
     return text.replace("\\", "/").replace("|", "\\|").replace("\n", "<br>").strip()
 
 
+def markdown_display_cell(row: pd.Series, column: str) -> str:
+    if column == "value" and "metric" in row.index:
+        return format_metric_value(row.get("metric", ""), row.get(column, ""))
+    currency = ""
+    for currency_column in ["currency_native", "currency", "ccy"]:
+        if currency_column in row.index:
+            currency = row.get(currency_column, "")
+            if markdown_cell(currency):
+                break
+    return format_metric_value(column, row.get(column, ""), currency)
+
+
 def markdown_table(df: pd.DataFrame, columns: list[str] | None = None, limit: int | None = None) -> str:
     if df.empty:
         return EMPTY_DATA
@@ -57,7 +173,7 @@ def markdown_table(df: pd.DataFrame, columns: list[str] | None = None, limit: in
     headers = list(view.columns)
     lines = ["| " + " | ".join(headers) + " |", "| " + " | ".join(["---"] * len(headers)) + " |"]
     for _, row in view.iterrows():
-        vals = [markdown_cell(row.get(col, "")) for col in headers]
+        vals = [markdown_display_cell(row, col) for col in headers]
         lines.append("| " + " | ".join(vals) + " |")
     return "\n".join(lines)
 
@@ -129,20 +245,7 @@ def number_value(value: Any, default: float = 0.0) -> float:
 
 
 def optional_number_value(value: Any) -> float | None:
-    if value is None:
-        return None
-    try:
-        if pd.isna(value):
-            return None
-    except Exception:
-        pass
-    text = str(value).replace(",", "").strip()
-    if text.lower() in {"", "nan", "none", "na", "n/a", "<na>", "-", "--"}:
-        return None
-    try:
-        return float(text)
-    except Exception:
-        return None
+    return _optional_number(value)
 
 
 def metric_sum(summary: pd.DataFrame, metrics: list[str], default: str = "-") -> Any:
@@ -294,7 +397,8 @@ def largest_position_label(holdings: pd.DataFrame) -> str:
 
 def snapshot_card(label: str, value: Any, hint: str = "") -> str:
     hint_html = f'<span class="stock-kpi-hint">{escape(markdown_cell(hint))}</span>' if hint else ""
-    return f'<div class="stock-kpi"><span class="stock-kpi-label">{escape(label)}</span><strong>{escape(markdown_cell(value))}</strong>{hint_html}</div>'
+    format_key = f"{label} {hint}".strip()
+    return f'<div class="stock-kpi"><span class="stock-kpi-label">{escape(label)}</span><strong>{escape(format_metric_value(format_key, value))}</strong>{hint_html}</div>'
 
 
 def review_reason_summary_table(review: pd.DataFrame) -> str:
@@ -344,10 +448,12 @@ def portfolio_content(
     reconciliation: pd.DataFrame | None = None,
     performance_summary: pd.DataFrame | None = None,
     income_summary: pd.DataFrame | None = None,
+    performance_history: pd.DataFrame | None = None,
 ) -> str:
     reconciliation = reconciliation if reconciliation is not None else pd.DataFrame()
     performance_summary = performance_summary if performance_summary is not None else pd.DataFrame()
     income_summary = income_summary if income_summary is not None else pd.DataFrame()
+    performance_history = performance_history if performance_history is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
@@ -409,6 +515,7 @@ def portfolio_content(
         "</div>",
     ]
     parts.append("\n".join(performance))
+    parts.append(performance_history_section(performance_history))
     parts.append("\n".join(current_position_snapshot))
     if value_status.lower() == "unknown":
         parts.append("> [!warning] Portfolio value status\n> Total portfolio value status is `unknown`. Add current balance files before relying on value-based summaries.")
@@ -482,6 +589,167 @@ def details_block(summary: str, body: str, open_by_default: bool = False) -> str
         body = EMPTY_DATA
     open_attr = " open" if open_by_default else ""
     return f"<details{open_attr}>\n<summary>{escape(summary)}</summary>\n\n{body.strip()}\n\n</details>"
+
+
+def chart_number(value: Any) -> float | None:
+    return optional_number_value(value)
+
+
+def svg_line_chart(
+    df: pd.DataFrame,
+    x_col: str,
+    series: list[tuple[str, str, str]],
+    *,
+    title: str,
+    width: int = 760,
+    height: int = 280,
+) -> str:
+    if df.empty or x_col not in df.columns:
+        return EMPTY_DATA
+
+    view = df.copy().reset_index(drop=True)
+    rows: list[dict[str, Any]] = []
+    values: list[float] = []
+    for _, row in view.iterrows():
+        item: dict[str, Any] = {x_col: markdown_cell(row.get(x_col, ""))}
+        has_value = False
+        for key, _label, _color in series:
+            value = chart_number(row.get(key, ""))
+            item[key] = value
+            if value is not None:
+                values.append(value)
+                has_value = True
+        if item[x_col] and has_value:
+            rows.append(item)
+    if not rows or not values:
+        return EMPTY_DATA
+
+    min_value = min(values)
+    max_value = max(values)
+    if abs(max_value - min_value) < 1e-9:
+        padding = max(abs(max_value) * 0.1, 1.0)
+    else:
+        padding = (max_value - min_value) * 0.1
+    min_value -= padding
+    max_value += padding
+    if min_value > 0:
+        min_value = 0.0
+    if max_value < 0:
+        max_value = 0.0
+
+    left = 72
+    right = 28
+    top = 34
+    bottom = 58
+    plot_width = width - left - right
+    plot_height = height - top - bottom
+
+    def x_pos(index: int) -> float:
+        if len(rows) == 1:
+            return left + plot_width / 2
+        return left + plot_width * index / (len(rows) - 1)
+
+    def y_pos(value: float) -> float:
+        return top + (max_value - value) / (max_value - min_value) * plot_height
+
+    parts = [
+        f'<svg class="stock-trend-chart" viewBox="0 0 {width} {height}" role="img" aria-label="{escape(title)}" xmlns="http://www.w3.org/2000/svg">',
+        "<style>.axis{stroke:#8a8f98;stroke-width:1}.grid{stroke:#dde2ea;stroke-width:1}.label{fill:#343a40;font:12px sans-serif}.title{fill:#111827;font:600 14px sans-serif}.legend{fill:#343a40;font:12px sans-serif}</style>",
+        f'<text class="title" x="{left}" y="20">{escape(title)}</text>',
+        f'<line class="axis" x1="{left}" y1="{top + plot_height}" x2="{left + plot_width}" y2="{top + plot_height}"/>',
+        f'<line class="axis" x1="{left}" y1="{top}" x2="{left}" y2="{top + plot_height}"/>',
+    ]
+    for ratio in [0, 0.5, 1]:
+        y = top + plot_height * ratio
+        value = max_value - (max_value - min_value) * ratio
+        parts.append(f'<line class="grid" x1="{left}" y1="{y:.2f}" x2="{left + plot_width}" y2="{y:.2f}"/>')
+        parts.append(f'<text class="label" x="8" y="{y + 4:.2f}">{escape(format_krw(value))}</text>')
+
+    label_indexes = set(range(len(rows))) if len(rows) <= 8 else {0, len(rows) - 1}
+    for index, row in enumerate(rows):
+        if index not in label_indexes:
+            continue
+        x = x_pos(index)
+        parts.append(f'<text class="label" text-anchor="middle" x="{x:.2f}" y="{height - 24}">{escape(str(row[x_col]))}</text>')
+
+    legend_x = left
+    for key, label, color in series:
+        points = [(x_pos(index), y_pos(row[key])) for index, row in enumerate(rows) if row.get(key) is not None]
+        if not points:
+            continue
+        if len(points) > 1:
+            point_text = " ".join(f"{x:.2f},{y:.2f}" for x, y in points)
+            parts.append(f'<polyline fill="none" stroke="{escape(color)}" stroke-width="2.5" points="{point_text}"/>')
+        for x, y in points:
+            parts.append(f'<circle cx="{x:.2f}" cy="{y:.2f}" r="3.5" fill="{escape(color)}"/>')
+        parts.append(f'<rect x="{legend_x}" y="{height - 14}" width="10" height="10" fill="{escape(color)}"/>')
+        parts.append(f'<text class="legend" x="{legend_x + 14}" y="{height - 5}">{escape(label)}</text>')
+        legend_x += max(110, len(label) * 8 + 28)
+    parts.append("</svg>")
+    return "\n".join(parts)
+
+
+def cashflow_trend_section(monthly_cashflow: pd.DataFrame) -> str:
+    if monthly_cashflow.empty:
+        return "\n\n".join(["## 월별 입출금 추이", "_No monthly cashflow summary available._"])
+    view = monthly_cashflow.sort_values("month", ascending=True)
+    chart = svg_line_chart(
+        view,
+        "month",
+        [
+            ("external_deposit_krw", "Deposit", "#2f9e44"),
+            ("external_withdrawal_krw", "Withdrawal", "#e03131"),
+            ("net_principal_flow_krw", "Net flow", "#1971c2"),
+            ("cumulative_principal_krw", "Cumulative principal", "#5f3dc4"),
+        ],
+        title="Monthly Principal Cashflow Trend",
+    )
+    return "\n\n".join([
+        "## 월별 입출금 추이",
+        chart,
+        "### Fallback table",
+        markdown_table(view),
+    ])
+
+
+def performance_history_section(performance_history: pd.DataFrame) -> str:
+    heading = "## 월별 원금/누적수익 추이"
+    scope_note = (
+        "> [!note] Scope\n"
+        "> cumulative_principal_krw is based on monthly external principal flows. "
+        "current_total_assets_krw and cumulative_return_* require imported balance snapshots; "
+        "historical total assets are not inferred from raw transactions."
+    )
+    if performance_history.empty:
+        return "\n\n".join([
+            heading,
+            scope_note,
+            "> [!note] 추후 import 누적 후 표시\n> snapshot history point가 2개 미만이라 그래프를 표시하지 않습니다.",
+            "### Fallback table",
+            EMPTY_DATA,
+        ])
+
+    view = performance_history.sort_values("snapshot_month", ascending=True)
+    graph_points = view[
+        view["current_total_assets_krw"].apply(optional_number_value).notna()
+        & view["cumulative_return_krw"].apply(optional_number_value).notna()
+    ] if {"current_total_assets_krw", "cumulative_return_krw"}.issubset(set(view.columns)) else pd.DataFrame()
+    parts = [heading, scope_note]
+    if len(graph_points) < 2:
+        parts.append("> [!note] 추후 import 누적 후 표시\n> snapshot history point가 2개 미만이라 그래프를 표시하지 않습니다.")
+    else:
+        parts.append(svg_line_chart(
+            graph_points,
+            "snapshot_month",
+            [
+                ("cumulative_principal_krw", "Principal", "#1971c2"),
+                ("current_total_assets_krw", "Total assets", "#2f9e44"),
+                ("cumulative_return_krw", "Cumulative return", "#e67700"),
+            ],
+            title="Monthly Principal and Cumulative Return Trend",
+        ))
+    parts.extend(["### Fallback table", markdown_table(view)])
+    return "\n\n".join(parts)
 
 
 def normalized_text(value: Any, default: str = "-") -> str:
@@ -782,6 +1050,41 @@ def cashflow_principal_summary_table(cash: pd.DataFrame) -> str:
     ]))
 
 
+def cashflow_monthly_summary_frame(cash: pd.DataFrame) -> pd.DataFrame:
+    view = cashflow_principal_view(cash)
+    if view.empty or "trade_date" not in view.columns or "transaction_type" not in view.columns:
+        return pd.DataFrame(columns=[
+            "month",
+            "external_deposit_krw",
+            "external_withdrawal_krw",
+            "net_principal_flow_krw",
+            "cumulative_principal_krw",
+        ])
+    view = view.copy()
+    view["month"] = view["trade_date"].fillna("").astype(str).str.slice(0, 7)
+    view = view[view["month"].str.len() == 7]
+    if view.empty:
+        return pd.DataFrame(columns=[
+            "month",
+            "external_deposit_krw",
+            "external_withdrawal_krw",
+            "net_principal_flow_krw",
+            "cumulative_principal_krw",
+        ])
+    view["_transaction_type"] = view["transaction_type"].fillna("").astype(str).str.lower()
+    view["_amount"] = view["principal_amount_krw"].apply(number_value).abs()
+    view["external_deposit_krw"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "deposit" else 0.0, axis=1)
+    view["external_withdrawal_krw"] = view.apply(lambda row: row["_amount"] if row["_transaction_type"] == "withdrawal" else 0.0, axis=1)
+    monthly = (
+        view.groupby("month", as_index=False, dropna=False)[["external_deposit_krw", "external_withdrawal_krw"]]
+        .sum()
+        .sort_values("month", ascending=True)
+    )
+    monthly["net_principal_flow_krw"] = monthly["external_deposit_krw"] - monthly["external_withdrawal_krw"]
+    monthly["cumulative_principal_krw"] = monthly["net_principal_flow_krw"].cumsum()
+    return monthly[["month", "external_deposit_krw", "external_withdrawal_krw", "net_principal_flow_krw", "cumulative_principal_krw"]]
+
+
 def lower_column(df: pd.DataFrame, column: str) -> pd.Series:
     if df.empty or column not in df.columns:
         return pd.Series(dtype=str)
@@ -983,13 +1286,11 @@ def plain_number_text(value: Any) -> str:
     number = optional_number_value(value)
     if number is None:
         return markdown_cell(value)
-    if float(number).is_integer():
-        return str(int(number))
-    return f"{number:.6f}".rstrip("0").rstrip(".")
+    return format_number(number)
 
 
 def native_amount_label(value: Any, currency: str) -> str:
-    amount = plain_number_text(value)
+    amount = format_number(value)
     return f"{amount} {currency.upper()}" if amount else ""
 
 
@@ -1252,12 +1553,14 @@ def cashflow_content(
     income_summary: pd.DataFrame | None = None,
     expenses: pd.DataFrame | None = None,
     fx_events: pd.DataFrame | None = None,
+    monthly_cashflow_summary: pd.DataFrame | None = None,
 ) -> str:
     summary = summary if summary is not None else pd.DataFrame()
     income = income if income is not None else pd.DataFrame()
     income_summary = income_summary if income_summary is not None else pd.DataFrame()
     expenses = expenses if expenses is not None else pd.DataFrame()
     fx_events = fx_events if fx_events is not None else pd.DataFrame()
+    monthly_cashflow_summary = monthly_cashflow_summary if monthly_cashflow_summary is not None else pd.DataFrame()
     principal_cash = cashflow_principal_view(cash)
     months = 0
     if not principal_cash.empty and "trade_date" in principal_cash.columns:
@@ -1280,6 +1583,7 @@ def cashflow_content(
         ]),
         "## Principal summary",
         cashflow_principal_summary_table(principal_cash),
+        cashflow_trend_section(monthly_cashflow_summary if not monthly_cashflow_summary.empty else cashflow_monthly_summary_frame(principal_cash)),
         "## Principal exclusions and unresolved amounts",
         cashflow_exclusion_status_table(cash, income, expenses, fx_events),
         "## 현금성 수익",
@@ -1345,6 +1649,22 @@ REQUIRED_OUTPUT_COLUMNS = {
         "amount_review_needed_row_count", "income_status",
     ],
     "performance_summary.csv": ["metric", "value"],
+    "monthly_cashflow_summary.csv": [
+        "month",
+        "external_deposit_krw",
+        "external_withdrawal_krw",
+        "net_principal_flow_krw",
+        "cumulative_principal_krw",
+    ],
+    "performance_history.csv": [
+        "snapshot_month",
+        "snapshot_date",
+        "cumulative_principal_krw",
+        "current_total_assets_krw",
+        "cumulative_return_krw",
+        "cumulative_return_pct",
+        "performance_status",
+    ],
     "processed_expenses.csv": [
         "source_file", "source_file_type", "account_type", "market", "trade_date", "ticker",
         "security_name", "expense_type", "currency_native", "amount_native", "amount_krw",
@@ -1652,6 +1972,8 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     summary = read_csv(processed_dir / "portfolio_summary.csv")
     reconciliation = read_csv(processed_dir / "reconciliation_summary.csv")
     performance = read_csv(processed_dir / "performance_summary.csv")
+    monthly_cashflow = read_csv(processed_dir / "monthly_cashflow_summary.csv")
+    performance_history = read_csv(processed_dir / "performance_history.csv")
     realized = read_csv(processed_dir / "processed_realized_pnl.csv")
     holdings = read_csv(processed_dir / "processed_holdings.csv")
     risk = read_csv(processed_dir / "risk_watchlist.csv")
@@ -1672,7 +1994,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
-        return portfolio_content(summary, holdings, warning, reconciliation, performance, income_summary)
+        return portfolio_content(summary, holdings, warning, reconciliation, performance, income_summary, performance_history)
     if name == "Reconciliation.md":
         return reconciliation_content(reconciliation, summary, realized)
     if name == "Companies.md":
@@ -1680,7 +2002,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Exposure.md":
         return exposure_content(summary, holdings, warning)
     if name == "Cashflows.md":
-        return cashflow_content(cash, dividends, summary, income, income_summary, expenses, fx_events)
+        return cashflow_content(cash, dividends, summary, income, income_summary, expenses, fx_events, monthly_cashflow)
     if name == "Import_Review.md":
         return import_review_content(summary, sources, skipped, unclassified, warning, holdings, income, expenses, fx_events, amount_audit, unit_mismatch, processed_dir)
     if name == "Risk_Watchlist.md":
