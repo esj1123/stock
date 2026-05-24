@@ -148,6 +148,17 @@ EXPENSE_COLUMNS = [
     "raw_memo",
 ]
 
+FX_RATE_REQUIREMENT_COLUMNS = [
+    "event_date",
+    "currency",
+    "use_case",
+    "row_count",
+    "amount_native_sum",
+    "missing_reason",
+    "source_file_type",
+    "status",
+]
+
 HOLDING_SOURCE_PRIORITY = {
     "overseas_balance": 0,
     "holdings": 10,
@@ -2071,6 +2082,7 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
         "processed_fx_events.csv": pd.DataFrame(columns=FX_EVENT_COLUMNS),
         "processed_income.csv": pd.DataFrame(columns=INCOME_COLUMNS),
         "processed_expenses.csv": pd.DataFrame(columns=EXPENSE_COLUMNS),
+        "fx_rate_requirements.csv": pd.DataFrame(columns=FX_RATE_REQUIREMENT_COLUMNS),
         "processed_dividends.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "portfolio_summary.csv": pd.DataFrame(columns=["metric", "value"]),
         "risk_watchlist.csv": pd.DataFrame(columns=["ticker", "security_name", "account_type", "risk_flags", "pnl_pct", "weight_pct", "suggested_action"]),

@@ -7,7 +7,7 @@ from typing import Any
 
 import pandas as pd
 
-from nh_importer import NORMALIZED_COLUMNS, is_leveraged_etf_name, remove_overlapping_overseas_holdings
+from nh_importer import FX_RATE_REQUIREMENT_COLUMNS, NORMALIZED_COLUMNS, is_leveraged_etf_name, remove_overlapping_overseas_holdings
 
 HISTORY_COLUMNS = [
     "import_id", "source_file", "source_file_type", "account_type", "market", "asset_type",
@@ -43,7 +43,20 @@ INCOME_SUMMARY_COLUMNS = [
     "row_count",
     "fx_missing_row_count",
     "amount_review_needed_row_count",
+    "fx_status_summary",
+    "fx_source_summary",
     "income_status",
+]
+FX_RATES_COLUMNS = [
+    "effective_date",
+    "base_currency",
+    "quote_currency",
+    "rate",
+    "source_type",
+    "provider",
+    "use_case",
+    "status",
+    "source_note",
 ]
 PERFORMANCE_SUMMARY_METRICS = [
     "net_external_principal_krw",
@@ -72,6 +85,10 @@ PERFORMANCE_SUMMARY_METRICS = [
     "realized_pnl_status",
     "income_status",
     "fx_status",
+    "income_fx_status",
+    "income_fx_missing_row_count",
+    "income_fx_source_summary",
+    "fx_rate_requirement_row_count",
     "amount_review_needed_row_count",
 ]
 MONTHLY_CASHFLOW_SUMMARY_COLUMNS = [
@@ -121,6 +138,11 @@ REALIZED_PNL_COLUMNS = [
 ]
 BALANCE_SOURCE_TYPES = {"holdings", "overseas_balance"}
 REVIEW_NEEDED_STATUSES = {"fx_missing", "partial", "needs_review", "currency_ambiguous", "unit_ambiguous", "unclassified", "lot_missing"}
+BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
+RAW_FX_SOURCES = {"", "raw", "broker_raw", "broker_raw_fx", "fx_rate_to_krw"}
+LOCAL_FX_SOURCE_TYPES = {"local", "manual", "user_provided", "fx_rates_csv"}
+API_CACHED_FX_SOURCE_TYPES = {"api_cached", "cached_api", "api_archive", "archived_api"}
+USABLE_FX_RATE_STATUSES = {"active", "approved", "available", "cached", "archived", "official", "ok", "verified"}
 CURRENCY_NORMALIZATION_STATUS = "pending"
 AMOUNT_UNIT_CLASSIFICATION_STATUS = "pending"
 PROFIT_RESULT_STATUS = "preliminary"
@@ -140,6 +162,391 @@ def load_csv(path: Path) -> pd.DataFrame:
         return pd.read_csv(path, dtype={"ticker": str}, encoding="utf-8-sig")
     except Exception:
         return pd.DataFrame()
+
+
+def normalized_date_text(value: Any) -> str:
+    text = text_value(value)
+    if not text:
+        return ""
+    try:
+        parsed = pd.to_datetime(text, errors="coerce")
+    except Exception:
+        return text
+    if pd.isna(parsed):
+        return text
+    return parsed.date().isoformat()
+
+
+def fx_rate_candidate_paths(processed_dir: Path) -> list[Path]:
+    import_root = processed_dir.parent if processed_dir.name.lower() == "processed" else processed_dir
+    candidates = [
+        import_root / "fx_rates.csv",
+        import_root / "raw" / "fx_rates.csv",
+        import_root / "cache" / "fx_rates.csv",
+        import_root / "fx_rates_cached.csv",
+        import_root / "cache" / "fx_rates_cached.csv",
+        processed_dir / "fx_rates.csv",
+    ]
+    return list(dict.fromkeys(candidates))
+
+
+def load_fx_rates(processed_dir: Path) -> pd.DataFrame:
+    """Load local or cached FX rates without making live API calls."""
+    frames: list[pd.DataFrame] = []
+    for path_index, path in enumerate(fx_rate_candidate_paths(processed_dir)):
+        frame = load_csv(path)
+        if frame.empty:
+            continue
+        frame = frame.reindex(columns=FX_RATES_COLUMNS).copy()
+        source_hint = "api_cached" if "cache" in path.name.lower() or "cache" in str(path.parent).lower() else "local"
+        frame["source_type"] = frame["source_type"].fillna("").astype(str).str.strip().replace("", source_hint)
+        frame["_source_path_order"] = path_index
+        frame["_source_row_order"] = range(len(frame))
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=FX_RATES_COLUMNS)
+    return pd.concat(frames, ignore_index=True)
+
+
+def fx_source_priority(source_type: str) -> int:
+    key = source_type.strip().lower()
+    if key in LOCAL_FX_SOURCE_TYPES:
+        return 20
+    if key in API_CACHED_FX_SOURCE_TYPES:
+        return 30
+    return 25
+
+
+def fx_use_case_aliases(use_case: str) -> set[str]:
+    key = use_case.strip().lower()
+    aliases = {"", "*", "all", key}
+    if key.startswith("income_"):
+        aliases.update({"income", key.removeprefix("income_")})
+    if key.startswith("expense_"):
+        aliases.update({"expense", key.removeprefix("expense_")})
+    if key.startswith("realized_"):
+        aliases.update({"realized_pnl", "trade_settlement", "transaction"})
+    return aliases
+
+
+def usable_fx_rate_rows(fx_rates: pd.DataFrame, event_date: str, currency: str, use_case: str) -> pd.DataFrame:
+    if fx_rates.empty:
+        return pd.DataFrame(columns=FX_RATES_COLUMNS)
+    view = fx_rates.copy()
+    for column in FX_RATES_COLUMNS:
+        if column not in view.columns:
+            view[column] = ""
+    event_date = normalized_date_text(event_date)
+    currency = currency.strip().upper()
+    aliases = fx_use_case_aliases(use_case)
+    view["_effective_date"] = view["effective_date"].apply(normalized_date_text)
+    view["_base_currency"] = view["base_currency"].fillna("").astype(str).str.strip().str.upper()
+    view["_quote_currency"] = view["quote_currency"].fillna("").astype(str).str.strip().str.upper()
+    view["_use_case"] = view["use_case"].fillna("").astype(str).str.strip().str.lower()
+    view["_status"] = view["status"].fillna("").astype(str).str.strip().str.lower()
+    view["_rate"] = pd.to_numeric(view["rate"], errors="coerce")
+    view = view[
+        view["_effective_date"].eq(event_date)
+        & view["_base_currency"].eq(currency)
+        & view["_quote_currency"].eq("KRW")
+        & view["_use_case"].isin(aliases)
+        & view["_status"].isin(USABLE_FX_RATE_STATUSES)
+        & view["_rate"].notna()
+        & view["_rate"].gt(0)
+    ].copy()
+    if view.empty:
+        return pd.DataFrame(columns=FX_RATES_COLUMNS)
+    view["_source_priority"] = view["source_type"].fillna("").astype(str).apply(fx_source_priority)
+    return view.sort_values(["_source_priority", "_source_path_order", "_source_row_order"], na_position="last")
+
+
+def fx_rate_source_label(source_type: str) -> str:
+    key = source_type.strip().lower()
+    if key in API_CACHED_FX_SOURCE_TYPES:
+        return "api_cached_fx_rates"
+    return "local_fx_rates"
+
+
+def resolve_fx_rate(row: pd.Series | dict[str, Any], fx_rates: pd.DataFrame, use_case: str) -> dict[str, Any]:
+    currency = (
+        text_value(row.get("currency_native") if isinstance(row, dict) else row.get("currency_native")).upper()
+        or text_value(row.get("currency") if isinstance(row, dict) else row.get("currency")).upper()
+    )
+    event_date = normalized_date_text(
+        row.get("event_date") if isinstance(row, dict) else row.get("event_date")
+    ) or normalized_date_text(row.get("trade_date") if isinstance(row, dict) else row.get("trade_date")) or normalized_date_text(
+        row.get("sell_date") if isinstance(row, dict) else row.get("sell_date")
+    )
+    amount_native = first_number(pd.Series(row), ["amount_native", "trade_amount_native", "settlement_amount_native", "proceeds_native"])
+    existing_krw = first_number(pd.Series(row), ["amount_krw", "trade_amount_krw", "settlement_amount_krw", "proceeds_krw"])
+    amount_source = text_value(row.get("amount_krw_source") if isinstance(row, dict) else row.get("amount_krw_source")).lower()
+    fx_source = text_value(row.get("fx_rate_source") if isinstance(row, dict) else row.get("fx_rate_source")).lower()
+    raw_rate = first_number(pd.Series(row), ["fx_rate_to_krw", "fx_rate"])
+
+    if not currency or len(currency) != 3 or not currency.isalpha():
+        return {
+            "status": "currency_ambiguous",
+            "fx_status": "currency_ambiguous",
+            "missing_reason": "event currency is missing or invalid",
+        }
+    if amount_native is None:
+        return {
+            "status": "unit_ambiguous",
+            "fx_status": "unit_ambiguous",
+            "missing_reason": "native amount is missing",
+        }
+    if currency == "KRW":
+        return {
+            "status": "ok",
+            "fx_status": "not_required",
+            "amount_krw": amount_native,
+            "fx_rate_to_krw": 1.0,
+            "fx_rate_source": "not_required",
+            "amount_krw_source": "raw_native",
+            "source_type": "not_required",
+            "missing_reason": "",
+        }
+    if abs(amount_native) <= 1e-9:
+        return {
+            "status": "ok",
+            "fx_status": "not_required",
+            "amount_krw": 0.0,
+            "fx_rate_to_krw": "",
+            "fx_rate_source": "zero_native",
+            "amount_krw_source": "zero_native",
+            "source_type": "zero_native",
+            "missing_reason": "",
+        }
+    if existing_krw is not None and (amount_source in BROKER_KRW_SOURCES or "broker" in amount_source):
+        derived_rate = abs(existing_krw / amount_native) if abs(amount_native) > 1e-9 else ""
+        return {
+            "status": "ok",
+            "fx_status": "available",
+            "amount_krw": existing_krw,
+            "fx_rate_to_krw": derived_rate,
+            "fx_rate_source": amount_source or "broker_krw_amount",
+            "amount_krw_source": amount_source or "broker_krw_amount",
+            "source_type": "broker_krw_amount",
+            "missing_reason": "",
+        }
+    if raw_rate is not None and raw_rate > 0 and fx_source not in {"local_fx_rates", "api_cached_fx_rates"}:
+        return {
+            "status": "ok",
+            "fx_status": "available",
+            "amount_krw": round(amount_native * raw_rate, 6),
+            "fx_rate_to_krw": raw_rate,
+            "fx_rate_source": fx_source if fx_source in RAW_FX_SOURCES and fx_source else "broker_raw_fx",
+            "amount_krw_source": "broker_raw_fx",
+            "source_type": "broker_raw_fx",
+            "missing_reason": "",
+        }
+
+    if not event_date:
+        return {
+            "status": "fx_missing",
+            "fx_status": "fx_missing",
+            "missing_reason": "event_date is missing",
+        }
+    matched = usable_fx_rate_rows(fx_rates, event_date, currency, use_case)
+    if matched.empty:
+        return {
+            "status": "fx_missing",
+            "fx_status": "fx_missing",
+            "missing_reason": "no same-date archived FX rate found",
+        }
+    rate_row = matched.iloc[0]
+    rate = float(rate_row["_rate"])
+    source = fx_rate_source_label(text_value(rate_row.get("source_type")))
+    return {
+        "status": "ok",
+        "fx_status": "available",
+        "amount_krw": round(amount_native * rate, 6),
+        "fx_rate_to_krw": rate,
+        "fx_rate_source": source,
+        "amount_krw_source": source,
+        "source_type": text_value(rate_row.get("source_type")),
+        "provider": text_value(rate_row.get("provider")),
+        "source_note": text_value(rate_row.get("source_note")),
+        "missing_reason": "",
+    }
+
+
+def income_fx_use_case(row: pd.Series) -> str:
+    income_type = text_value(row.get("income_type")).lower()
+    return f"income_{income_type}" if income_type else "income"
+
+
+def combine_status_reason(existing_reason: Any, extra_reason: str) -> str:
+    reasons = [text_value(existing_reason), text_value(extra_reason)]
+    return "; ".join(dict.fromkeys(reason for reason in reasons if reason))
+
+
+def apply_income_fx_rates(income: pd.DataFrame, fx_rates: pd.DataFrame) -> pd.DataFrame:
+    if income.empty:
+        return income.reindex(columns=income.columns)
+    output = income.copy().astype(object)
+    for idx, row in output.iterrows():
+        use_case = income_fx_use_case(row)
+        resolved = resolve_fx_rate(row, fx_rates, use_case)
+        current_status = text_value(row.get("amount_review_status")).lower() or "ok"
+        terminal_review_status = current_status not in {"ok", "fx_missing", "missing"}
+        if resolved.get("status") == "ok":
+            output.at[idx, "amount_krw"] = resolved.get("amount_krw", "")
+            output.at[idx, "amount_krw_source"] = resolved.get("amount_krw_source", "")
+            output.at[idx, "fx_rate_to_krw"] = resolved.get("fx_rate_to_krw", "")
+            output.at[idx, "fx_rate_source"] = resolved.get("fx_rate_source", "")
+            if not terminal_review_status:
+                output.at[idx, "amount_review_status"] = "ok"
+                output.at[idx, "amount_review_reason"] = ""
+            else:
+                output.at[idx, "amount_review_status"] = current_status
+            if text_value(resolved.get("amount_krw_source")) in {"local_fx_rates", "api_cached_fx_rates", "broker_raw_fx"}:
+                output.at[idx, "amount_basis"] = "derived_krw_from_fx"
+                output.at[idx, "amount_confidence"] = "derived"
+        elif not terminal_review_status:
+            output.at[idx, "amount_review_status"] = resolved.get("status", "fx_missing")
+            output.at[idx, "amount_review_reason"] = combine_status_reason(row.get("amount_review_reason"), resolved.get("missing_reason", ""))
+            if row_currency(row) != "KRW":
+                output.at[idx, "amount_krw"] = ""
+                output.at[idx, "amount_krw_source"] = ""
+
+        tax_native = first_number(row, ["tax_native"])
+        if tax_native is None:
+            continue
+        if abs(tax_native) <= 1e-9:
+            output.at[idx, "tax_krw"] = 0.0
+            continue
+        tax_row = row.copy()
+        tax_row["amount_native"] = tax_native
+        tax_row["amount_krw"] = row.get("tax_krw", "")
+        tax_row["amount_krw_source"] = "" if text_value(row.get("amount_krw_source")).lower() in BROKER_KRW_SOURCES else row.get("amount_krw_source", "")
+        tax_resolved = resolve_fx_rate(tax_row, fx_rates, f"{use_case}_tax")
+        if tax_resolved.get("status") == "ok" and tax_resolved.get("source_type") != "broker_krw_amount":
+            output.at[idx, "tax_krw"] = tax_resolved.get("amount_krw", "")
+        elif row_currency(row) != "KRW" and not terminal_review_status:
+            output.at[idx, "tax_krw"] = ""
+    return output.reindex(columns=income.columns)
+
+
+def status_counts_summary(values: list[str]) -> str:
+    cleaned = [value for value in values if value]
+    if not cleaned:
+        return ""
+    counts: dict[str, int] = {}
+    for value in cleaned:
+        counts[value] = counts.get(value, 0) + 1
+    return " / ".join(f"{key}: {value}" for key, value in counts.items())
+
+
+def fx_requirement_record(
+    row: pd.Series,
+    *,
+    event_date: Any,
+    currency: str,
+    use_case: str,
+    amount_native: float | None,
+    missing_reason: str,
+) -> dict[str, Any] | None:
+    currency = currency.strip().upper()
+    if not currency or currency == "KRW" or amount_native is None or abs(amount_native) <= 1e-9:
+        return None
+    return {
+        "event_date": normalized_date_text(event_date),
+        "currency": currency,
+        "use_case": use_case,
+        "row_count": 1,
+        "amount_native_sum": abs(amount_native),
+        "missing_reason": missing_reason or "non-KRW row has no same-date archived FX rate",
+        "source_file_type": text_value(row.get("source_file_type")),
+        "status": "fx_missing",
+    }
+
+
+def income_fx_requirement_records(income: pd.DataFrame) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if income.empty:
+        return records
+    for _, row in income.iterrows():
+        status = row_review_status(row)
+        if status != "fx_missing":
+            continue
+        record = fx_requirement_record(
+            row,
+            event_date=row.get("trade_date"),
+            currency=row_currency(row),
+            use_case=income_fx_use_case(row),
+            amount_native=first_number(row, ["amount_native"]),
+            missing_reason=text_value(row.get("amount_review_reason")),
+        )
+        if record:
+            records.append(record)
+    return records
+
+
+def expense_fx_requirement_records(expenses: pd.DataFrame) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    if expenses.empty:
+        return records
+    for _, row in expenses.iterrows():
+        status = row_review_status(row)
+        if status != "fx_missing":
+            continue
+        expense_type = text_value(row.get("expense_type")).lower() or "expense"
+        record = fx_requirement_record(
+            row,
+            event_date=row.get("trade_date"),
+            currency=row_currency(row),
+            use_case=f"expense_{expense_type}",
+            amount_native=first_number(row, ["amount_native"]),
+            missing_reason=text_value(row.get("amount_review_reason")),
+        )
+        if record:
+            records.append(record)
+    return records
+
+
+def realized_fx_requirement_records(transactions: pd.DataFrame) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    trades = sorted_trade_rows(transactions)
+    if trades.empty:
+        return records
+    for _, row in trades.iterrows():
+        if row_review_status(row) != "fx_missing":
+            continue
+        record = fx_requirement_record(
+            row,
+            event_date=row.get("trade_date"),
+            currency=row_currency(row),
+            use_case="realized_pnl_trade_settlement",
+            amount_native=first_number(row, ["trade_amount_native", "amount_native", "settlement_amount_native", "trade_amount", "settlement_amount"]),
+            missing_reason=text_value(row.get("amount_review_reason")) or "realized PnL trade row needs historical FX before official KRW PnL",
+        )
+        if record:
+            records.append(record)
+    return records
+
+
+def build_fx_rate_requirements(
+    income: pd.DataFrame,
+    transactions: pd.DataFrame | None = None,
+    expenses: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    records = income_fx_requirement_records(income)
+    if transactions is not None:
+        records.extend(realized_fx_requirement_records(transactions))
+    if expenses is not None:
+        records.extend(expense_fx_requirement_records(expenses))
+    if not records:
+        return pd.DataFrame(columns=FX_RATE_REQUIREMENT_COLUMNS)
+    grouped = (
+        pd.DataFrame(records)
+        .groupby(["event_date", "currency", "use_case", "missing_reason", "source_file_type", "status"], dropna=False, as_index=False)
+        .agg(row_count=("row_count", "sum"), amount_native_sum=("amount_native_sum", "sum"))
+    )
+    return grouped.reindex(columns=FX_RATE_REQUIREMENT_COLUMNS).sort_values(
+        ["event_date", "currency", "use_case", "source_file_type"],
+        na_position="last",
+    ).reset_index(drop=True)
 
 
 def parse_frontmatter(text: str) -> dict[str, Any]:
@@ -683,6 +1090,31 @@ def build_income_summary(income: pd.DataFrame) -> pd.DataFrame:
         tax_krw = sum_optional_amounts(rows, "tax_krw", ok_only=True)
         tax_native_for_net = tax_native if tax_native is not None else (0.0 if amount_native is not None else None)
         tax_krw_for_net = tax_krw if tax_krw is not None else (0.0 if amount_krw is not None else None)
+        fx_status_values: list[str] = []
+        fx_source_values: list[str] = []
+        for row in rows:
+            status_value = row_review_status(row) or "ok"
+            currency_value = row_currency(row)
+            if currency_value == "KRW":
+                fx_status_values.append("not_required")
+                fx_source_values.append("raw_native")
+            elif status_value == "fx_missing":
+                fx_status_values.append("fx_missing")
+                fx_source_values.append("fx_missing")
+            elif status_value == "ok":
+                fx_status_values.append("available")
+                fx_source_values.append(
+                    text_value(row.get("amount_krw_source"))
+                    or text_value(row.get("fx_rate_source"))
+                    or "unknown"
+                )
+            else:
+                fx_status_values.append(status_value)
+                fx_source_values.append(
+                    text_value(row.get("amount_krw_source"))
+                    or text_value(row.get("fx_rate_source"))
+                    or status_value
+                )
         records.append({
             "income_type": income_type,
             "currency_native": currency,
@@ -695,6 +1127,8 @@ def build_income_summary(income: pd.DataFrame) -> pd.DataFrame:
             "row_count": len(group),
             "fx_missing_row_count": fx_missing_count,
             "amount_review_needed_row_count": review_needed_count,
+            "fx_status_summary": status_counts_summary(fx_status_values),
+            "fx_source_summary": status_counts_summary(fx_source_values),
             "income_status": status,
             "_type_order": type_order.get(str(income_type), len(type_order)),
         })
@@ -756,6 +1190,30 @@ def income_summary_total(
     return 0.0
 
 
+def income_summary_field_sum(income_summary: pd.DataFrame, field: str) -> float:
+    if income_summary.empty or field not in income_summary.columns:
+        return 0.0
+    values = [number_value(value) for value in income_summary[field]]
+    return float(sum(value for value in values if value is not None))
+
+
+def income_summary_source_text(income_summary: pd.DataFrame) -> str:
+    if income_summary.empty or "fx_source_summary" not in income_summary.columns:
+        return ""
+    values = [
+        text_value(value)
+        for value in income_summary["fx_source_summary"].fillna("")
+        if text_value(value)
+    ]
+    return " | ".join(dict.fromkeys(values))
+
+
+def income_fx_status_from_summary(income_summary: pd.DataFrame) -> str:
+    if income_summary_field_sum(income_summary, "fx_missing_row_count") > 0:
+        return "fx_missing"
+    return "available"
+
+
 def performance_fx_status(reconciliation_metrics: dict[str, Any]) -> str:
     statuses: list[str] = []
     if (summary_number(reconciliation_metrics, "currency_ambiguous_row_count") or 0.0) > 0:
@@ -769,13 +1227,19 @@ def performance_fx_status(reconciliation_metrics: dict[str, Any]) -> str:
     return status_from_list(statuses, default="available")
 
 
-def build_performance_summary(reconciliation: pd.DataFrame, income_summary: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_performance_summary(
+    reconciliation: pd.DataFrame,
+    income_summary: pd.DataFrame | None = None,
+    fx_requirements: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     income_summary = income_summary if income_summary is not None else pd.DataFrame()
+    fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
     rec = summary_to_dict(reconciliation)
     total_assets_status = summary_status(rec, "total_assets_status", "unavailable")
     principal_status = summary_status(rec, "net_external_principal_status", "unavailable")
     realized_status = summary_status(rec, "realized_pnl_status", "transaction_history_missing")
     income_status = income_summary_status(income_summary)
+    income_fx_status = income_fx_status_from_summary(income_summary)
     fx_status = performance_fx_status(rec)
 
     asset_values_available = total_assets_status == "available"
@@ -878,6 +1342,10 @@ def build_performance_summary(reconciliation: pd.DataFrame, income_summary: pd.D
         "realized_pnl_status": realized_status,
         "income_status": income_status,
         "fx_status": fx_status,
+        "income_fx_status": income_fx_status,
+        "income_fx_missing_row_count": income_summary_field_sum(income_summary, "fx_missing_row_count"),
+        "income_fx_source_summary": income_summary_source_text(income_summary),
+        "fx_rate_requirement_row_count": len(fx_requirements),
         "amount_review_needed_row_count": summary_number(rec, "amount_review_needed_row_count") or 0,
     }
     return summary_metric_rows({metric: values.get(metric) for metric in PERFORMANCE_SUMMARY_METRICS})
@@ -1398,13 +1866,20 @@ def fx_event_counts(fx_events: pd.DataFrame) -> dict[str, int]:
     return counts
 
 
-def build_reconciliation_summary(processed_dir: Path, holdings: pd.DataFrame, realized_ledger: pd.DataFrame | None = None) -> pd.DataFrame:
+def build_reconciliation_summary(
+    processed_dir: Path,
+    holdings: pd.DataFrame,
+    realized_ledger: pd.DataFrame | None = None,
+    income: pd.DataFrame | None = None,
+    expenses: pd.DataFrame | None = None,
+    transactions: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     cashflows_path = processed_dir / "processed_cashflows.csv"
     cashflows = load_csv(cashflows_path)
-    income = load_csv(processed_dir / "processed_income.csv")
-    expenses = load_csv(processed_dir / "processed_expenses.csv")
+    income = income if income is not None else load_csv(processed_dir / "processed_income.csv")
+    expenses = expenses if expenses is not None else load_csv(processed_dir / "processed_expenses.csv")
     fx_events = load_csv(processed_dir / "processed_fx_events.csv")
-    transactions = load_csv(processed_dir / "processed_transactions.csv")
+    transactions = transactions if transactions is not None else load_csv(processed_dir / "processed_transactions.csv")
 
     asset_total, current_cash, current_holding_assets, asset_status, asset_status_counts = total_assets_breakdown_krw(holdings)
     deposits, withdrawals, net_principal, principal_status, principal_status_counts = net_external_principal_krw(cashflows, source_available=cashflows_path.exists())
@@ -1752,11 +2227,21 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     summary, holdings, risk, review, history = build_portfolio_outputs(processed_dir, vault_root)
     transactions = load_csv(processed_dir / "processed_transactions.csv")
     cashflows = load_csv(processed_dir / "processed_cashflows.csv")
-    income = load_csv(processed_dir / "processed_income.csv")
+    expenses = load_csv(processed_dir / "processed_expenses.csv")
+    fx_rates = load_fx_rates(processed_dir)
+    income = apply_income_fx_rates(load_csv(processed_dir / "processed_income.csv"), fx_rates)
     income_summary = build_income_summary(income)
     realized = realized_pnl_ledger(transactions, holdings)
-    reconciliation = build_reconciliation_summary(processed_dir, holdings, realized)
-    performance = build_performance_summary(reconciliation, income_summary)
+    fx_requirements = build_fx_rate_requirements(income, transactions=transactions, expenses=expenses)
+    reconciliation = build_reconciliation_summary(
+        processed_dir,
+        holdings,
+        realized,
+        income=income,
+        expenses=expenses,
+        transactions=transactions,
+    )
+    performance = build_performance_summary(reconciliation, income_summary, fx_requirements)
     monthly_cashflow = build_monthly_cashflow_summary(cashflows)
     performance_history = build_performance_history(performance, load_csv(processed_dir / "performance_history.csv"))
     if dry_run:
@@ -1769,6 +2254,7 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
             "realized_rows": len(realized),
             "income_summary_rows": len(income_summary),
             "performance_rows": len(performance),
+            "fx_rate_requirement_rows": len(fx_requirements),
             "monthly_cashflow_rows": len(monthly_cashflow),
             "performance_history_rows": len(performance_history),
             "reconciliation_rows": len(reconciliation),
@@ -1779,7 +2265,9 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     performance.to_csv(processed_dir / "performance_summary.csv", index=False, encoding="utf-8-sig")
     monthly_cashflow.to_csv(processed_dir / "monthly_cashflow_summary.csv", index=False, encoding="utf-8-sig")
     performance_history.to_csv(processed_dir / "performance_history.csv", index=False, encoding="utf-8-sig")
+    income.to_csv(processed_dir / "processed_income.csv", index=False, encoding="utf-8-sig")
     income_summary.to_csv(processed_dir / "income_summary.csv", index=False, encoding="utf-8-sig")
+    fx_requirements.to_csv(processed_dir / "fx_rate_requirements.csv", index=False, encoding="utf-8-sig")
     realized.to_csv(processed_dir / "processed_realized_pnl.csv", index=False, encoding="utf-8-sig")
     holdings.to_csv(processed_dir / "processed_holdings.csv", index=False, encoding="utf-8-sig")
     risk.to_csv(processed_dir / "risk_watchlist.csv", index=False, encoding="utf-8-sig")
@@ -1795,6 +2283,7 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
         "realized_rows": len(realized),
         "income_summary_rows": len(income_summary),
         "performance_rows": len(performance),
+        "fx_rate_requirement_rows": len(fx_requirements),
         "monthly_cashflow_rows": len(monthly_cashflow),
         "performance_history_rows": len(performance_history),
         "reconciliation_rows": len(reconciliation),

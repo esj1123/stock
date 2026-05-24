@@ -82,6 +82,7 @@ The pipeline separates current holdings valuation from whole-investment performa
 - `portfolio_summary.csv` remains current-holdings-focused. Its `pnl_pct` is the current holdings valuation return, not whole-investment cumulative return.
 - `processed_realized_pnl.csv` is the realized PnL ledger. It records sold-position PnL from imported buy/sell transaction history using FIFO cost basis and must not create current holdings.
 - `income_summary.csv` summarizes dividend, interest, and distribution income separately by `income_type` and `currency_native`. Native amounts are preserved; official KRW income uses status-ok KRW rows only.
+- `fx_rate_requirements.csv` lists historical FX rates needed before non-KRW income, expenses, or realized PnL rows can become official KRW amounts.
 - `performance_summary.csv` is the user-facing whole-investment performance summary. It exposes net external principal, current total assets, cumulative return, realized/unrealized PnL, income, expenses, and residual.
 - `monthly_cashflow_summary.csv` summarizes monthly external principal deposits, withdrawals, net flow, and cumulative principal for dashboard trend charts.
 - `performance_history.csv` stores import-time performance snapshot rows for monthly principal/assets/return trend charts.
@@ -94,6 +95,9 @@ Accounting rules:
 - Explained profit uses gross realized trade PnL plus unrealized PnL plus dividend/interest/distribution income minus fee/tax. Fee/tax must be deducted separately exactly once.
 - Residual is `cumulative_return_krw - explained_profit_krw`.
 - FX-missing rows must preserve native amounts and must not make official KRW performance available without FX or broker-provided KRW provenance.
+- FX provenance priority is broker KRW amount, broker raw FX, local `fx_rates.csv`, API-cached archived rate, then `fx_missing`.
+- Historical rows require same-date FX evidence. Do not apply today's rate to older dividends, fees, taxes, trades, or realized PnL.
+- USD dividends may become official KRW income when same-date provenance exists. USD realized PnL remains requirement-only until all underlying proceeds, cost basis, fee, and tax KRW values have provenance.
 - Transaction-history rows must stay in transaction/realized ledgers and must not be promoted into current holdings.
 - Historical total assets and cumulative return trend points require imported balance snapshots. Do not reconstruct past monthly total assets from raw transactions alone.
 
@@ -158,6 +162,20 @@ Known normalization rules:
 `70_Imports/templates/initial_holdings_template.xlsx` is not committed because spreadsheet files are ignored by default. If you need an initial holdings workbook, create it locally from the instructions in `70_Imports/templates/README.md` and keep it under `70_Imports/raw/` in a private vault.
 
 Adding a blank `.xlsx` template to the repository should be a separate reviewed change with an explicit `.gitignore` exception.
+
+## FX Rates Template
+
+Use `70_Imports/templates/fx_rates_template.csv` as the schema reference for a private local `fx_rates.csv`.
+
+Recommended local paths are `70_Imports/fx_rates.csv` or `70_Imports/raw/fx_rates.csv` in the private vault. Keep filled FX files out of Git if they include broker-derived or private workflow notes.
+
+Required columns:
+
+```text
+effective_date,base_currency,quote_currency,rate,source_type,provider,use_case,status,source_note
+```
+
+Only archived same-date rows with usable status such as `approved`, `cached`, `official`, or `verified` are eligible for conversion.
 
 ## Safety Notes
 

@@ -1,0 +1,2 @@
+effective_date,base_currency,quote_currency,rate,source_type,provider,use_case,status,source_note
+2026-01-10,USD,KRW,1500.00,local,manual,income_dividend,approved,Same-date archived/manual FX evidence

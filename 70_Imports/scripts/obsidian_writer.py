@@ -507,11 +507,13 @@ def portfolio_content(
     performance_summary: pd.DataFrame | None = None,
     income_summary: pd.DataFrame | None = None,
     performance_history: pd.DataFrame | None = None,
+    fx_requirements: pd.DataFrame | None = None,
 ) -> str:
     reconciliation = reconciliation if reconciliation is not None else pd.DataFrame()
     performance_summary = performance_summary if performance_summary is not None else pd.DataFrame()
     income_summary = income_summary if income_summary is not None else pd.DataFrame()
     performance_history = performance_history if performance_history is not None else pd.DataFrame()
+    fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
@@ -537,6 +539,7 @@ def portfolio_content(
     holdings_return_value = official_kpi_value(current_value_status, metric(summary, "pnl_pct", "-"))
     usd_dividend_native = native_amount_label(income_summary_native_total(income_summary, "dividend", "USD"), "USD")
     income_fx_missing_rows = plain_number_text(income_summary_field_total(income_summary, "fx_missing_row_count"))
+    fx_requirement_rows = plain_number_text(len(fx_requirements))
     performance = [
         "## 전체 투자 성과",
         '<div class="stock-kpi-grid">',
@@ -549,6 +552,8 @@ def portfolio_content(
         snapshot_card("KRW 환산 가능 배당/이자/분배금", metric(performance_summary, "income_total_krw", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"])), "recognized official KRW rows only"),
         snapshot_card("USD 배당", usd_dividend_native, "native USD dividend rows; not KRW converted"),
         snapshot_card("FX 미해결 income row", income_fx_missing_rows),
+        snapshot_card("FX coverage", income_fx_coverage_text(income_summary, fx_requirements), "broker KRW > broker raw FX > local fx_rates.csv > API cached"),
+        snapshot_card("FX requirements", fx_requirement_rows),
         snapshot_card("현금성 수익 상태", income_summary_status_text(income_summary)),
         snapshot_card("수수료/세금", metric_sum(performance_summary, ["fee_expense_krw", "tax_expense_krw"], metric_sum(reconciliation, ["fee_expense_krw", "tax_expense_krw"]))),
         snapshot_card("설명되지 않은 차이", metric(performance_summary, "reconciliation_residual_krw", metric(reconciliation, "residual_krw", "-")), "total PnL - explained profit"),
@@ -1290,6 +1295,8 @@ def income_summary_table(income: pd.DataFrame) -> str:
                 "row_count",
                 "fx_missing_row_count",
                 "amount_review_needed_row_count",
+                "fx_status_summary",
+                "fx_source_summary",
                 "income_status",
             ],
             50,
@@ -1352,6 +1359,27 @@ def native_amount_label(value: Any, currency: str) -> str:
     return f"{amount} {currency.upper()}" if amount else ""
 
 
+def income_fx_coverage_text(income_summary: pd.DataFrame, fx_requirements: pd.DataFrame | None = None) -> str:
+    if income_summary.empty:
+        return ""
+    total = optional_number_value(income_summary_field_total(income_summary, "row_count")) or 0.0
+    missing = optional_number_value(income_summary_field_total(income_summary, "fx_missing_row_count")) or 0.0
+    covered = max(total - missing, 0.0)
+    requirement_count = len(fx_requirements) if fx_requirements is not None else 0
+    return f"covered: {format_number(covered)} / missing: {format_number(missing)} / requirements: {format_number(requirement_count)}"
+
+
+def income_fx_source_text(income_summary: pd.DataFrame) -> str:
+    if income_summary.empty or "fx_source_summary" not in income_summary.columns:
+        return ""
+    values = [
+        markdown_cell(value)
+        for value in income_summary["fx_source_summary"].fillna("")
+        if markdown_cell(value)
+    ]
+    return " | ".join(dict.fromkeys(values))
+
+
 def income_summary_status_text(income_summary: pd.DataFrame) -> str:
     if income_summary.empty or "income_status" not in income_summary.columns:
         return ""
@@ -1395,11 +1423,13 @@ def income_summary_native_text(income_summary: pd.DataFrame) -> str:
     return " / ".join(records)
 
 
-def cash_income_cards(income_summary: pd.DataFrame) -> str:
+def cash_income_cards(income_summary: pd.DataFrame, fx_requirements: pd.DataFrame | None = None) -> str:
     return dashboard_kpi_grid([
         snapshot_card("KRW 환산 가능 배당/이자/분배금", income_summary_field_total(income_summary, "amount_krw_sum"), "recognized official KRW rows only"),
         snapshot_card("USD dividend native total", income_summary_native_total(income_summary, "dividend", "USD"), "native USD dividend rows; not KRW converted"),
         snapshot_card("FX 미해결 income row count", income_summary_field_total(income_summary, "fx_missing_row_count")),
+        snapshot_card("FX coverage", income_fx_coverage_text(income_summary, fx_requirements), "broker KRW > broker raw FX > local fx_rates.csv > API cached"),
+        snapshot_card("FX source", income_fx_source_text(income_summary)),
         snapshot_card("income_status", income_summary_status_text(income_summary)),
         snapshot_card("수집된 배당", income_summary_field_total(income_summary, "amount_krw_sum", "dividend"), "recognized official KRW rows only"),
         snapshot_card("수집된 이자", income_summary_field_total(income_summary, "amount_krw_sum", "interest"), "recognized official KRW rows only"),
@@ -1630,6 +1660,7 @@ def cashflow_content(
     expenses: pd.DataFrame | None = None,
     fx_events: pd.DataFrame | None = None,
     monthly_cashflow_summary: pd.DataFrame | None = None,
+    fx_requirements: pd.DataFrame | None = None,
 ) -> str:
     summary = summary if summary is not None else pd.DataFrame()
     income = income if income is not None else pd.DataFrame()
@@ -1637,6 +1668,7 @@ def cashflow_content(
     expenses = expenses if expenses is not None else pd.DataFrame()
     fx_events = fx_events if fx_events is not None else pd.DataFrame()
     monthly_cashflow_summary = monthly_cashflow_summary if monthly_cashflow_summary is not None else pd.DataFrame()
+    fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
     principal_cash = cashflow_principal_view(cash)
     months = 0
     if not principal_cash.empty and "trade_date" in principal_cash.columns:
@@ -1651,6 +1683,7 @@ def cashflow_content(
             snapshot_card("Income Rows", len(income)),
             snapshot_card("Expense Rows", len(expenses)),
             snapshot_card("FX Legs", len(fx_events)),
+            snapshot_card("FX Requirements", len(fx_requirements)),
             snapshot_card("Dividend Rows", len(dividends)),
             snapshot_card("Months", months),
             snapshot_card("Types", tx_types),
@@ -1663,8 +1696,10 @@ def cashflow_content(
         "## Principal exclusions and unresolved amounts",
         cashflow_exclusion_status_table(cash, income, expenses, fx_events),
         "## 현금성 수익",
-        cash_income_cards(income_summary),
+        cash_income_cards(income_summary, fx_requirements),
         income_summary_table(income_summary if not income_summary.empty else income),
+        "### FX rate requirements",
+        markdown_table(fx_requirements, ["event_date", "currency", "use_case", "row_count", "amount_native_sum", "missing_reason", "source_file_type", "status"], 50),
         "### Income status counts",
         status_count_table(income, "amount_review_status", "income"),
         "## Expense summary",
@@ -1722,7 +1757,11 @@ REQUIRED_OUTPUT_COLUMNS = {
     "income_summary.csv": [
         "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",
         "tax_krw_sum", "net_income_native", "net_income_krw", "row_count", "fx_missing_row_count",
-        "amount_review_needed_row_count", "income_status",
+        "amount_review_needed_row_count", "fx_status_summary", "fx_source_summary", "income_status",
+    ],
+    "fx_rate_requirements.csv": [
+        "event_date", "currency", "use_case", "row_count", "amount_native_sum",
+        "missing_reason", "source_file_type", "status",
     ],
     "performance_summary.csv": ["metric", "value"],
     "monthly_cashflow_summary.csv": [
@@ -2059,6 +2098,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     dividends = read_csv(processed_dir / "processed_dividends.csv")
     income = read_csv(processed_dir / "processed_income.csv")
     income_summary = read_csv(processed_dir / "income_summary.csv")
+    fx_requirements = read_csv(processed_dir / "fx_rate_requirements.csv")
     expenses = read_csv(processed_dir / "processed_expenses.csv")
     fx_events = read_csv(processed_dir / "processed_fx_events.csv")
     sources = read_csv(processed_dir / "source_file_index.csv")
@@ -2070,7 +2110,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
-        return portfolio_content(summary, holdings, warning, reconciliation, performance, income_summary, performance_history)
+        return portfolio_content(summary, holdings, warning, reconciliation, performance, income_summary, performance_history, fx_requirements)
     if name == "Reconciliation.md":
         return reconciliation_content(reconciliation, summary, realized)
     if name == "Companies.md":
@@ -2078,7 +2118,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Exposure.md":
         return exposure_content(summary, holdings, warning)
     if name == "Cashflows.md":
-        return cashflow_content(cash, dividends, summary, income, income_summary, expenses, fx_events, monthly_cashflow)
+        return cashflow_content(cash, dividends, summary, income, income_summary, expenses, fx_events, monthly_cashflow, fx_requirements)
     if name == "Import_Review.md":
         return import_review_content(summary, sources, skipped, unclassified, warning, holdings, income, expenses, fx_events, amount_audit, unit_mismatch, processed_dir)
     if name == "Risk_Watchlist.md":

@@ -73,6 +73,7 @@ UEQVWK.DOCX
 
 # Personal export files
 *.csv
+!70_Imports/templates/fx_rates_template.csv
 *.db
 *.xlsx
 *.xls

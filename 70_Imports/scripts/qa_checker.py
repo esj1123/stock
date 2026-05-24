@@ -28,7 +28,11 @@ REQUIRED_QA_OUTPUT_SCHEMAS = {
     "income_summary.csv": {
         "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",
         "tax_krw_sum", "net_income_native", "net_income_krw", "row_count", "fx_missing_row_count",
-        "amount_review_needed_row_count", "income_status",
+        "amount_review_needed_row_count", "fx_status_summary", "fx_source_summary", "income_status",
+    },
+    "fx_rate_requirements.csv": {
+        "event_date", "currency", "use_case", "row_count", "amount_native_sum",
+        "missing_reason", "source_file_type", "status",
     },
     "performance_summary.csv": {"metric", "value"},
     "processed_realized_pnl.csv": {

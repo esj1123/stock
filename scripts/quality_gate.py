@@ -75,6 +75,10 @@ REQUIRED_PERFORMANCE_METRICS = [
     "realized_pnl_status",
     "income_status",
     "fx_status",
+    "income_fx_status",
+    "income_fx_missing_row_count",
+    "income_fx_source_summary",
+    "fx_rate_requirement_row_count",
     "amount_review_needed_row_count",
 ]
 PERFORMANCE_MONEY_METRICS = {
@@ -149,7 +153,11 @@ REQUIRED_OUTPUT_SCHEMAS = {
     "income_summary.csv": [
         "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",
         "tax_krw_sum", "net_income_native", "net_income_krw", "row_count", "fx_missing_row_count",
-        "amount_review_needed_row_count", "income_status",
+        "amount_review_needed_row_count", "fx_status_summary", "fx_source_summary", "income_status",
+    ],
+    "fx_rate_requirements.csv": [
+        "event_date", "currency", "use_case", "row_count", "amount_native_sum",
+        "missing_reason", "source_file_type", "status",
     ],
     "performance_summary.csv": ["metric", "value"],
     "monthly_cashflow_summary.csv": [
@@ -717,6 +725,27 @@ def summary_status_from_statuses(statuses: list[str]) -> str:
     return blocking[0]
 
 
+def counts_summary(values: list[str]) -> str:
+    cleaned = [value for value in values if value]
+    counts: dict[str, int] = {}
+    for value in cleaned:
+        counts[value] = counts.get(value, 0) + 1
+    return " / ".join(f"{key}: {value}" for key, value in counts.items())
+
+
+def income_fx_status_and_source(row: dict[str, str]) -> tuple[str, str]:
+    status = row_status(row) or "ok"
+    currency = row_currency(row)
+    if currency == "KRW":
+        return "not_required", "raw_native"
+    if status == "fx_missing":
+        return "fx_missing", "fx_missing"
+    source = text_value(row.get("amount_krw_source")) or text_value(row.get("fx_rate_source"))
+    if status == "ok":
+        return "available", source or "unknown"
+    return status, source or status
+
+
 def optional_abs_sum(rows: list[dict[str, str]], field: str, *, ok_only: bool = False) -> float | None:
     values: list[float] = []
     for row in rows:
@@ -759,6 +788,12 @@ def expected_income_summary(income_rows: list[dict[str, str]]) -> dict[tuple[str
         tax_krw = optional_abs_sum(rows, "tax_krw", ok_only=True)
         tax_native_for_net = tax_native if tax_native is not None else (0.0 if amount_native is not None else None)
         tax_krw_for_net = tax_krw if tax_krw is not None else (0.0 if amount_krw is not None else None)
+        fx_statuses: list[str] = []
+        fx_sources: list[str] = []
+        for row in rows:
+            fx_status, fx_source = income_fx_status_and_source(row)
+            fx_statuses.append(fx_status)
+            fx_sources.append(fx_source)
         expected[key] = {
             "amount_native_sum": amount_native,
             "amount_krw_sum": amount_krw,
@@ -769,6 +804,8 @@ def expected_income_summary(income_rows: list[dict[str, str]]) -> dict[tuple[str
             "row_count": len(rows),
             "fx_missing_row_count": sum(1 for status in statuses if status == "fx_missing"),
             "amount_review_needed_row_count": sum(1 for status in statuses if status in AMBIGUOUS_OR_UNRESOLVED_STATUSES),
+            "fx_status_summary": counts_summary(fx_statuses),
+            "fx_source_summary": counts_summary(fx_sources),
             "income_status": summary_status_from_statuses(statuses),
         }
     return expected
@@ -829,6 +866,32 @@ def income_summary_contract_findings(summary_rows: list[dict[str, str]], income_
             findings.append(
                 f"{label_prefix} income_status expected {expected_values['income_status']} but found {row.get('income_status')}"
             )
+        for field in ["fx_status_summary", "fx_source_summary"]:
+            if text_value(row.get(field)) != expected_values[field]:
+                findings.append(f"{label_prefix} {field} expected {expected_values[field]} but found {row.get(field)}")
+    return findings
+
+
+def fx_rate_requirements_findings(rows: list[dict[str, str]]) -> list[str]:
+    findings: list[str] = []
+    for idx, row in enumerate(rows, start=2):
+        currency = upper_value(row.get("currency"))
+        if not is_valid_currency_code(currency) or currency == "KRW":
+            findings.append(f"fx_rate_requirements.csv row {idx} invalid currency={row.get('currency')}")
+        if is_blank(row.get("event_date")):
+            findings.append(f"fx_rate_requirements.csv row {idx} event_date is blank")
+        if is_blank(row.get("use_case")):
+            findings.append(f"fx_rate_requirements.csv row {idx} use_case is blank")
+        row_count = optional_float(row.get("row_count"))
+        if row_count is None or row_count <= 0 or row_count != int(row_count):
+            findings.append(f"fx_rate_requirements.csv row {idx} row_count must be a positive integer: {row.get('row_count')}")
+        amount_sum = optional_float(row.get("amount_native_sum"))
+        if amount_sum is None or amount_sum <= 0:
+            findings.append(f"fx_rate_requirements.csv row {idx} amount_native_sum must be positive: {row.get('amount_native_sum')}")
+        if lower_value(row.get("status")) != "fx_missing":
+            findings.append(f"fx_rate_requirements.csv row {idx} status must be fx_missing: {row.get('status')}")
+        if is_blank(row.get("missing_reason")):
+            findings.append(f"fx_rate_requirements.csv row {idx} missing_reason is blank")
     return findings
 
 
@@ -1215,12 +1278,19 @@ def performance_summary_findings(
         if not is_blank(metrics.get(metric, "")) and optional_float(metrics.get(metric)) is None:
             findings.append(f"performance_summary.csv metric {metric} is not numeric: {metrics.get(metric)}")
 
+    count_metrics = [
+        "amount_review_needed_row_count",
+        "income_fx_missing_row_count",
+        "fx_rate_requirement_row_count",
+    ]
     amount_review_count = optional_float(metrics.get("amount_review_needed_row_count"))
-    if amount_review_count is None or amount_review_count < 0 or amount_review_count != int(amount_review_count):
-        findings.append(
-            "performance_summary.csv count metric amount_review_needed_row_count must be a non-negative integer: "
-            f"{metrics.get('amount_review_needed_row_count')}"
-        )
+    for count_metric in count_metrics:
+        count_value = optional_float(metrics.get(count_metric))
+        if count_value is None or count_value < 0 or count_value != int(count_value):
+            findings.append(
+                f"performance_summary.csv count metric {count_metric} must be a non-negative integer: "
+                f"{metrics.get(count_metric)}"
+            )
 
     deposits = optional_float(metrics.get("external_deposit_krw"))
     withdrawals = optional_float(metrics.get("external_withdrawal_krw"))
@@ -1312,13 +1382,19 @@ def performance_summary_findings(
     realized_status = lower_value(metrics.get("realized_pnl_status"))
     income_status = lower_value(metrics.get("income_status"))
     fx_status = lower_value(metrics.get("fx_status"))
+    income_fx_status = lower_value(metrics.get("income_fx_status"))
     if is_blank(performance_status):
         findings.append("performance_summary.csv performance_status is blank")
     if performance_status == "available":
         blocking = []
         if cumulative_return is None:
             blocking.append("cumulative_return_krw")
-        for label, status in [("realized_pnl_status", realized_status), ("income_status", income_status), ("fx_status", fx_status)]:
+        for label, status in [
+            ("realized_pnl_status", realized_status),
+            ("income_status", income_status),
+            ("fx_status", fx_status),
+            ("income_fx_status", income_fx_status),
+        ]:
             if status and status != "available":
                 blocking.append(label)
         if amount_review_count is not None and amount_review_count > 0:
@@ -1649,6 +1725,7 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
     cashflows = read_csv_rows(processed_dir / "processed_cashflows.csv")
     income = read_csv_rows(processed_dir / "processed_income.csv")
     income_summary = read_csv_rows(processed_dir / "income_summary.csv")
+    fx_requirements = read_csv_rows(processed_dir / "fx_rate_requirements.csv")
     expenses = read_csv_rows(processed_dir / "processed_expenses.csv")
     fx_events = read_csv_rows(processed_dir / "processed_fx_events.csv")
     realized = read_csv_rows(processed_dir / "processed_realized_pnl.csv")
@@ -1686,6 +1763,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "income_summary cash income contract", "FAIL", "; ".join(income_summary_findings[:5]))
     else:
         write_result(results, "income_summary cash income contract", "PASS", f"{len(income_summary)} income summary rows preserve native amounts and use status-ok KRW totals.")
+
+    fx_requirement_findings = fx_rate_requirements_findings(fx_requirements)
+    if fx_requirement_findings:
+        write_result(results, "fx_rate_requirements output contract", "FAIL", "; ".join(fx_requirement_findings[:5]))
+    else:
+        write_result(results, "fx_rate_requirements output contract", "PASS", f"{len(fx_requirements)} FX requirement rows identify missing historical rates.")
 
     income_reversal_findings = income_reversal_review_findings(income)
     if income_reversal_findings:

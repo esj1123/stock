@@ -41,3 +41,16 @@ This method treats the initial balance as a starting snapshot. To avoid duplicat
 - full transaction history from the beginning.
 
 Adding a blank `.xlsx` template to this repository should be handled as a separate reviewed change with an explicit `.gitignore` exception.
+
+## fx_rates_template.csv
+
+`fx_rates_template.csv` is a committed schema example for local historical FX evidence.
+
+Create a private `fx_rates.csv` from this template when you need non-KRW income or other rows to become official KRW amounts. Recommended private locations:
+
+```text
+70_Imports/fx_rates.csv
+70_Imports/raw/fx_rates.csv
+```
+
+The pipeline uses only same-date archived rows and never calls a live FX API during import/report generation. Source priority is broker KRW amount, broker raw FX, local `fx_rates.csv`, API-cached archived row, then `fx_missing`.
