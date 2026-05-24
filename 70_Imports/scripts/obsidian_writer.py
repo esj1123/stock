@@ -53,11 +53,14 @@ def format_number(value: Any, decimals: int | None = None) -> str:
 
 
 def format_krw(value: Any) -> str:
-    return format_number(value)
+    return format_number(value, decimals=0)
 
 
 def format_usd(value: Any) -> str:
     text = markdown_cell(value)
+    match = re.fullmatch(r"(-?[\d,]+(?:\.\d+)?)\s+USD", text, flags=re.IGNORECASE)
+    if match:
+        return f"{format_number(match.group(1))} USD"
     if text.upper().endswith(" USD"):
         return text
     amount = format_number(value)
@@ -73,6 +76,19 @@ def format_pct(value: Any) -> str:
     if decimals > 0:
         text = text.rstrip("0").rstrip(".")
     return text + "%"
+
+
+def format_currency_prefixed_amounts(value: Any) -> str:
+    text = markdown_cell(value)
+    if not text:
+        return ""
+
+    pattern = re.compile(r"\b([A-Z]{3})\s+(-?[\d,]+(?:\.\d+)?)\b")
+
+    def replace(match: re.Match[str]) -> str:
+        return f"{match.group(1).upper()} {format_number(match.group(2))}"
+
+    return pattern.sub(replace, text)
 
 
 def format_metric_value(metric_name: Any, value: Any, currency: Any = "") -> str:
@@ -124,7 +140,50 @@ def format_metric_value(metric_name: Any, value: Any, currency: Any = "") -> str
         return format_krw(value) if "krw" in key else format_number(value)
     if "count" in key or key.endswith("_rows") or key == "rows":
         return format_number(value, decimals=0)
+    prefixed_currency_text = format_currency_prefixed_amounts(value)
+    if prefixed_currency_text != text:
+        return prefixed_currency_text
     return text
+
+
+def format_snapshot_value(label: str, value: Any, hint: str = "") -> str:
+    text = markdown_cell(value)
+    if not text:
+        return ""
+    prefixed_currency_text = format_currency_prefixed_amounts(value)
+    if prefixed_currency_text != text:
+        return prefixed_currency_text
+
+    format_key = f"{label} {hint}".strip()
+    lower_key = format_key.lower()
+    if "usd" in lower_key and any(token in lower_key for token in ["amount", "dividend", "income", "native"]):
+        return format_usd(value)
+    if any(token in format_key for token in ["수익률", "비율"]) or any(token in lower_key for token in ["pct", "percent", "%"]):
+        return format_pct(value)
+    if any(token in format_key for token in ["건수", "종목", "행수"]) or any(token in lower_key for token in ["count", "rows"]):
+        return format_number(value, decimals=0)
+    if (
+        "KRW" in format_key
+        or any(token in format_key for token in [
+            "원금",
+            "입금",
+            "출금",
+            "총자산",
+            "금액",
+            "원가",
+            "평가금액",
+            "손익",
+            "수수료",
+            "세금",
+            "배당",
+            "이자",
+            "분배금",
+            "원천징수세",
+            "환산 가능 수익",
+        ])
+    ):
+        return format_krw(value)
+    return format_metric_value(format_key, value)
 
 
 def read_csv(path: Path) -> pd.DataFrame:
@@ -397,8 +456,7 @@ def largest_position_label(holdings: pd.DataFrame) -> str:
 
 def snapshot_card(label: str, value: Any, hint: str = "") -> str:
     hint_html = f'<span class="stock-kpi-hint">{escape(markdown_cell(hint))}</span>' if hint else ""
-    format_key = f"{label} {hint}".strip()
-    return f'<div class="stock-kpi"><span class="stock-kpi-label">{escape(label)}</span><strong>{escape(format_metric_value(format_key, value))}</strong>{hint_html}</div>'
+    return f'<div class="stock-kpi"><span class="stock-kpi-label">{escape(label)}</span><strong>{escape(format_snapshot_value(label, value, hint))}</strong>{hint_html}</div>'
 
 
 def review_reason_summary_table(review: pd.DataFrame) -> str:

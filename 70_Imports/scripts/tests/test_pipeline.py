@@ -4471,6 +4471,58 @@ def test_cashflow_dashboard_surfaces_income_expense_and_fx_summaries(tmp_path: P
     assert "| internal_transfer_rows | 3 |" in content
 
 
+def test_cashflow_dashboard_income_kpis_format_count_native_and_krw_values(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_stage8_output_inputs(
+        processed,
+        income_summary_rows=[
+            {
+                "income_type": "dividend",
+                "currency_native": "KRW",
+                "amount_native_sum": "31751.0",
+                "amount_krw_sum": "31751.0",
+                "tax_native_sum": "0",
+                "tax_krw_sum": "0",
+                "net_income_native": "31751.0",
+                "net_income_krw": "31751.0",
+                "row_count": "1",
+                "fx_missing_row_count": "0",
+                "amount_review_needed_row_count": "0",
+                "income_status": "available",
+            },
+            {
+                "income_type": "dividend",
+                "currency_native": "USD",
+                "amount_native_sum": "-13015.0",
+                "amount_krw_sum": "",
+                "tax_native_sum": "0",
+                "tax_krw_sum": "",
+                "net_income_native": "-13015.0",
+                "net_income_krw": "",
+                "row_count": "19.0",
+                "fx_missing_row_count": "19.0",
+                "amount_review_needed_row_count": "19.0",
+                "income_status": "fx_missing",
+            },
+        ],
+    )
+
+    content = dashboard_content("Cashflows.md", processed)
+    raw_income_summary = pd.read_csv(processed / "income_summary.csv", dtype=str)
+    raw_by_currency = raw_income_summary.set_index("currency_native")
+
+    assert '<span class="stock-kpi-label">FX 누락 건수</span><strong>19</strong>' in content
+    assert '<span class="stock-kpi-label">native 기준 수익</span><strong>KRW 31,751 / USD -13,015</strong>' in content
+    assert '<span class="stock-kpi-label">KRW 환산 가능 수익</span><strong>31,751</strong>' in content
+    assert "31751.0" not in content
+    assert "-13015.0" not in content
+    assert "19.0" not in content
+    assert raw_by_currency.loc["KRW", "net_income_native"] == "31751.0"
+    assert raw_by_currency.loc["KRW", "net_income_krw"] == "31751.0"
+    assert raw_by_currency.loc["USD", "net_income_native"] == "-13015.0"
+    assert raw_by_currency.loc["USD", "fx_missing_row_count"] == "19.0"
+
+
 def test_reconciliation_dashboard_surfaces_unit_aware_summary(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     processed.mkdir(parents=True)
@@ -4776,6 +4828,10 @@ def test_portfolio_dashboard_formats_numbers_without_changing_processed_csv(tmp_
     processed.mkdir(parents=True)
     pd.DataFrame([
         {"metric": "holding_count", "value": "0"},
+        {"metric": "total_cost", "value": "37586238.0"},
+        {"metric": "total_portfolio_value", "value": "52409827.0"},
+        {"metric": "total_unrealized_pnl", "value": "14823589.0"},
+        {"metric": "pnl_pct", "value": "39.44"},
         {"metric": "total_portfolio_value_status", "value": "available"},
         {"metric": "balance_data_available", "value": "True"},
     ]).to_csv(processed / "portfolio_summary.csv", index=False)
@@ -4798,6 +4854,8 @@ def test_portfolio_dashboard_formats_numbers_without_changing_processed_csv(tmp_
         current_holding_assets_krw="52409827.0",
         cumulative_return_krw="31831.0",
         cumulative_return_pct="0.060778",
+        fee_expense_krw="31000.0",
+        tax_expense_krw="709.0",
         reconciliation_residual_krw="0",
     )).to_csv(processed / "performance_summary.csv", index=False)
     pd.DataFrame([
@@ -4818,15 +4876,29 @@ def test_portfolio_dashboard_formats_numbers_without_changing_processed_csv(tmp_
     ], columns=INCOME_SUMMARY_OUTPUT_COLUMNS).to_csv(processed / "income_summary.csv", index=False)
 
     content = dashboard_content("Portfolio.md", processed)
+    raw_summary = pd.read_csv(processed / "portfolio_summary.csv", dtype=str)
     raw_performance = pd.read_csv(processed / "performance_summary.csv", dtype=str)
+    raw_summary_values = dict(zip(raw_summary["metric"], raw_summary["value"].fillna("")))
     raw_values = dict(zip(raw_performance["metric"], raw_performance["value"].fillna("")))
 
     assert "52,409,827" in content
+    assert "37,586,238" in content
+    assert "14,823,589" in content
+    assert "31,709" in content
     assert "31,831" in content
     assert "0.06%" in content
     assert '<span class="stock-kpi-label">USD 배당</span><strong>175 USD</strong>' in content
+    assert "37586238.0" not in content
+    assert "52409827.0" not in content
+    assert "14823589.0" not in content
+    assert "31709.0" not in content
+    assert raw_summary_values["total_cost"] == "37586238.0"
+    assert raw_summary_values["total_portfolio_value"] == "52409827.0"
+    assert raw_summary_values["total_unrealized_pnl"] == "14823589.0"
     assert raw_values["current_total_assets_krw"] == "52409827.0"
     assert raw_values["cumulative_return_krw"] == "31831.0"
+    assert raw_values["fee_expense_krw"] == "31000.0"
+    assert raw_values["tax_expense_krw"] == "709.0"
     assert "추후 import 누적 후 표시" in content
 
 
@@ -4921,6 +4993,7 @@ def test_portfolio_dashboard_performance_history_two_points_renders_graph_and_fa
     assert "Monthly Principal and Cumulative Return Trend" in section
     assert "historical total assets are not inferred from raw transactions" in section
     assert "### Fallback table" in section
+    assert not re.search(r'<text class="label" x="8" y="[^"]+">-?[\d,]+\.\d+</text>', section)
     assert "| 2026-05 | 2026-05-24 | 120,000 | 125,000 | 5,000 | 4.17% | available |" in section
 
 
