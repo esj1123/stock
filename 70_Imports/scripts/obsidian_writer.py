@@ -8,7 +8,7 @@ from typing import Any
 
 import pandas as pd
 
-from nh_importer import canonical_overseas_position_key, is_principal_cashflow_row, principal_cashflow_krw_amount
+from nh_importer import canonical_overseas_position_key, infer_asset_type, infer_market, is_principal_cashflow_row, principal_cashflow_krw_amount
 from portfolio_model import (
     AMOUNT_UNIT_CLASSIFICATION_STATUS,
     CURRENCY_NORMALIZATION_STATUS,
@@ -329,6 +329,16 @@ def bool_value(value: Any) -> bool:
     if isinstance(value, bool):
         return value
     return str(value).strip().lower() in {"true", "1", "yes", "y"}
+
+
+def text_or_blank(value: Any) -> str:
+    try:
+        if pd.isna(value):
+            return ""
+    except Exception:
+        pass
+    text = str(value or "").strip()
+    return "" if text.lower() in {"nan", "none", "na", "n/a", "<na>"} else text
 
 
 def current_holding_positions(holdings: pd.DataFrame, exclude_cash: bool = True) -> pd.DataFrame:
@@ -2190,11 +2200,50 @@ def existing_company_note_index(company_root: Path) -> dict[str, Path]:
     return index
 
 
+def default_user_judgment_section(asset_type: str) -> str:
+    if asset_type == "etf":
+        return """## 사용자 판단 영역
+### 1. 보유 목적
+- 현재 미작성 / 조사 필요
+### 2. 기초자산
+- 현재 미정 / 조사 필요
+### 3. 레버리지/리밸런싱 구조
+- 현재 미정 / 조사 필요
+### 4. 변동성 decay 리스크
+- 현재 미정 / 조사 필요
+### 5. 보유 한도
+- 현재 미정
+### 6. 축소 기준
+- 현재 명시적 기준 없음 / 조사 필요
+### 7. 장기 보유 허용 여부
+- 현재 미정"""
+    return """## 사용자 판단 영역
+### 1. 매수 이유
+- 현재 미작성 / 조사 필요
+### 2. 계속 보유하려는 이유
+- 현재 미작성 / 조사 필요
+### 3. 핵심 확인 지표
+- 현재 미정 / 조사 필요
+### 4. 펀더멘털 훼손 기준
+- 현재 미정 / 사용자 재검토 필요
+### 5. -10% 하락 시 대응
+- 현재 미정 / 사용자 재검토 필요
+### 6. 추가매수 조건
+- 현재 미정
+### 7. 매도/비중축소 조건
+- 현재 명시적 기준 없음 / 조사 필요"""
+
+
 def new_company_note(row: pd.Series) -> str:
-    ticker = str(row.get("ticker", "") or "UNKNOWN")
-    name = str(row.get("security_name", "") or ticker)
-    asset_type = str(row.get("asset_type", "stock") or "stock")
-    is_lev = bool(row.get("is_leveraged", False))
+    ticker = text_or_blank(row.get("ticker", "")) or "UNKNOWN"
+    name = text_or_blank(row.get("security_name", "")) or ticker
+    inferred_asset_type = infer_asset_type(name, ticker)
+    asset_type = text_or_blank(row.get("asset_type", "")).lower()
+    if inferred_asset_type == "etf" and asset_type != "cash":
+        asset_type = "etf"
+    asset_type = asset_type or inferred_asset_type or "stock"
+    market = text_or_blank(row.get("market", "")) or infer_market(ticker, name, text_or_blank(row.get("source_file_type", "")))
+    is_lev = bool_value(row.get("is_leveraged", False))
     etf_extra = ""
     if asset_type == "etf" or is_lev:
         etf_extra = """underlying_asset:
@@ -2204,12 +2253,13 @@ long_term_holding_allowed: false
 volatility_decay_risk: true
 leveraged_etf_rule_link: "[[05_Principles/Leveraged_ETF_Rules]]"
 """
+    user_judgment = default_user_judgment_section(asset_type)
     return f"""---
 type: company
 doc_type: company
 ticker: "{ticker}"
 name: "{name}"
-market: "{row.get('market', '')}"
+market: "{market}"
 asset_type: "{asset_type}"
 account: "{row.get('account_type', '')}"
 currency: "{row.get('currency', '')}"
@@ -2240,14 +2290,7 @@ tags:
 - 원천자료: {row.get('source_file', '')}
 {AUTO_END}
 
-## 사용자 판단 영역
-### 1. 매수 이유
-### 2. 계속 보유하려는 이유
-### 3. 핵심 확인 지표
-### 4. 펀더멘털 훼손 기준
-### 5. -10% 하락 시 대응
-### 6. 추가매수 조건
-### 7. 매도/비중축소 조건
+{user_judgment}
 
 ## AI 점검 기록
 ## 관련 Risk Event

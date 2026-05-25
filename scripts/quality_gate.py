@@ -512,6 +512,28 @@ def invalid_currency_findings(holdings: list[dict[str, str]]) -> list[str]:
     return findings
 
 
+def company_note_currency_findings(vault_root: Path) -> list[str]:
+    findings: list[str] = []
+    company_root = vault_root / "20_Companies"
+    if not company_root.exists():
+        return findings
+    for path in sorted(company_root.glob("*/Company.md")):
+        try:
+            meta = parse_note_frontmatter(path.read_text(encoding="utf-8-sig"))
+        except Exception as exc:
+            findings.append(f"{path.relative_to(vault_root)} frontmatter read failed: {exc}")
+            continue
+        for field in ["currency", "currency_native"]:
+            if field not in meta or is_blank(meta.get(field, "")):
+                continue
+            value = meta.get(field, "")
+            if looks_like_fx_rate_value(value):
+                findings.append(f"{path.relative_to(vault_root)} {field} looks like FX rate: {value}")
+            elif not is_valid_currency_code(value):
+                findings.append(f"{path.relative_to(vault_root)} invalid {field}={value}")
+    return findings
+
+
 def non_krw_amount_without_fx_findings(rows: list[dict[str, str]]) -> list[str]:
     findings: list[str] = []
     for idx, row in enumerate(rows, start=2):
@@ -1934,6 +1956,12 @@ def check_processed_integrity(vault_root: Path, results: list[GateResult]) -> No
         write_result(results, "Company note semantic duplicate guard", "FAIL", "; ".join(company_note_duplicates[:5]))
     else:
         write_result(results, "Company note semantic duplicate guard", "PASS", "no semantic duplicate Company notes found.")
+
+    company_currency_findings = company_note_currency_findings(vault_root)
+    if company_currency_findings:
+        write_result(results, "Company note currency frontmatter contract", "FAIL", "; ".join(company_currency_findings[:5]))
+    else:
+        write_result(results, "Company note currency frontmatter contract", "PASS", "Company note currency fields are 3-letter codes.")
 
     if holdings_file_count == 0:
         checks = {

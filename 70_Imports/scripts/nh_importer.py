@@ -212,6 +212,10 @@ LEVERAGED_ETF_KEYWORDS = [
     "proshares", "t-rex", "t rex", "티렉스", "tradr", "defiance", "디파이언스",
 ]
 
+DOMESTIC_ETF_TICKER_OVERRIDES = {
+    "0167A0": "SOL AI반도체TOP2플러스",
+}
+
 # Static aliases for broker exports where comprehensive holdings use an ISIN-like
 # code but overseas balance rows use a display name with the trading symbol.
 KNOWN_OVERSEAS_ISIN_SYMBOL_ALIASES = {
@@ -1638,6 +1642,8 @@ def infer_account_type(file_name: str, sheet_name: str = "") -> str:
 
 def infer_market(ticker: str, name: str = "", file_type: str = "") -> str:
     t = str(ticker or "").strip().upper()
+    if t in DOMESTIC_ETF_TICKER_OVERRIDES:
+        return "KR"
     if re.fullmatch(r"\d{6}", t):
         return "KR"
     if re.fullmatch(r"[A-Z]{2}[A-Z0-9]{10}", t):
@@ -1675,8 +1681,11 @@ def normalize_cash_currency(name: str = "", ticker: str = "", currency: Any = ""
 
 def infer_asset_type(name: str, ticker: str = "") -> str:
     s = f"{name or ''} {ticker or ''}".lower()
+    ticker_key = str(ticker or "").strip().upper()
     if is_cash_asset_name(name, ticker):
         return "cash"
+    if ticker_key in DOMESTIC_ETF_TICKER_OVERRIDES:
+        return "etf"
     if "etf" in s or "etn" in s or is_leveraged_etf_name(s):
         return "etf"
     return "stock"

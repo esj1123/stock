@@ -577,16 +577,54 @@ def note_text(vault_root: Path, ticker: str) -> str:
     return ""
 
 
+UNRESOLVED_PLACEHOLDER_PATTERNS = [
+    r"(?im)^\s*[-*]?\s*(추가\s*)?(조사|검토|재검토|확인)\s*필요\s*:.*$",
+    r"(?im)^\s*[-*]?\s*(핵심\s*가정|내가\s*틀릴\s*수\s*있는\s*지점|관찰\s*포인트|업데이트\s*로그)\s*:\s*$",
+    r"\[?\s*확인\s*필요\s*\]?",
+    r"조사\s*(및\s*)?(검토|재검토)?\s*필요",
+    r"(사용자\s*)?재검토\s*필요",
+    r"(추가\s*)?검토\s*필요",
+    r"현재\s*(사용자\s*확정\s*)?(thesis|투자\s*논리|매수\s*이유|보유\s*목적)[^.\n]*(미작성|없음|미정)",
+    r"현재\s*(명시적\s*)?(매도|비중\s*축소|손실|손절|운영)?[^.\n]*(기준|조건|허용선|기준선)[^.\n]*(없음|미정|두지\s*않)",
+    r"명시적\s*(매도|비중\s*축소|손실|손절)?\s*(기준|조건|허용선|기준선)\s*(없음|미정)",
+    r"(매도|비중\s*축소|손실|손절|운영)?\s*(기준|조건|허용선|기준선)\s*(없음|미정)",
+    r"현재\s*미정",
+    r"기준\s*미정",
+    r"기준\s*없음",
+    r"미작성",
+    r"미정",
+    r"없음",
+    r"(?im)^\s*[-*]?\s*이전\s*AI\s*예시.*$",
+    r"이전\s*AI\s*예시[^.\n]*(무효|미작성)",
+    r"새\s*사용자\s*판단[^.\n]*미작성",
+    r"별도\s*(손실\s*)?(기준|기준선)[^.\n]*(없|두지)",
+    r"손실\s*(기준|기준선)[^.\n]*(없|두지)",
+    r"현재\s*판단[^.\n]*계속\s*보유[^.\n]*",
+    r"계속\s*보유\s*예정",
+    r"유망[^.\n]*(기준|조건)[^.\n]*(없음|미정)",
+    r"운영\s*기준\s*미정",
+    r"사용자\s*판단\s*:",
+    r"손실\s*허용선\s*:",
+]
+
+
+def meaningful_section_body(body: str) -> str:
+    normalized = body.replace("TODO", "")
+    for pattern in UNRESOLVED_PLACEHOLDER_PATTERNS:
+        normalized = re.sub(pattern, "", normalized, flags=re.I)
+    normalized = re.sub(r"[-\s:_/()0-9.%·,.;\[\]]+", "", normalized)
+    return normalized.strip()
+
+
 def has_filled_section(text: str, names: list[str]) -> bool:
     if not text:
         return False
     for name in names:
-        pattern = re.compile(rf"^#+\s*.*{re.escape(name)}.*$(.*?)(?=^#+\s|\Z)", re.M | re.S)
+        pattern = re.compile(rf"^#+[^\n]*{re.escape(name)}[^\n]*\n(.*?)(?=^#+\s|\Z)", re.M | re.S)
         m = pattern.search(text)
         if m:
-            body = re.sub(r"[-\s:_()0-9.]+", "", m.group(1))
-            body = body.replace("TODO", "").replace("미정", "").replace("없음", "")
-            if len(body.strip()) >= 8:
+            body = meaningful_section_body(m.group(1))
+            if len(body) >= 8:
                 return True
     return False
 
