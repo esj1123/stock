@@ -312,9 +312,9 @@ def resolve_fx_rate(row: pd.Series | dict[str, Any], fx_rates: pd.DataFrame, use
             "fx_status": "not_required",
             "amount_krw": 0.0,
             "fx_rate_to_krw": "",
-            "fx_rate_source": "zero_native",
-            "amount_krw_source": "zero_native",
-            "source_type": "zero_native",
+            "fx_rate_source": "not_required",
+            "amount_krw_source": "raw_native",
+            "source_type": "not_required",
             "missing_reason": "",
         }
     if existing_krw is not None and (amount_source in BROKER_KRW_SOURCES or "broker" in amount_source):

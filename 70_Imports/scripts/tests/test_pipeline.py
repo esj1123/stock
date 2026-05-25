@@ -1570,6 +1570,70 @@ def test_apply_income_fx_rates_missing_keeps_fx_missing_and_builds_requirement()
     assert requirements.iloc[0]["amount_native_sum"] == pytest.approx(12.34)
 
 
+def test_resolve_fx_rate_non_krw_zero_native_uses_raw_native_without_fx():
+    row = pd.Series({
+        "trade_date": "2026-01-10",
+        "currency_native": "USD",
+        "amount_native": 0,
+        "amount_krw": "",
+        "amount_krw_source": "",
+        "fx_rate_to_krw": "",
+        "fx_rate_source": "",
+    })
+
+    resolved = resolve_fx_rate(row, pd.DataFrame(), "income_dividend")
+
+    assert resolved["status"] == "ok"
+    assert resolved["fx_status"] == "not_required"
+    assert resolved["amount_krw"] == 0.0
+    assert resolved["amount_krw_source"] == "raw_native"
+    assert resolved["fx_rate_source"] == "not_required"
+    assert resolved["source_type"] == "not_required"
+
+
+def test_income_summary_contract_uses_raw_native_for_non_krw_zero_native():
+    income = pd.DataFrame([
+        {
+            "source_file_type": "transaction_history",
+            "trade_date": "2026-01-10",
+            "income_type": "dividend",
+            "currency_native": "USD",
+            "amount_native": 0,
+            "amount_krw": "",
+            "amount_krw_source": "",
+            "tax_native": 0,
+            "tax_krw": 0,
+            "fx_rate_to_krw": "",
+            "fx_rate_source": "",
+            "amount_review_status": "ok",
+        },
+        {
+            "source_file_type": "transaction_history",
+            "trade_date": "2026-01-11",
+            "income_type": "dividend",
+            "currency_native": "USD",
+            "amount_native": 1,
+            "amount_krw": "",
+            "amount_krw_source": "",
+            "tax_native": 0,
+            "tax_krw": 0,
+            "fx_rate_to_krw": "",
+            "fx_rate_source": "",
+            "amount_review_status": "fx_missing",
+        },
+    ])
+
+    converted = apply_income_fx_rates(income, pd.DataFrame())
+    summary = build_income_summary(converted)
+
+    assert "raw_native: 1" in summary.iloc[0]["fx_source_summary"]
+    assert "zero_native" not in summary.iloc[0]["fx_source_summary"]
+    assert income_summary_contract_findings(
+        summary.astype(str).to_dict("records"),
+        converted.astype(str).to_dict("records"),
+    ) == []
+
+
 def test_resolve_fx_rate_prefers_broker_krw_amount_over_raw_and_local_fx():
     row = pd.Series({
         "trade_date": "2026-01-10",
