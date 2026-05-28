@@ -1,7 +1,10 @@
-from datetime import date
+import argparse
+from datetime import date, datetime, timedelta, timezone
+import json
 from pathlib import Path
 import re
 import sys
+from types import SimpleNamespace
 import uuid
 
 import pandas as pd
@@ -79,6 +82,66 @@ def tmp_path(request) -> Path:
     return path
 
 
+def write_synthetic_raw_file(raw_dir: Path, name: str = "ACCOUNT-123456-AAPL-private.xlsx") -> Path:
+    raw_dir.mkdir(parents=True, exist_ok=True)
+    path = raw_dir / name
+    path.write_text("synthetic raw placeholder with generated note body and KRW 1000", encoding="utf-8")
+    return path
+
+
+def full_live_write_args(live_vault: Path, raw_dir: Path, evidence_path: Path | None = None, *extra: str) -> argparse.Namespace:
+    argv = [
+        "all",
+        "--vault-root",
+        str(live_vault),
+        "--raw-dir",
+        str(raw_dir),
+        "--live-baseline-updated",
+        "--live-tests-passed",
+        "--live-quality-gate-passed",
+        "--live-dry-run-reviewed",
+        "--live-expected-changes-reviewed",
+        "--live-write-confirmation",
+        LIVE_WRITE_CONFIRMATION_TOKEN,
+        *extra,
+    ]
+    if evidence_path is not None:
+        argv.extend(["--live-dry-run-evidence", str(evidence_path)])
+    return build_parser().parse_args(argv)
+
+
+def write_synthetic_dry_run_evidence(
+    evidence_path: Path,
+    live_vault: Path,
+    raw_dir: Path,
+    *extra: str,
+    created_at_utc: datetime | None = None,
+    dry_run: bool = True,
+) -> Path:
+    argv = [
+        "all",
+        "--vault-root",
+        str(live_vault),
+        "--raw-dir",
+        str(raw_dir),
+        *extra,
+    ]
+    if dry_run:
+        argv.append("--dry-run")
+    args = build_parser().parse_args(argv)
+    payload = pipeline_main.build_dry_run_evidence(
+        args,
+        live_vault,
+        raw_dir,
+        planned_categories={"import": {"raw_file_count": 1}, "notes": {"note_update_category_count": 2}},
+        warning_counts={"note_warning_count": 0},
+        created_at_utc=created_at_utc,
+    )
+    evidence_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    return evidence_path
+
+
 def test_live_vault_actual_write_guard_blocks_without_attestation(tmp_path: Path, monkeypatch):
     live_vault = tmp_path / "live_vault"
     monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
@@ -93,6 +156,7 @@ def test_live_vault_actual_write_guard_blocks_without_attestation(tmp_path: Path
     assert "missing --live-dry-run-reviewed" in findings
     assert "missing --live-expected-changes-reviewed" in findings
     assert f"missing --live-write-confirmation {LIVE_WRITE_CONFIRMATION_TOKEN}" in findings
+    assert "missing --live-dry-run-evidence" in findings
 
 
 def test_live_vault_path_detection_matches_child_paths(tmp_path: Path):
@@ -113,23 +177,82 @@ def test_live_vault_actual_write_guard_allows_dry_run_without_attestation(tmp_pa
     assert live_write_guard_findings(args, live_vault) == []
 
 
-def test_live_vault_actual_write_guard_allows_full_attestation(tmp_path: Path, monkeypatch):
+def test_live_write_blocked_when_flags_present_but_evidence_missing(tmp_path: Path, monkeypatch):
     live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
     monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
-    args = build_parser().parse_args([
-        "all",
-        "--vault-root",
-        str(live_vault),
-        "--live-baseline-updated",
-        "--live-tests-passed",
-        "--live-quality-gate-passed",
-        "--live-dry-run-reviewed",
-        "--live-expected-changes-reviewed",
-        "--live-write-confirmation",
-        LIVE_WRITE_CONFIRMATION_TOKEN,
-    ])
 
-    assert live_write_guard_findings(args, live_vault) == []
+    args = full_live_write_args(live_vault, raw_dir)
+
+    assert "missing --live-dry-run-evidence" in live_write_guard_findings(args, live_vault, raw_dir)
+
+
+def test_live_write_blocked_when_evidence_is_not_from_dry_run(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "actual.json", live_vault, raw_dir, dry_run=False)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    args = full_live_write_args(live_vault, raw_dir, evidence)
+    findings = live_write_guard_findings(args, live_vault, raw_dir)
+
+    assert "dry-run evidence was not produced by --dry-run" in findings
+
+
+def test_live_write_blocked_when_evidence_vault_raw_or_options_mismatch(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    vault_mismatch = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "vault.json", tmp_path / "other_live", raw_dir)
+    raw_mismatch = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "raw.json", live_vault, tmp_path / "other_raw")
+    options_mismatch = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "options.json", live_vault, raw_dir, "--no-note-write")
+
+    assert "dry-run evidence vault mismatch" in live_write_guard_findings(full_live_write_args(live_vault, raw_dir, vault_mismatch), live_vault, raw_dir)
+    assert "dry-run evidence raw-dir mismatch" in live_write_guard_findings(full_live_write_args(live_vault, raw_dir, raw_mismatch), live_vault, raw_dir)
+    assert "dry-run evidence options mismatch" in live_write_guard_findings(full_live_write_args(live_vault, raw_dir, options_mismatch), live_vault, raw_dir)
+
+
+def test_live_write_blocked_when_evidence_is_stale(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    stale_time = datetime.now(timezone.utc) - timedelta(days=2)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "stale.json", live_vault, raw_dir, created_at_utc=stale_time)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    args = full_live_write_args(live_vault, raw_dir, evidence)
+    findings = live_write_guard_findings(args, live_vault, raw_dir)
+
+    assert "dry-run evidence is stale" in findings
+
+
+def test_live_write_blocked_when_raw_metadata_fingerprint_changed(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    raw_file = write_synthetic_raw_file(raw_dir)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "raw_changed.json", live_vault, raw_dir)
+    raw_file.write_text("synthetic raw placeholder changed after dry-run", encoding="utf-8")
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    args = full_live_write_args(live_vault, raw_dir, evidence)
+    findings = live_write_guard_findings(args, live_vault, raw_dir)
+
+    assert "dry-run evidence raw metadata fingerprint mismatch" in findings
+
+
+def test_live_vault_actual_write_guard_allows_full_attestation_with_matching_evidence(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "valid.json", live_vault, raw_dir)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    args = full_live_write_args(live_vault, raw_dir, evidence)
+
+    assert live_write_guard_findings(args, live_vault, raw_dir) == []
 
 
 def test_live_vault_actual_write_guard_ignores_non_live_vault(tmp_path: Path, monkeypatch):
@@ -167,6 +290,97 @@ def test_live_vault_entrypoint_blocks_before_side_effects(tmp_path: Path, monkey
     output = capsys.readouterr().out
     assert "live vault actual-write guard refused this run" in output
     assert "--live-baseline-updated" in output
+
+
+def test_live_vault_entrypoint_allows_write_only_with_matching_evidence(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "valid-entrypoint.json", live_vault, raw_dir)
+    calls: list[str] = []
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+    monkeypatch.setattr(sys, "argv", [
+        "main.py",
+        "all",
+        "--vault-root",
+        str(live_vault),
+        "--raw-dir",
+        str(raw_dir),
+        "--live-baseline-updated",
+        "--live-tests-passed",
+        "--live-quality-gate-passed",
+        "--live-dry-run-reviewed",
+        "--live-expected-changes-reviewed",
+        "--live-write-confirmation",
+        LIVE_WRITE_CONFIRMATION_TOKEN,
+        "--live-dry-run-evidence",
+        str(evidence),
+    ])
+
+    def fake_import(*_args, **_kwargs):
+        calls.append("import")
+        return SimpleNamespace(raw_files=1, parsed_rows=0, duplicate_rows_removed=0, unclassified_rows=0, unknown_columns=0)
+
+    def fake_report(*_args, **_kwargs):
+        calls.append("report")
+        return {"summary_rows": 1}
+
+    def fake_dashboards(*_args, **_kwargs):
+        calls.append("dashboards")
+        return []
+
+    def fake_company_notes(*_args, **_kwargs):
+        calls.append("company_notes")
+        return []
+
+    def fake_qa(*_args, **_kwargs):
+        calls.append("qa")
+        return pd.DataFrame()
+
+    monkeypatch.setattr(pipeline_main, "import_raw_dir", fake_import)
+    monkeypatch.setattr(pipeline_main, "generate_reports", fake_report)
+    monkeypatch.setattr(pipeline_main, "write_dashboards", fake_dashboards)
+    monkeypatch.setattr(pipeline_main, "write_company_notes", fake_company_notes)
+    monkeypatch.setattr(pipeline_main, "run_qa", fake_qa)
+
+    assert pipeline_main.main() == 0
+    assert calls == ["import", "report", "dashboards", "company_notes", "qa"]
+
+
+def test_dry_run_evidence_artifact_contains_only_sanitized_metadata(tmp_path: Path):
+    live_vault = tmp_path / "live_vault_ACCOUNT-999999"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir, "ACCOUNT-123456-AAPL-private.xlsx")
+    evidence_path = tmp_path / "evidence" / "privacy.json"
+
+    write_synthetic_dry_run_evidence(evidence_path, live_vault, raw_dir)
+
+    text = evidence_path.read_text(encoding="utf-8")
+    payload = json.loads(text)
+    assert payload["mode"] == "dry-run"
+    assert payload["raw_metadata_fingerprint"]["file_count"] == 1
+    assert set(payload) == {
+        "action",
+        "created_at_utc",
+        "evidence_hash",
+        "mode",
+        "options_hash",
+        "planned_categories",
+        "raw_identity_hash",
+        "raw_metadata_fingerprint",
+        "schema_version",
+        "vault_identity_hash",
+        "warning_counts",
+    }
+    for private_text in [
+        "ACCOUNT-123456-AAPL-private.xlsx",
+        "live_vault_ACCOUNT-999999",
+        "generated note body",
+        "KRW 1000",
+        str(live_vault),
+        str(raw_dir),
+    ]:
+        assert private_text not in text
 
 
 def test_quality_gate_live_vault_actual_write_guard_contract(tmp_path: Path):

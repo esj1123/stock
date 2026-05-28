@@ -6,6 +6,7 @@ import hashlib
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -1698,9 +1699,10 @@ def check_vault_local_venv(vault_root: Path, results: list[GateResult]) -> None:
 def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
     fake_live_vault = vault_root / ".quality_gate_fake_live_vault"
     fake_live_child = fake_live_vault / "70_Imports" / "scripts"
+    fake_raw_dir = fake_live_child / "70_Imports" / "raw"
     live_roots = (fake_live_vault,)
     blocked_args = pipeline_main.build_parser().parse_args(["all", "--vault-root", str(fake_live_child)])
-    blocked_findings = pipeline_main.live_write_guard_findings(blocked_args, fake_live_child, live_roots=live_roots)
+    blocked_findings = pipeline_main.live_write_guard_findings(blocked_args, fake_live_child, fake_raw_dir, live_roots=live_roots)
     required_findings = {
         "missing --live-baseline-updated",
         "missing --live-tests-passed",
@@ -1708,6 +1710,7 @@ def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
         "missing --live-dry-run-reviewed",
         "missing --live-expected-changes-reviewed",
         f"missing --live-write-confirmation {pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN}",
+        "missing --live-dry-run-evidence",
     }
 
     findings: list[str] = []
@@ -1716,24 +1719,135 @@ def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
         findings.append("unguarded live write did not report: " + ", ".join(missing_findings))
 
     dry_run_args = pipeline_main.build_parser().parse_args(["all", "--vault-root", str(fake_live_child), "--dry-run"])
-    if pipeline_main.live_write_guard_findings(dry_run_args, fake_live_child, live_roots=live_roots):
+    if pipeline_main.live_write_guard_findings(dry_run_args, fake_live_child, fake_raw_dir, live_roots=live_roots):
         findings.append("live dry-run was blocked")
 
-    confirmed_args = pipeline_main.build_parser().parse_args([
-        "all",
-        "--vault-root",
-        str(fake_live_child),
-        "--live-baseline-updated",
-        "--live-tests-passed",
-        "--live-quality-gate-passed",
-        "--live-dry-run-reviewed",
-        "--live-expected-changes-reviewed",
-        "--live-write-confirmation",
-        pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN,
-    ])
-    confirmed_findings = pipeline_main.live_write_guard_findings(confirmed_args, fake_live_child, live_roots=live_roots)
-    if confirmed_findings:
-        findings.append("fully attested live write was blocked: " + ", ".join(confirmed_findings))
+    with tempfile.TemporaryDirectory(prefix="stock_dry_run_evidence_") as temp_dir:
+        temp_root = Path(temp_dir)
+
+        missing_evidence_args = pipeline_main.build_parser().parse_args([
+            "all",
+            "--vault-root",
+            str(fake_live_child),
+            "--live-baseline-updated",
+            "--live-tests-passed",
+            "--live-quality-gate-passed",
+            "--live-dry-run-reviewed",
+            "--live-expected-changes-reviewed",
+            "--live-write-confirmation",
+            pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN,
+        ])
+        missing_evidence_findings = pipeline_main.live_write_guard_findings(
+            missing_evidence_args,
+            fake_live_child,
+            fake_raw_dir,
+            live_roots=live_roots,
+        )
+        if "missing --live-dry-run-evidence" not in missing_evidence_findings:
+            findings.append("fully attested live write without evidence was not blocked")
+
+        invalid_evidence = temp_root / "invalid.json"
+        invalid_evidence.write_text("not json", encoding="utf-8")
+        invalid_evidence_args = pipeline_main.build_parser().parse_args([
+            "all",
+            "--vault-root",
+            str(fake_live_child),
+            "--live-baseline-updated",
+            "--live-tests-passed",
+            "--live-quality-gate-passed",
+            "--live-dry-run-reviewed",
+            "--live-expected-changes-reviewed",
+            "--live-write-confirmation",
+            pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN,
+            "--live-dry-run-evidence",
+            str(invalid_evidence),
+        ])
+        invalid_evidence_findings = pipeline_main.live_write_guard_findings(
+            invalid_evidence_args,
+            fake_live_child,
+            fake_raw_dir,
+            live_roots=live_roots,
+        )
+        if not any("not valid JSON" in finding for finding in invalid_evidence_findings):
+            findings.append("invalid dry-run evidence was not blocked")
+
+        mismatched_evidence = temp_root / "mismatched.json"
+        mismatched_dry_run_args = pipeline_main.build_parser().parse_args([
+            "all",
+            "--vault-root",
+            str(fake_live_child),
+            "--raw-dir",
+            str(temp_root / "other_raw"),
+            "--dry-run",
+        ])
+        pipeline_main.write_dry_run_evidence(
+            mismatched_evidence,
+            mismatched_dry_run_args,
+            fake_live_child,
+            temp_root / "other_raw",
+            {"import": {"raw_file_count": 0}},
+            {},
+        )
+        mismatched_args = pipeline_main.build_parser().parse_args([
+            "all",
+            "--vault-root",
+            str(fake_live_child),
+            "--live-baseline-updated",
+            "--live-tests-passed",
+            "--live-quality-gate-passed",
+            "--live-dry-run-reviewed",
+            "--live-expected-changes-reviewed",
+            "--live-write-confirmation",
+            pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN,
+            "--live-dry-run-evidence",
+            str(mismatched_evidence),
+        ])
+        mismatched_findings = pipeline_main.live_write_guard_findings(
+            mismatched_args,
+            fake_live_child,
+            fake_raw_dir,
+            live_roots=live_roots,
+        )
+        if "dry-run evidence raw-dir mismatch" not in mismatched_findings:
+            findings.append("mismatched dry-run evidence was not blocked")
+
+        valid_evidence = temp_root / "valid.json"
+        valid_dry_run_args = pipeline_main.build_parser().parse_args([
+            "all",
+            "--vault-root",
+            str(fake_live_child),
+            "--dry-run",
+        ])
+        pipeline_main.write_dry_run_evidence(
+            valid_evidence,
+            valid_dry_run_args,
+            fake_live_child,
+            fake_raw_dir,
+            {"import": {"raw_file_count": 0}},
+            {},
+        )
+        confirmed_args = pipeline_main.build_parser().parse_args([
+            "all",
+            "--vault-root",
+            str(fake_live_child),
+            "--live-baseline-updated",
+            "--live-tests-passed",
+            "--live-quality-gate-passed",
+            "--live-dry-run-reviewed",
+            "--live-expected-changes-reviewed",
+            "--live-write-confirmation",
+            pipeline_main.LIVE_WRITE_CONFIRMATION_TOKEN,
+            "--live-dry-run-evidence",
+            str(valid_evidence),
+        ])
+        confirmed_findings = pipeline_main.live_write_guard_findings(
+            confirmed_args,
+            fake_live_child,
+            fake_raw_dir,
+            live_roots=live_roots,
+        )
+        if confirmed_findings:
+            findings.append("fully attested live write with matching evidence was blocked: " + ", ".join(confirmed_findings))
 
     return findings
 
@@ -1995,7 +2109,7 @@ def quality_gate(vault_root: Path) -> int:
     if live_guard_findings:
         write_result(results, "live vault actual-write guard", "FAIL", "; ".join(live_guard_findings))
     else:
-        write_result(results, "live vault actual-write guard", "PASS", "actual live writes require baseline/test/quality-gate/dry-run/review flags and confirmation token.")
+        write_result(results, "live vault actual-write guard", "PASS", "actual live writes require baseline/test/quality-gate/dry-run/review flags, confirmation token, and matching dry-run evidence.")
 
     command = [sys.executable, "main.py", "all", "--vault-root", "../..", "--raw-dir", "../raw"]
     code, output = run_command(command, scripts_dir)

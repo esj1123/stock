@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from nh_importer import import_raw_dir
 from obsidian_writer import write_company_notes, write_dashboards
@@ -13,6 +17,9 @@ from qa_checker import run_qa
 DEFAULT_LIVE_VAULT_ROOT = Path(r"C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock")
 LIVE_VAULT_ROOT_ENV = "STOCK_LIVE_VAULT_ROOT"
 LIVE_WRITE_CONFIRMATION_TOKEN = "LIVE_06_STOCK_WRITE_REVIEWED"
+DRY_RUN_EVIDENCE_SCHEMA_VERSION = 1
+DRY_RUN_EVIDENCE_MAX_AGE_SECONDS = 24 * 60 * 60
+RAW_FINGERPRINT_ALGORITHM = "sha256:raw-size-mtime-ext-v1"
 
 
 def default_vault_root() -> Path:
@@ -21,6 +28,14 @@ def default_vault_root() -> Path:
 
 def normalized_path_key(path: Path | str) -> str:
     return str(Path(path).expanduser().resolve()).rstrip("\\/").casefold()
+
+
+def sha256_text(text: str) -> str:
+    return "sha256:" + hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def path_identity_hash(path: Path | str) -> str:
+    return sha256_text("path:v1:" + normalized_path_key(path))
 
 
 def configured_live_vault_roots() -> tuple[Path, ...]:
@@ -41,7 +56,163 @@ def is_live_vault_path(vault_root: Path, live_roots: tuple[Path, ...] | None = N
     return False
 
 
-def live_write_guard_findings(args: argparse.Namespace, vault_root: Path, live_roots: tuple[Path, ...] | None = None) -> list[str]:
+def raw_metadata_fingerprint(raw_dir: Path) -> dict[str, Any]:
+    files = (
+        sorted(
+            path
+            for path in raw_dir.glob("*")
+            if path.is_file() and path.suffix.lower() in {".xls", ".xlsx"} and not path.name.startswith("~$")
+        )
+        if raw_dir.exists()
+        else []
+    )
+    entries: list[str] = []
+    for path in files:
+        stat = path.stat()
+        entries.append(f"{path.suffix.lower()}:{stat.st_size}:{stat.st_mtime_ns}")
+    material = "\n".join(sorted(entries))
+    return {
+        "algorithm": RAW_FINGERPRINT_ALGORITHM,
+        "file_count": len(files),
+        "digest": sha256_text(material),
+    }
+
+
+def sanitized_options(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "command": getattr(args, "command", ""),
+        "create_companies": bool(getattr(args, "create_companies", False)),
+        "force_reindex": bool(getattr(args, "force_reindex", False)),
+        "no_note_write": bool(getattr(args, "no_note_write", False)),
+    }
+
+
+def sanitized_options_hash(args: argparse.Namespace) -> str:
+    return sha256_text(json.dumps(sanitized_options(args), sort_keys=True, separators=(",", ":")))
+
+
+def evidence_digest(payload: dict[str, Any]) -> str:
+    canonical = dict(payload)
+    canonical.pop("evidence_hash", None)
+    text = json.dumps(canonical, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return sha256_text(text)
+
+
+def build_dry_run_evidence(
+    args: argparse.Namespace,
+    vault_root: Path,
+    raw_dir: Path,
+    planned_categories: dict[str, Any] | None = None,
+    warning_counts: dict[str, int] | None = None,
+    created_at_utc: datetime | None = None,
+) -> dict[str, Any]:
+    timestamp = created_at_utc or datetime.now(timezone.utc)
+    if timestamp.tzinfo is None:
+        timestamp = timestamp.replace(tzinfo=timezone.utc)
+    payload: dict[str, Any] = {
+        "schema_version": DRY_RUN_EVIDENCE_SCHEMA_VERSION,
+        "created_at_utc": timestamp.astimezone(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "mode": "dry-run" if getattr(args, "dry_run", False) else "actual",
+        "action": getattr(args, "command", ""),
+        "vault_identity_hash": path_identity_hash(vault_root),
+        "raw_identity_hash": path_identity_hash(raw_dir),
+        "options_hash": sanitized_options_hash(args),
+        "raw_metadata_fingerprint": raw_metadata_fingerprint(raw_dir),
+        "planned_categories": planned_categories or {},
+        "warning_counts": warning_counts or {},
+    }
+    payload["evidence_hash"] = evidence_digest(payload)
+    return payload
+
+
+def write_dry_run_evidence(
+    path: Path,
+    args: argparse.Namespace,
+    vault_root: Path,
+    raw_dir: Path,
+    planned_categories: dict[str, Any],
+    warning_counts: dict[str, int],
+) -> None:
+    payload = build_dry_run_evidence(args, vault_root, raw_dir, planned_categories, warning_counts)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True) + "\n", encoding="utf-8")
+
+
+def parse_evidence_timestamp(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def dry_run_evidence_findings(
+    args: argparse.Namespace,
+    vault_root: Path,
+    raw_dir: Path,
+    now: datetime | None = None,
+) -> list[str]:
+    evidence_arg = getattr(args, "live_dry_run_evidence", "")
+    if not evidence_arg:
+        return ["missing --live-dry-run-evidence"]
+
+    evidence_path = Path(evidence_arg)
+    try:
+        payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [f"dry-run evidence file not found: {evidence_path}"]
+    except json.JSONDecodeError:
+        return [f"dry-run evidence is not valid JSON: {evidence_path}"]
+    except OSError as exc:
+        return [f"dry-run evidence could not be read: {exc}"]
+
+    if not isinstance(payload, dict):
+        return ["dry-run evidence must be a JSON object"]
+
+    findings: list[str] = []
+    if payload.get("evidence_hash") != evidence_digest(payload):
+        findings.append("dry-run evidence hash mismatch")
+    if payload.get("schema_version") != DRY_RUN_EVIDENCE_SCHEMA_VERSION:
+        findings.append("dry-run evidence schema version mismatch")
+    if payload.get("mode") != "dry-run":
+        findings.append("dry-run evidence was not produced by --dry-run")
+    if payload.get("action") != getattr(args, "command", ""):
+        findings.append("dry-run evidence action mismatch")
+    if payload.get("vault_identity_hash") != path_identity_hash(vault_root):
+        findings.append("dry-run evidence vault mismatch")
+    if payload.get("raw_identity_hash") != path_identity_hash(raw_dir):
+        findings.append("dry-run evidence raw-dir mismatch")
+    if payload.get("options_hash") != sanitized_options_hash(args):
+        findings.append("dry-run evidence options mismatch")
+    if payload.get("raw_metadata_fingerprint") != raw_metadata_fingerprint(raw_dir):
+        findings.append("dry-run evidence raw metadata fingerprint mismatch")
+
+    timestamp = parse_evidence_timestamp(payload.get("created_at_utc"))
+    if timestamp is None:
+        findings.append("dry-run evidence timestamp is missing or invalid")
+    else:
+        current = now or datetime.now(timezone.utc)
+        if current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        age_seconds = (current.astimezone(timezone.utc) - timestamp).total_seconds()
+        if age_seconds < 0:
+            findings.append("dry-run evidence timestamp is in the future")
+        elif age_seconds > DRY_RUN_EVIDENCE_MAX_AGE_SECONDS:
+            findings.append("dry-run evidence is stale")
+
+    return findings
+
+
+def live_write_guard_findings(
+    args: argparse.Namespace,
+    vault_root: Path,
+    raw_dir: Path | None = None,
+    live_roots: tuple[Path, ...] | None = None,
+) -> list[str]:
     if args.dry_run or not is_live_vault_path(vault_root, live_roots=live_roots):
         return []
 
@@ -60,25 +231,29 @@ def live_write_guard_findings(args: argparse.Namespace, vault_root: Path, live_r
     if getattr(args, "live_write_confirmation", "") != LIVE_WRITE_CONFIRMATION_TOKEN:
         findings.append(f"missing --live-write-confirmation {LIVE_WRITE_CONFIRMATION_TOKEN}")
 
+    evidence_raw_dir = raw_dir or vault_root / "70_Imports" / "raw"
+    findings.extend(dry_run_evidence_findings(args, vault_root, evidence_raw_dir))
     return findings
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="NH/NAMUH Excel -> CSV/SQLite -> Obsidian dashboard pipeline")
-    parser.add_argument("command", choices=["import", "report", "qa", "all"], help="실행할 작업")
-    parser.add_argument("--vault-root", default=str(default_vault_root()), help="06_Stock Vault root")
+    parser.add_argument("command", choices=["import", "report", "qa", "all"], help="action to run")
+    parser.add_argument("--vault-root", default=str(default_vault_root()), help="06_Stock vault root")
     parser.add_argument("--raw-dir", default=None, help="raw Excel folder")
-    parser.add_argument("--dry-run", action="store_true", help="파일을 쓰지 않고 점검만 수행")
-    parser.add_argument("--verbose", action="store_true", help="상세 로그 출력")
-    parser.add_argument("--no-note-write", action="store_true", help="Obsidian note/dashboard 쓰기 생략")
-    parser.add_argument("--create-companies", action="store_true", help="새 ticker 회사 노트 생성")
-    parser.add_argument("--force-reindex", action="store_true", help="processed 결과를 새로 인덱싱")
+    parser.add_argument("--dry-run", action="store_true", help="inspect without writing import, report, or note outputs")
+    parser.add_argument("--verbose", action="store_true", help="print detailed import logs")
+    parser.add_argument("--no-note-write", action="store_true", help="skip Obsidian note/dashboard writes")
+    parser.add_argument("--create-companies", action="store_true", help="create missing company notes for new tickers")
+    parser.add_argument("--force-reindex", action="store_true", help="reindex raw files regardless of existing processed output")
     parser.add_argument("--live-baseline-updated", action="store_true", help="confirm the GitHub baseline was updated before a live vault write")
     parser.add_argument("--live-tests-passed", action="store_true", help="confirm pytest passed before a live vault write")
     parser.add_argument("--live-quality-gate-passed", action="store_true", help="confirm scripts/quality_gate.py passed before a live vault write")
     parser.add_argument("--live-dry-run-reviewed", action="store_true", help="confirm a live vault dry-run was completed and reviewed")
     parser.add_argument("--live-expected-changes-reviewed", action="store_true", help="confirm expected live vault changes were reviewed")
     parser.add_argument("--live-write-confirmation", default="", help=f"required token for actual live vault writes: {LIVE_WRITE_CONFIRMATION_TOKEN}")
+    parser.add_argument("--dry-run-evidence-out", default="", help="write privacy-safe dry-run evidence JSON to this path when --dry-run is used")
+    parser.add_argument("--live-dry-run-evidence", default="", help="privacy-safe dry-run evidence JSON required before actual live vault writes")
     return parser
 
 
@@ -88,38 +263,68 @@ def main() -> int:
     raw_dir = Path(args.raw_dir).resolve() if args.raw_dir else vault_root / "70_Imports" / "raw"
     processed_dir = vault_root / "70_Imports" / "processed"
 
-    guard_findings = live_write_guard_findings(args, vault_root)
+    guard_findings = live_write_guard_findings(args, vault_root, raw_dir)
     if guard_findings:
         print("[blocked] live vault actual-write guard refused this run.")
         print(f"[blocked] vault_root={vault_root}")
         for finding in guard_findings:
             print(f"[blocked] {finding}")
-        print("[blocked] run the live vault dry-run first, review expected changes, then pass all live-write confirmation flags.")
+        print("[blocked] run the live vault dry-run first, review expected changes, then pass all live-write confirmation flags and matching evidence.")
         return 2
 
-    print(f"[대상 Vault] {vault_root}")
-    print(f"[Raw] {raw_dir}")
+    print(f"[target vault] {vault_root}")
+    print(f"[raw] {raw_dir}")
     if args.dry_run:
-        print("[모드] dry-run: 파일을 실제로 쓰지 않습니다.")
+        print("[mode] dry-run: no import, report, or note output files will be written.")
+
+    planned_categories: dict[str, Any] = {}
+    warning_counts: dict[str, int] = {}
 
     if args.command in {"import", "all"}:
-        summary = import_raw_dir(vault_root, raw_dir=raw_dir, processed_dir=processed_dir, force_reindex=args.force_reindex, dry_run=args.dry_run, verbose=args.verbose)
-        print(f"[import] raw_files={summary.raw_files}, parsed_rows={summary.parsed_rows}, duplicate_removed={summary.duplicate_rows_removed}, unclassified={summary.unclassified_rows}")
+        summary = import_raw_dir(
+            vault_root,
+            raw_dir=raw_dir,
+            processed_dir=processed_dir,
+            force_reindex=args.force_reindex,
+            dry_run=args.dry_run,
+            verbose=args.verbose,
+        )
+        print(
+            f"[import] raw_files={summary.raw_files}, parsed_rows={summary.parsed_rows}, "
+            f"duplicate_removed={summary.duplicate_rows_removed}, unclassified={summary.unclassified_rows}"
+        )
+        planned_categories["import"] = {
+            "raw_file_count": int(summary.raw_files),
+            "parsed_row_count": int(summary.parsed_rows),
+            "duplicate_rows_removed_count": int(summary.duplicate_rows_removed),
+            "unclassified_row_count": int(summary.unclassified_rows),
+            "unknown_column_count": int(summary.unknown_columns),
+        }
 
     if args.command in {"report", "all"}:
         report_summary = generate_reports(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
         print(f"[report] {report_summary}")
+        planned_categories["report"] = {str(key): int(value) for key, value in report_summary.items()}
         if not args.no_note_write:
             warnings = write_dashboards(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
             warnings += write_company_notes(vault_root, processed_dir=processed_dir, create_companies=args.create_companies, dry_run=args.dry_run)
+            planned_categories["notes"] = {"note_update_category_count": 2}
+            warning_counts["note_warning_count"] = len(warnings)
             for warning in warnings:
-                print(f"[주의] {warning}")
+                print(f"[warning] {warning}")
 
     if args.command in {"qa", "all"}:
         qa = run_qa(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
         print(f"[qa] exceptions={len(qa)}")
+        planned_categories["qa"] = {"exception_count": int(len(qa))}
+        warning_counts["qa_exception_count"] = int(len(qa))
 
-    print("[완료] 자동 매수/매도 주문은 실행하지 않았습니다.")
+    if args.dry_run and args.dry_run_evidence_out:
+        evidence_path = Path(args.dry_run_evidence_out).expanduser().resolve()
+        write_dry_run_evidence(evidence_path, args, vault_root, raw_dir, planned_categories, warning_counts)
+        print(f"[dry-run-evidence] wrote {evidence_path}")
+
+    print("[done] no automated buy/sell orders were executed.")
     return 0
 
 
