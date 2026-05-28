@@ -16,10 +16,32 @@ from qa_checker import run_qa
 
 DEFAULT_LIVE_VAULT_ROOT = Path(r"C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock")
 LIVE_VAULT_ROOT_ENV = "STOCK_LIVE_VAULT_ROOT"
+EVIDENCE_DIR_ENV = "STOCK_EVIDENCE_DIR"
 LIVE_WRITE_CONFIRMATION_TOKEN = "LIVE_06_STOCK_WRITE_REVIEWED"
 DRY_RUN_EVIDENCE_SCHEMA_VERSION = 1
 DRY_RUN_EVIDENCE_MAX_AGE_SECONDS = 24 * 60 * 60
 RAW_FINGERPRINT_ALGORITHM = "sha256:raw-size-mtime-ext-v1"
+UNSAFE_EVIDENCE_RELATIVE_ROOTS = (
+    "70_Imports/raw",
+    "70_Imports/processed",
+    "70_Imports/exports",
+    "70_Imports/logs",
+    "20_Companies",
+    "30_Trades",
+    "31_Cashflows",
+    "50_Journal",
+    "60_Library",
+    "90_Attachments",
+)
+GOOGLE_DRIVE_PATH_MARKERS = (
+    "google drive",
+    "googledrive",
+    "drivefs",
+    "my drive",
+    "shared drives",
+    "내 드라이브",
+    "공유 드라이브",
+)
 
 
 def default_vault_root() -> Path:
@@ -38,6 +60,12 @@ def path_identity_hash(path: Path | str) -> str:
     return sha256_text("path:v1:" + normalized_path_key(path))
 
 
+def path_is_within(path: Path | str, root: Path | str) -> bool:
+    candidate = normalized_path_key(path)
+    root_key = normalized_path_key(root)
+    return candidate == root_key or candidate.startswith(root_key + "\\") or candidate.startswith(root_key + "/")
+
+
 def configured_live_vault_roots() -> tuple[Path, ...]:
     roots = [DEFAULT_LIVE_VAULT_ROOT]
     configured = os.environ.get(LIVE_VAULT_ROOT_ENV, "").strip()
@@ -47,13 +75,65 @@ def configured_live_vault_roots() -> tuple[Path, ...]:
 
 
 def is_live_vault_path(vault_root: Path, live_roots: tuple[Path, ...] | None = None) -> bool:
-    candidate = normalized_path_key(vault_root)
     roots = live_roots if live_roots is not None else configured_live_vault_roots()
     for root in roots:
-        root_key = normalized_path_key(root)
-        if candidate == root_key or candidate.startswith(root_key + "\\") or candidate.startswith(root_key + "/"):
+        if path_is_within(vault_root, root):
             return True
     return False
+
+
+def is_google_drive_synced_path(path: Path | str) -> bool:
+    parts = [part.casefold() for part in Path(path).expanduser().parts]
+    compact_parts = [part.replace(" ", "").replace("-", "").replace("_", "") for part in parts]
+    for marker in GOOGLE_DRIVE_PATH_MARKERS:
+        marker_folded = marker.casefold()
+        marker_compact = marker_folded.replace(" ", "").replace("-", "").replace("_", "")
+        if marker_folded in parts or marker_compact in compact_parts:
+            return True
+    return False
+
+
+def default_evidence_dir() -> Path:
+    configured = os.environ.get(EVIDENCE_DIR_ENV, "").strip()
+    if configured:
+        return Path(configured).expanduser()
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    if local_app_data:
+        return Path(local_app_data) / "06_Stock" / "dry_run_evidence"
+    return Path.home() / ".06_stock" / "dry_run_evidence"
+
+
+def evidence_output_path_guidance() -> str:
+    return f"use %{EVIDENCE_DIR_ENV}% or {default_evidence_dir()} outside the repo, live vault, and synced folders"
+
+
+def dry_run_evidence_output_path_findings(
+    evidence_path: Path,
+    vault_root: Path,
+    repo_root: Path | None = None,
+    live_roots: tuple[Path, ...] | None = None,
+) -> list[str]:
+    repo = (repo_root or default_vault_root()).resolve()
+    vault = vault_root.resolve()
+    candidate = evidence_path.expanduser().resolve()
+    findings: list[str] = []
+
+    if path_is_within(candidate, repo):
+        findings.append("dry-run evidence output path is inside repository root")
+
+    roots = live_roots if live_roots is not None else configured_live_vault_roots()
+    if any(path_is_within(candidate, root) for root in roots):
+        findings.append("dry-run evidence output path is inside configured live vault root")
+
+    if is_google_drive_synced_path(candidate):
+        findings.append("dry-run evidence output path appears to be inside a Google Drive synced folder")
+
+    for rel_root in UNSAFE_EVIDENCE_RELATIVE_ROOTS:
+        rel_path = Path(rel_root)
+        if path_is_within(candidate, repo / rel_path) or path_is_within(candidate, vault / rel_path):
+            findings.append(f"dry-run evidence output path is inside restricted folder {rel_root}")
+
+    return list(dict.fromkeys(findings))
 
 
 def raw_metadata_fingerprint(raw_dir: Path) -> dict[str, Any]:
@@ -272,6 +352,17 @@ def main() -> int:
         print("[blocked] run the live vault dry-run first, review expected changes, then pass all live-write confirmation flags and matching evidence.")
         return 2
 
+    evidence_output_path: Path | None = None
+    if args.dry_run and args.dry_run_evidence_out:
+        evidence_output_path = Path(args.dry_run_evidence_out).expanduser().resolve()
+        evidence_path_findings = dry_run_evidence_output_path_findings(evidence_output_path, vault_root)
+        if evidence_path_findings:
+            print("[blocked] dry-run evidence output path refused.")
+            for finding in evidence_path_findings:
+                print(f"[blocked] {finding}")
+            print(f"[blocked] {evidence_output_path_guidance()}")
+            return 2
+
     print(f"[target vault] {vault_root}")
     print(f"[raw] {raw_dir}")
     if args.dry_run:
@@ -319,10 +410,9 @@ def main() -> int:
         planned_categories["qa"] = {"exception_count": int(len(qa))}
         warning_counts["qa_exception_count"] = int(len(qa))
 
-    if args.dry_run and args.dry_run_evidence_out:
-        evidence_path = Path(args.dry_run_evidence_out).expanduser().resolve()
-        write_dry_run_evidence(evidence_path, args, vault_root, raw_dir, planned_categories, warning_counts)
-        print(f"[dry-run-evidence] wrote {evidence_path}")
+    if args.dry_run and evidence_output_path:
+        write_dry_run_evidence(evidence_output_path, args, vault_root, raw_dir, planned_categories, warning_counts)
+        print(f"[dry-run-evidence] wrote {evidence_output_path}")
 
     print("[done] no automated buy/sell orders were executed.")
     return 0

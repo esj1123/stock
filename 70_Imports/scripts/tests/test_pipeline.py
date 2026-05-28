@@ -383,6 +383,47 @@ def test_dry_run_evidence_artifact_contains_only_sanitized_metadata(tmp_path: Pa
         assert private_text not in text
 
 
+def evidence_output_findings(tmp_path: Path, evidence_path: Path) -> list[str]:
+    repo_root = tmp_path / "repo_root"
+    vault_root = tmp_path / "vault_root"
+    live_root = tmp_path / "live_root"
+    return pipeline_main.dry_run_evidence_output_path_findings(
+        evidence_path,
+        vault_root,
+        repo_root=repo_root,
+        live_roots=(live_root,),
+    )
+
+
+def test_dry_run_evidence_output_inside_repo_root_is_rejected(tmp_path: Path):
+    findings = evidence_output_findings(tmp_path, tmp_path / "repo_root" / "evidence.json")
+
+    assert "dry-run evidence output path is inside repository root" in findings
+
+
+def test_dry_run_evidence_output_inside_live_vault_is_rejected(tmp_path: Path):
+    findings = evidence_output_findings(tmp_path, tmp_path / "live_root" / "evidence.json")
+
+    assert "dry-run evidence output path is inside configured live vault root" in findings
+
+
+@pytest.mark.parametrize(
+    "relative_root",
+    ["70_Imports/raw", "70_Imports/processed", "70_Imports/logs"],
+    ids=["raw", "processed", "logs"],
+)
+def test_dry_run_evidence_output_inside_restricted_import_folders_is_rejected(tmp_path: Path, relative_root: str):
+    findings = evidence_output_findings(tmp_path, tmp_path / "vault_root" / Path(relative_root) / "evidence.json")
+
+    assert f"dry-run evidence output path is inside restricted folder {relative_root}" in findings
+
+
+def test_dry_run_evidence_output_safe_app_data_like_path_is_allowed(tmp_path: Path):
+    findings = evidence_output_findings(tmp_path, tmp_path / "LocalAppData" / "06_Stock" / "dry_run_evidence" / "evidence.json")
+
+    assert findings == []
+
+
 def test_quality_gate_live_vault_actual_write_guard_contract(tmp_path: Path):
     assert live_vault_actual_write_guard_findings(tmp_path) == []
 
