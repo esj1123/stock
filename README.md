@@ -104,7 +104,7 @@ Accounting rules:
 Repository safety for these outputs:
 
 - Do not commit raw broker files, processed CSVs, generated dashboards, DB files, Excel files, account identifiers, private notes, or live vault outputs.
-- Do not edit the live Google Drive vault directly. Modify the baseline, run tests, run the quality gate, run a live-vault dry-run, review expected changes, then apply an actual live write only with explicit user intent.
+- Do not edit the live Google Drive vault directly. Modify the baseline, run tests, run the quality gate, run a live-vault dry-run with evidence, review expected changes, then apply an actual live write only with explicit user intent.
 
 ## Live Vault Modification Policy
 
@@ -114,13 +114,15 @@ Live vault cleanup is also a live Vault write. Treat cache removal, temporary-fi
 
 Required sequence before any actual live Vault write:
 
-1. Modify GitHub baseline.
+1. Modify and validate the GitHub baseline.
 2. Add/update tests.
 3. Run pytest.
 4. Run `scripts/quality_gate.py`.
-5. Run live vault dry-run.
-6. Review the expected live vault changes.
+5. Run live vault dry-run with `--dry-run-evidence-out`.
+6. Review the expected live vault changes and the generated evidence.
 7. Apply actual live vault write only after explicit user intent for the actual write.
+
+Dry-run evidence is required before an actual live write. Write it outside this repository, outside the live vault, and outside Google Drive synced folders. Preferred locations are `%LOCALAPPDATA%\06_Stock\dry_run_evidence\` or a path configured with `STOCK_EVIDENCE_DIR`.
 
 Cleanup and ambiguous-file rules:
 
@@ -130,7 +132,17 @@ Cleanup and ambiguous-file rules:
 - Exclude files with `Personal` or `personal` in the filename from cleanup, merge, rename, and delete decisions.
 - Do not delete, merge, rename, or consolidate README or template files before user confirmation, even if they look duplicated.
 
-The standard entrypoint enforces the live-write gate for the configured live vault path and any child path under it. Actual live writes through `70_Imports/scripts/main.py` require all confirmation flags:
+The standard entrypoint enforces the live-write gate for the configured live vault path and any child path under it. First create a privacy-safe dry-run evidence file:
+
+```bash
+python 70_Imports/scripts/main.py all \
+  --vault-root "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock" \
+  --raw-dir "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock\70_Imports\raw" \
+  --dry-run \
+  --dry-run-evidence-out "%LOCALAPPDATA%\06_Stock\dry_run_evidence\live-dry-run.json"
+```
+
+Actual live writes through `70_Imports/scripts/main.py` require all confirmation flags and `--live-dry-run-evidence` pointing to the matching valid evidence file:
 
 ```bash
 python 70_Imports/scripts/main.py all \
@@ -141,10 +153,11 @@ python 70_Imports/scripts/main.py all \
   --live-quality-gate-passed \
   --live-dry-run-reviewed \
   --live-expected-changes-reviewed \
+  --live-dry-run-evidence "%LOCALAPPDATA%\06_Stock\dry_run_evidence\live-dry-run.json" \
   --live-write-confirmation LIVE_06_STOCK_WRITE_REVIEWED
 ```
 
-Use `STOCK_LIVE_VAULT_ROOT` if the live vault path is different on a local machine. Dry-runs against the live vault do not require these actual-write flags.
+Use `STOCK_LIVE_VAULT_ROOT` if the live vault path is different on a local machine. Dry-runs against the live vault do not require the actual-write flags, but actual writes are blocked when dry-run evidence is missing, stale, invalid, mismatched to vault/raw/options, or no longer matches raw metadata.
 
 Known normalization rules:
 

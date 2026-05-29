@@ -74,14 +74,17 @@ Vault 루트에서:
 
 - Never begin with live Google Drive writes. Update and validate the GitHub baseline first.
 - Treat live vault cleanup as a live vault write. This includes deleting cache folders, temporary files, duplicate-looking files, renaming documents, moving files, or consolidating templates.
-- Before an actual live write, complete the sequence: GitHub baseline update, tests, quality gate, live vault dry-run, expected change review, and explicit user intent for the actual write.
-- Before an actual live write, run the live vault command with `--dry-run` and confirm the expected files and warnings.
+- Before an actual live write, complete the sequence: GitHub baseline update and validation, tests, quality gate, live vault dry-run evidence, expected change review, and explicit user intent for the actual write.
+- Before an actual live write, run the live vault command with `--dry-run --dry-run-evidence-out <safe local path>` and confirm the expected files and warnings.
+- Dry-run evidence must be written outside this repository, outside the live vault, and outside Google Drive synced folders. Use `%LOCALAPPDATA%\06_Stock\dry_run_evidence\` or set `STOCK_EVIDENCE_DIR`.
+- Dry-run evidence stores sanitized hashes/counts only. It must not include raw filenames, account data, holdings/trades, amounts, note contents, dashboard body, or generated Markdown body.
+- Actual live writes require `--live-dry-run-evidence <path>` pointing to matching valid evidence. Stale evidence, invalid evidence, vault/raw/options mismatch, or changed raw metadata fingerprint blocks the live write.
 - Only clear obvious cache/system artifacts when cleanup is explicitly requested: `.pyc`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.ipynb_checkpoints`, and empty `__pycache__` folders.
 - If a cache folder contains unknown non-cache files such as `*.DOCX`, `*.xlsx`, `.tmp.drive*`, or unfamiliar generated-looking names, do not delete the folder or file. Report filenames only and do not inspect contents unless explicitly authorized and outside restricted/private areas.
 - Do not delete `.tmp.drivedownload` or `.tmp.driveupload` before user confirmation.
 - Exclude documents with `Personal` or `personal` in the filename from cleanup, merge, rename, and delete decisions.
 - Do not delete, merge, rename, or consolidate README or template documents before user confirmation, even when they look duplicated.
-- The standard `70_Imports/scripts/main.py` entrypoint blocks actual writes to the configured live vault root or any child path unless all live-write gate flags are present: `--live-baseline-updated`, `--live-tests-passed`, `--live-quality-gate-passed`, `--live-dry-run-reviewed`, `--live-expected-changes-reviewed`, and `--live-write-confirmation LIVE_06_STOCK_WRITE_REVIEWED`.
+- The standard `70_Imports/scripts/main.py` entrypoint blocks actual writes to the configured live vault root or any child path unless all live-write gate flags are present: `--live-baseline-updated`, `--live-tests-passed`, `--live-quality-gate-passed`, `--live-dry-run-reviewed`, `--live-expected-changes-reviewed`, `--live-dry-run-evidence`, and `--live-write-confirmation LIVE_06_STOCK_WRITE_REVIEWED`.
 - `STOCK_LIVE_VAULT_ROOT` may be set when the live vault path differs from the default local path. Dry-runs are allowed without actual-write confirmation flags.
 - Preserve user-written Markdown outside `<!-- AUTO-GENERATED:START -->` and `<!-- AUTO-GENERATED:END -->`.
 - Never modify raw broker files under `70_Imports/raw/`.
@@ -106,6 +109,8 @@ Vault 루트에서:
 
 ```bash
 python main.py import --vault-root ../.. --raw-dir ../raw --dry-run
+python main.py all --vault-root "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock" --raw-dir "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock\70_Imports\raw" --dry-run --dry-run-evidence-out "%LOCALAPPDATA%\06_Stock\dry_run_evidence\live-dry-run.json"
+python main.py all --vault-root "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock" --raw-dir "C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock\70_Imports\raw" --live-baseline-updated --live-tests-passed --live-quality-gate-passed --live-dry-run-reviewed --live-expected-changes-reviewed --live-dry-run-evidence "%LOCALAPPDATA%\06_Stock\dry_run_evidence\live-dry-run.json" --live-write-confirmation LIVE_06_STOCK_WRITE_REVIEWED
 python main.py import --vault-root ../.. --raw-dir ../raw
 python main.py report --vault-root ../..
 python main.py qa --vault-root ../..
@@ -118,6 +123,8 @@ python main.py all --vault-root ../.. --raw-dir ../raw
 - `--create-companies`: 새 ticker가 있으면 `20_Companies/<TICKER_OR_SAFE_NAME>/Company.md` 생성
 - `--force-reindex`: 기존 processed 결과와 관계없이 raw 파일을 다시 인덱싱
 - `--verbose`: 파일/시트별 처리 내용을 자세히 출력
+- `--dry-run-evidence-out`: dry-run evidence JSON을 안전한 로컬 경로에 기록
+- `--live-dry-run-evidence`: 실제 live write 전에 검증할 matching dry-run evidence JSON 경로
 
 ### Troubleshooting
 - import 결과가 비어 있으면 `70_Imports/raw/`에 `.xls` 또는 `.xlsx`가 있는지 확인합니다.
