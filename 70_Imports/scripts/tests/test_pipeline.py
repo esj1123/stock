@@ -89,9 +89,38 @@ def write_synthetic_raw_file(raw_dir: Path, name: str = "ACCOUNT-123456-AAPL-pri
     return path
 
 
-def full_live_write_args(live_vault: Path, raw_dir: Path, evidence_path: Path | None = None, *extra: str) -> argparse.Namespace:
+def valid_qa_rollup_evidence_counts() -> dict[str, int]:
+    return {
+        "exception_count": 2,
+        "qa_exception_count": 2,
+        "qa_rollup_row_count": 1,
+        "qa_distinct_issue_group_count": 1,
+        "qa_blocking_rollup_count": 1,
+        "qa_rollup_has_blocking_count": 1,
+    }
+
+
+def synthetic_evidence_planned_categories(command: str = "all") -> dict[str, dict[str, int]]:
+    planned: dict[str, dict[str, int]] = {}
+    if command in {"import", "all"}:
+        planned["import"] = {"raw_file_count": 1}
+    if command in {"report", "all"}:
+        planned["notes"] = {"note_update_category_count": 2}
+    if command in {"qa", "all"}:
+        planned["qa"] = valid_qa_rollup_evidence_counts()
+    return planned
+
+
+def synthetic_evidence_warning_counts(command: str = "all") -> dict[str, int]:
+    warnings = {"note_warning_count": 0} if command in {"report", "all"} else {}
+    if command in {"qa", "all"}:
+        warnings["qa_exception_count"] = valid_qa_rollup_evidence_counts()["qa_exception_count"]
+    return warnings
+
+
+def full_live_write_args(live_vault: Path, raw_dir: Path, evidence_path: Path | None = None, *extra: str, command: str = "all") -> argparse.Namespace:
     argv = [
-        "all",
+        command,
         "--vault-root",
         str(live_vault),
         "--raw-dir",
@@ -117,9 +146,13 @@ def write_synthetic_dry_run_evidence(
     *extra: str,
     created_at_utc: datetime | None = None,
     dry_run: bool = True,
+    command: str = "all",
+    planned_categories: dict[str, dict[str, int]] | None = None,
+    warning_counts: dict[str, int] | None = None,
+    schema_version: int | None = None,
 ) -> Path:
     argv = [
-        "all",
+        command,
         "--vault-root",
         str(live_vault),
         "--raw-dir",
@@ -133,13 +166,32 @@ def write_synthetic_dry_run_evidence(
         args,
         live_vault,
         raw_dir,
-        planned_categories={"import": {"raw_file_count": 1}, "notes": {"note_update_category_count": 2}},
-        warning_counts={"note_warning_count": 0},
+        planned_categories=planned_categories if planned_categories is not None else synthetic_evidence_planned_categories(command),
+        warning_counts=warning_counts if warning_counts is not None else synthetic_evidence_warning_counts(command),
         created_at_utc=created_at_utc,
     )
+    if schema_version is not None:
+        payload["schema_version"] = schema_version
+        payload["evidence_hash"] = pipeline_main.evidence_digest(payload)
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
     evidence_path.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
     return evidence_path
+
+
+def qa_count_mutation_evidence(
+    tmp_path: Path,
+    live_vault: Path,
+    raw_dir: Path,
+    qa_counts: dict[str, object],
+) -> Path:
+    planned = synthetic_evidence_planned_categories("all")
+    planned["qa"] = qa_counts
+    return write_synthetic_dry_run_evidence(
+        tmp_path / "evidence" / f"qa-counts-{uuid.uuid4().hex}.json",
+        live_vault,
+        raw_dir,
+        planned_categories=planned,
+    )
 
 
 def test_live_vault_actual_write_guard_blocks_without_attestation(tmp_path: Path, monkeypatch):
@@ -253,6 +305,220 @@ def test_live_vault_actual_write_guard_allows_full_attestation_with_matching_evi
     args = full_live_write_args(live_vault, raw_dir, evidence)
 
     assert live_write_guard_findings(args, live_vault, raw_dir) == []
+
+
+def test_dry_run_evidence_includes_qa_rollup_counts_only(tmp_path: Path):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    qa_counts = pipeline_main.qa_rollup_evidence_counts(synthetic_rec_ex_01_rollup_rows())
+    evidence = write_synthetic_dry_run_evidence(
+        tmp_path / "evidence" / "qa-counts.json",
+        live_vault,
+        raw_dir,
+        command="qa",
+        planned_categories={"qa": qa_counts},
+        warning_counts={"qa_exception_count": qa_counts["qa_exception_count"]},
+    )
+
+    payload = json.loads(evidence.read_text(encoding="utf-8"))
+
+    assert payload["schema_version"] == 2
+    assert payload["planned_categories"]["qa"] == {
+        "exception_count": 4,
+        "qa_exception_count": 4,
+        "qa_rollup_row_count": 1,
+        "qa_distinct_issue_group_count": 2,
+        "qa_blocking_rollup_count": 1,
+        "qa_rollup_has_blocking_count": 1,
+    }
+
+
+def test_dry_run_evidence_excludes_qa_rollup_labels_and_private_fields(tmp_path: Path):
+    live_vault = tmp_path / "live_vault_PRIVATE_ACCOUNT_TOKEN"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    qa = pd.DataFrame([{
+        "exception_id": "PRIVATE_EXCEPTION_TOKEN",
+        "severity": "blocking",
+        "file": "PRIVATE_RAW_TOKEN.xlsx:row2",
+        "audit_layer": "PRIVATE_AUDIT_TOKEN",
+        "source_file_type": "transaction_history",
+        "account_type": "PRIVATE_ACCOUNT_TOKEN",
+        "transaction_type": "buy",
+        "cashflow_role": "trade_settlement",
+        "amount_kind": "settlement_amount",
+        "amount_basis": "raw_native",
+        "currency_native": "USD",
+        "raw_header": "PRIVATE_HEADER_TOKEN",
+        "ticker": "PRIVATE_TICKER_TOKEN",
+        "security_name": "PRIVATE_SECURITY_TOKEN",
+        "amount_native": "999999999",
+        "raw_memo": "PRIVATE_MEMO_TOKEN",
+    }])
+    qa_counts = pipeline_main.qa_rollup_evidence_counts(qa)
+    evidence = write_synthetic_dry_run_evidence(
+        tmp_path / "evidence" / "qa-privacy.json",
+        live_vault,
+        raw_dir,
+        command="qa",
+        planned_categories={"qa": qa_counts},
+        warning_counts={"qa_exception_count": qa_counts["qa_exception_count"]},
+    )
+
+    text = evidence.read_text(encoding="utf-8")
+
+    for private_text in [
+        "PRIVATE_EXCEPTION_TOKEN",
+        "PRIVATE_RAW_TOKEN",
+        "PRIVATE_AUDIT_TOKEN",
+        "PRIVATE_ACCOUNT_TOKEN",
+        "PRIVATE_HEADER_TOKEN",
+        "PRIVATE_TICKER_TOKEN",
+        "PRIVATE_SECURITY_TOKEN",
+        "PRIVATE_MEMO_TOKEN",
+        "999999999",
+        "row2",
+    ]:
+        assert private_text not in text
+
+
+def test_dry_run_evidence_schema_v2_rejects_old_qa_all_evidence(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "old-v1.json", live_vault, raw_dir, schema_version=1)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    findings = live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir)
+
+    assert "dry-run evidence schema version mismatch" in findings
+
+
+def test_live_write_guard_rejects_evidence_missing_qa_rollup_counts(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    qa_counts = valid_qa_rollup_evidence_counts()
+    qa_counts.pop("qa_rollup_row_count")
+    evidence = qa_count_mutation_evidence(tmp_path, live_vault, raw_dir, qa_counts)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    findings = live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir)
+
+    assert "dry-run evidence missing qa rollup count: qa_rollup_row_count" in findings
+
+
+def test_live_write_guard_rejects_non_integer_qa_rollup_counts(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    qa_counts: dict[str, object] = valid_qa_rollup_evidence_counts()
+    qa_counts["qa_rollup_row_count"] = "1"
+    evidence = qa_count_mutation_evidence(tmp_path, live_vault, raw_dir, qa_counts)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    findings = live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir)
+
+    assert "dry-run evidence qa rollup count is non-integer: qa_rollup_row_count" in findings
+
+
+def test_live_write_guard_rejects_negative_qa_rollup_counts(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    qa_counts = valid_qa_rollup_evidence_counts()
+    qa_counts["qa_distinct_issue_group_count"] = -1
+    evidence = qa_count_mutation_evidence(tmp_path, live_vault, raw_dir, qa_counts)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    findings = live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir)
+
+    assert "dry-run evidence qa rollup count is negative: qa_distinct_issue_group_count" in findings
+
+
+def test_live_write_guard_rejects_inconsistent_qa_exception_counts(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    qa_counts = valid_qa_rollup_evidence_counts()
+    qa_counts["qa_exception_count"] = qa_counts["exception_count"] + 1
+    evidence = qa_count_mutation_evidence(tmp_path, live_vault, raw_dir, qa_counts)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    findings = live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir)
+
+    assert "dry-run evidence exception_count and qa_exception_count disagree" in findings
+
+
+def test_live_write_guard_rejects_qa_rollup_counts_exceeding_rollup_rows(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    qa_counts = valid_qa_rollup_evidence_counts()
+    qa_counts["qa_blocking_rollup_count"] = qa_counts["qa_rollup_row_count"] + 1
+    qa_counts["qa_rollup_has_blocking_count"] = qa_counts["qa_rollup_row_count"] + 1
+    evidence = qa_count_mutation_evidence(tmp_path, live_vault, raw_dir, qa_counts)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    findings = live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir)
+
+    assert "dry-run evidence qa_blocking_rollup_count exceeds qa_rollup_row_count" in findings
+    assert "dry-run evidence qa_rollup_has_blocking_count exceeds qa_rollup_row_count" in findings
+
+
+def test_live_write_guard_accepts_schema_v2_qa_rollup_evidence(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "valid-v2.json", live_vault, raw_dir)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    assert live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir) == []
+
+
+def test_live_write_guard_does_not_require_qa_rollup_counts_for_import_only_evidence(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    evidence = write_synthetic_dry_run_evidence(
+        tmp_path / "evidence" / "import-only.json",
+        live_vault,
+        raw_dir,
+        command="import",
+        planned_categories={"import": {"raw_file_count": 1}},
+        warning_counts={},
+    )
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    assert live_write_guard_findings(
+        full_live_write_args(live_vault, raw_dir, evidence, command="import"),
+        live_vault,
+        raw_dir,
+    ) == []
+
+
+def test_live_write_guard_still_rejects_stale_evidence_with_qa_rollup_counts(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    stale_time = datetime.now(timezone.utc) - timedelta(days=2)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "stale-v2.json", live_vault, raw_dir, created_at_utc=stale_time)
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    findings = live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir)
+
+    assert "dry-run evidence is stale" in findings
+
+
+def test_live_write_guard_still_rejects_mismatched_evidence_with_qa_rollup_counts(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    write_synthetic_raw_file(raw_dir)
+    evidence = write_synthetic_dry_run_evidence(tmp_path / "evidence" / "raw-mismatch-v2.json", live_vault, tmp_path / "other_raw")
+    monkeypatch.setenv("STOCK_LIVE_VAULT_ROOT", str(live_vault))
+
+    findings = live_write_guard_findings(full_live_write_args(live_vault, raw_dir, evidence), live_vault, raw_dir)
+
+    assert "dry-run evidence raw-dir mismatch" in findings
 
 
 def test_live_vault_actual_write_guard_ignores_non_live_vault(tmp_path: Path, monkeypatch):
@@ -425,6 +691,10 @@ def test_dry_run_evidence_output_safe_app_data_like_path_is_allowed(tmp_path: Pa
 
 
 def test_quality_gate_live_vault_actual_write_guard_contract(tmp_path: Path):
+    assert live_vault_actual_write_guard_findings(tmp_path) == []
+
+
+def test_quality_gate_fake_live_contract_covers_qa_rollup_evidence_counts(tmp_path: Path):
     assert live_vault_actual_write_guard_findings(tmp_path) == []
 
 
@@ -6170,6 +6440,30 @@ def test_run_qa_writes_qa_exception_rollup_when_not_dry_run(tmp_path: Path):
 def test_run_qa_dry_run_does_not_write_qa_exception_rollup(tmp_path: Path):
     processed, _qa = run_qa_rollup_output_fixture(tmp_path, dry_run=True)
 
+    assert not (processed / "qa_exception_rollup.csv").exists()
+    assert not (processed / "qa_exceptions.csv").exists()
+
+
+def test_main_dry_run_with_qa_rollup_evidence_does_not_write_qa_exception_rollup(tmp_path: Path, monkeypatch):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_rollup_output_qa_inputs(processed)
+    evidence_path = tmp_path / "evidence" / "qa-dry-run.json"
+    monkeypatch.setattr(pipeline_main, "dry_run_evidence_output_path_findings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(sys, "argv", [
+        "main.py",
+        "qa",
+        "--vault-root",
+        str(tmp_path),
+        "--dry-run",
+        "--dry-run-evidence-out",
+        str(evidence_path),
+    ])
+
+    assert pipeline_main.main() == 0
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+
+    assert payload["schema_version"] == 2
+    assert set(payload["planned_categories"]["qa"]) == set(pipeline_main.REQUIRED_QA_ROLLUP_EVIDENCE_COUNTS)
     assert not (processed / "qa_exception_rollup.csv").exists()
     assert not (processed / "qa_exceptions.csv").exists()
 

@@ -11,16 +11,24 @@ from typing import Any
 from nh_importer import import_raw_dir
 from obsidian_writer import write_company_notes, write_dashboards
 from portfolio_model import generate_reports
-from qa_checker import run_qa
+from qa_checker import build_qa_exception_rollup, run_qa
 
 
 DEFAULT_LIVE_VAULT_ROOT = Path(r"C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock")
 LIVE_VAULT_ROOT_ENV = "STOCK_LIVE_VAULT_ROOT"
 EVIDENCE_DIR_ENV = "STOCK_EVIDENCE_DIR"
 LIVE_WRITE_CONFIRMATION_TOKEN = "LIVE_06_STOCK_WRITE_REVIEWED"
-DRY_RUN_EVIDENCE_SCHEMA_VERSION = 1
+DRY_RUN_EVIDENCE_SCHEMA_VERSION = 2
 DRY_RUN_EVIDENCE_MAX_AGE_SECONDS = 24 * 60 * 60
 RAW_FINGERPRINT_ALGORITHM = "sha256:raw-size-mtime-ext-v1"
+REQUIRED_QA_ROLLUP_EVIDENCE_COUNTS = (
+    "exception_count",
+    "qa_exception_count",
+    "qa_rollup_row_count",
+    "qa_distinct_issue_group_count",
+    "qa_blocking_rollup_count",
+    "qa_rollup_has_blocking_count",
+)
 UNSAFE_EVIDENCE_RELATIVE_ROOTS = (
     "70_Imports/raw",
     "70_Imports/processed",
@@ -178,6 +186,30 @@ def evidence_digest(payload: dict[str, Any]) -> str:
     return sha256_text(text)
 
 
+def qa_rollup_evidence_counts(qa: Any) -> dict[str, int]:
+    rollup = build_qa_exception_rollup(qa)
+    if rollup.empty:
+        return {
+            "exception_count": int(len(qa)),
+            "qa_exception_count": int(len(qa)),
+            "qa_rollup_row_count": 0,
+            "qa_distinct_issue_group_count": 0,
+            "qa_blocking_rollup_count": 0,
+            "qa_rollup_has_blocking_count": 0,
+        }
+    severity = rollup.get("severity")
+    blocking_count = int(severity.astype(str).str.lower().eq("blocking").sum()) if severity is not None else 0
+    has_blocking_count = int(sum(1 for value in rollup.get("has_blocking", []) if value is True or str(value).strip().lower() == "true"))
+    return {
+        "exception_count": int(len(qa)),
+        "qa_exception_count": int(len(qa)),
+        "qa_rollup_row_count": int(len(rollup)),
+        "qa_distinct_issue_group_count": int(rollup["distinct_issue_group_count"].sum()),
+        "qa_blocking_rollup_count": blocking_count,
+        "qa_rollup_has_blocking_count": has_blocking_count,
+    }
+
+
 def build_dry_run_evidence(
     args: argparse.Namespace,
     vault_root: Path,
@@ -230,6 +262,45 @@ def parse_evidence_timestamp(value: object) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
+def qa_rollup_evidence_count_findings(payload: dict[str, Any], action: str) -> list[str]:
+    if action not in {"qa", "all"}:
+        return []
+
+    planned_categories = payload.get("planned_categories")
+    if not isinstance(planned_categories, dict):
+        return ["dry-run evidence planned_categories must be a JSON object"]
+
+    qa_counts = planned_categories.get("qa")
+    if not isinstance(qa_counts, dict):
+        return ["dry-run evidence missing qa planned category"]
+
+    findings: list[str] = []
+    counts: dict[str, int] = {}
+    for key in REQUIRED_QA_ROLLUP_EVIDENCE_COUNTS:
+        if key not in qa_counts:
+            findings.append(f"dry-run evidence missing qa rollup count: {key}")
+            continue
+        value = qa_counts.get(key)
+        if type(value) is not int:
+            findings.append(f"dry-run evidence qa rollup count is non-integer: {key}")
+            continue
+        if value < 0:
+            findings.append(f"dry-run evidence qa rollup count is negative: {key}")
+            continue
+        counts[key] = value
+
+    if set(counts) != set(REQUIRED_QA_ROLLUP_EVIDENCE_COUNTS):
+        return findings
+
+    if counts["exception_count"] != counts["qa_exception_count"]:
+        findings.append("dry-run evidence exception_count and qa_exception_count disagree")
+    if counts["qa_blocking_rollup_count"] > counts["qa_rollup_row_count"]:
+        findings.append("dry-run evidence qa_blocking_rollup_count exceeds qa_rollup_row_count")
+    if counts["qa_rollup_has_blocking_count"] > counts["qa_rollup_row_count"]:
+        findings.append("dry-run evidence qa_rollup_has_blocking_count exceeds qa_rollup_row_count")
+    return findings
+
+
 def dry_run_evidence_findings(
     args: argparse.Namespace,
     vault_root: Path,
@@ -270,6 +341,7 @@ def dry_run_evidence_findings(
         findings.append("dry-run evidence options mismatch")
     if payload.get("raw_metadata_fingerprint") != raw_metadata_fingerprint(raw_dir):
         findings.append("dry-run evidence raw metadata fingerprint mismatch")
+    findings.extend(qa_rollup_evidence_count_findings(payload, getattr(args, "command", "")))
 
     timestamp = parse_evidence_timestamp(payload.get("created_at_utc"))
     if timestamp is None:
@@ -407,7 +479,7 @@ def main() -> int:
     if args.command in {"qa", "all"}:
         qa = run_qa(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
         print(f"[qa] exceptions={len(qa)}")
-        planned_categories["qa"] = {"exception_count": int(len(qa))}
+        planned_categories["qa"] = qa_rollup_evidence_counts(qa)
         warning_counts["qa_exception_count"] = int(len(qa))
 
     if args.dry_run and evidence_output_path:

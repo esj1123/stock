@@ -1726,6 +1726,14 @@ def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
 
     with tempfile.TemporaryDirectory(prefix="stock_dry_run_evidence_") as temp_dir:
         temp_root = Path(temp_dir)
+        fake_qa_counts = {
+            "exception_count": 0,
+            "qa_exception_count": 0,
+            "qa_rollup_row_count": 0,
+            "qa_distinct_issue_group_count": 0,
+            "qa_blocking_rollup_count": 0,
+            "qa_rollup_has_blocking_count": 0,
+        }
 
         missing_evidence_args = pipeline_main.build_parser().parse_args([
             "all",
@@ -1787,8 +1795,8 @@ def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
             mismatched_dry_run_args,
             fake_live_child,
             temp_root / "other_raw",
-            {"import": {"raw_file_count": 0}},
-            {},
+            {"import": {"raw_file_count": 0}, "qa": fake_qa_counts},
+            {"qa_exception_count": 0},
         )
         mismatched_args = pipeline_main.build_parser().parse_args([
             "all",
@@ -1825,8 +1833,8 @@ def live_vault_actual_write_guard_findings(vault_root: Path) -> list[str]:
             valid_dry_run_args,
             fake_live_child,
             fake_raw_dir,
-            {"import": {"raw_file_count": 0}},
-            {},
+            {"import": {"raw_file_count": 0}, "qa": fake_qa_counts},
+            {"qa_exception_count": 0},
         )
         confirmed_args = pipeline_main.build_parser().parse_args([
             "all",
