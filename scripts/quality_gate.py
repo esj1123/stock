@@ -27,6 +27,7 @@ from nh_importer import (
     is_principal_cashflow_row,
 )
 from obsidian_writer import company_note_identity_key, existing_company_note_index, parse_note_frontmatter, safe_component
+from qa_checker import QA_EXCEPTION_ROLLUP_COLUMNS
 import main as pipeline_main
 
 
@@ -199,6 +200,7 @@ REQUIRED_OUTPUT_SCHEMAS = {
         "position_status", "cost_basis_method", "amount_review_status", "fx_status",
         "amount_review_reason", "source_file",
     ],
+    "qa_exception_rollup.csv": QA_EXCEPTION_ROLLUP_COLUMNS,
 }
 
 REQUIRED_RECONCILIATION_METRICS = [
