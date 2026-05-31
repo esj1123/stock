@@ -50,6 +50,80 @@ DASHBOARD_RETURN_LABEL_PATTERNS = [
     "Portfolio Cost Basis",
     "Total Return %",
 ]
+SAFE_QA_ROLLUP_GROUP_FIELDS = [
+    "audit_layer",
+    "source_file_type",
+    "account_type",
+    "transaction_type",
+    "cashflow_role",
+    "amount_kind",
+    "amount_basis",
+    "currency_native",
+]
+QA_EXCEPTION_ROLLUP_COLUMNS = [
+    "exception_id",
+    "severity",
+    "displayed_finding_count",
+    "distinct_issue_group_count",
+    "audit_layer_counts",
+    "max_severity",
+    "has_blocking",
+]
+SAFE_AUDIT_LAYER_NAMES = {
+    "amount_unit_audit",
+    "unit_mismatch_audit",
+    "processed_transactions",
+    "processed_cashflows",
+    "processed_income",
+    "processed_expenses",
+    "processed_fx_events",
+    "processed_holdings",
+    "processed_realized_pnl",
+    "reconciliation_summary",
+    "performance_summary",
+    "income_summary",
+    "fx_rate_requirements",
+    "unclassified_rows",
+    "unknown_columns",
+    "source_file_index",
+    "risk_watchlist",
+    "review_queue",
+    "qa_exceptions",
+    "company_notes",
+    "dashboard_markdown",
+    "other",
+}
+AUDIT_LAYER_FILE_PATTERNS = {
+    "amount_unit_audit.csv": "amount_unit_audit",
+    "unit_mismatch_audit.csv": "unit_mismatch_audit",
+    "processed_transactions.csv": "processed_transactions",
+    "processed_cashflows.csv": "processed_cashflows",
+    "processed_income.csv": "processed_income",
+    "processed_expenses.csv": "processed_expenses",
+    "processed_fx_events.csv": "processed_fx_events",
+    "processed_holdings.csv": "processed_holdings",
+    "processed_realized_pnl.csv": "processed_realized_pnl",
+    "reconciliation_summary.csv": "reconciliation_summary",
+    "performance_summary.csv": "performance_summary",
+    "income_summary.csv": "income_summary",
+    "fx_rate_requirements.csv": "fx_rate_requirements",
+    "unclassified_rows.csv": "unclassified_rows",
+    "unknown_columns.csv": "unknown_columns",
+    "source_file_index.csv": "source_file_index",
+    "risk_watchlist.csv": "risk_watchlist",
+    "review_queue.csv": "review_queue",
+    "qa_exceptions.csv": "qa_exceptions",
+}
+SEVERITY_RANK = {
+    "blocking": 4,
+    "fail": 4,
+    "error": 4,
+    "warn": 3,
+    "warning": 3,
+    "advisory": 2,
+    "info": 1,
+    "": 0,
+}
 
 
 def read_csv(path: Path) -> pd.DataFrame:
@@ -63,6 +137,87 @@ def read_csv(path: Path) -> pd.DataFrame:
 
 def add(rows: list[dict[str, Any]], exception_id: str, severity: str, file: str, issue: str, suggested_fix: str) -> None:
     rows.append({"exception_id": exception_id, "severity": severity, "file": file, "issue": issue, "suggested_fix": suggested_fix})
+
+
+def safe_audit_layer(row: pd.Series | dict[str, Any]) -> str:
+    audit_layer = lower_value(row.get("audit_layer", ""))
+    if audit_layer in SAFE_AUDIT_LAYER_NAMES:
+        return audit_layer
+
+    file_ref = lower_value(row.get("file", ""))
+    normalized = file_ref.replace("\\", "/")
+    for pattern, layer in AUDIT_LAYER_FILE_PATTERNS.items():
+        if pattern in normalized:
+            return layer
+    if "20_companies/" in normalized:
+        return "company_notes"
+    if "10_dashboard/" in normalized:
+        return "dashboard_markdown"
+    return "other"
+
+
+def safe_rollup_value(value: Any) -> str:
+    return lower_value(value)
+
+
+def safe_qa_issue_group_key(row: pd.Series) -> tuple[str, ...]:
+    values = [safe_audit_layer(row)]
+    for field in SAFE_QA_ROLLUP_GROUP_FIELDS:
+        if field == "audit_layer":
+            continue
+        values.append(safe_rollup_value(row.get(field, "")))
+    return tuple(values)
+
+
+def severity_sort_value(value: Any) -> int:
+    return SEVERITY_RANK.get(lower_value(value), 0)
+
+
+def max_severity(values: pd.Series) -> str:
+    severities = [lower_value(value) for value in values]
+    return max(severities, key=severity_sort_value, default="")
+
+
+def audit_layer_count_text(rows: pd.DataFrame) -> str:
+    counts: dict[str, int] = {}
+    for _, row in rows.iterrows():
+        layer = safe_audit_layer(row)
+        counts[layer] = counts.get(layer, 0) + 1
+    parts = [f"{layer}: {count}" for layer, count in sorted(counts.items(), key=lambda item: (-item[1], item[0]))]
+    return "; ".join(parts)
+
+
+def build_qa_exception_rollup(qa: pd.DataFrame) -> pd.DataFrame:
+    """Build safe aggregate QA counts without exposing row refs or private values."""
+    if qa.empty:
+        return pd.DataFrame(columns=QA_EXCEPTION_ROLLUP_COLUMNS)
+
+    rows: list[dict[str, Any]] = []
+    normalized = qa.copy()
+    for field in ["exception_id", "severity", *SAFE_QA_ROLLUP_GROUP_FIELDS, "file"]:
+        if field not in normalized.columns:
+            normalized[field] = ""
+
+    for (exception_id, severity), group in normalized.groupby(["exception_id", "severity"], dropna=False, sort=True):
+        group_keys = {safe_qa_issue_group_key(row) for _, row in group.iterrows()}
+        group_max_severity = max_severity(group["severity"])
+        rows.append({
+            "exception_id": text_value(exception_id),
+            "severity": lower_value(severity),
+            "displayed_finding_count": int(len(group)),
+            "distinct_issue_group_count": int(len(group_keys)),
+            "audit_layer_counts": audit_layer_count_text(group),
+            "max_severity": group_max_severity,
+            "has_blocking": group_max_severity == "blocking",
+        })
+
+    result = pd.DataFrame(rows, columns=QA_EXCEPTION_ROLLUP_COLUMNS)
+    if result.empty:
+        return result
+    return result.sort_values(
+        by=["exception_id", "severity"],
+        key=lambda column: column.map(lambda value: -severity_sort_value(value)) if column.name == "severity" else column,
+    ).reset_index(drop=True)
 
 
 def is_blank(value: Any) -> bool:
