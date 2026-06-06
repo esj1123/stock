@@ -6350,6 +6350,19 @@ def test_qa_rollup_builds_summary_without_hiding_row_level_exceptions():
     assert set(rollup["exception_id"]) == {"REC-EX-01", "REC-EX-05"}
 
 
+def test_rec_ex_01_rollup_distinguishes_row_findings_from_issue_groups():
+    qa = synthetic_rec_ex_01_rollup_rows()
+
+    rollup = build_qa_exception_rollup(qa)
+    rec_ex_01 = rollup[rollup["exception_id"].eq("REC-EX-01") & rollup["severity"].eq("blocking")].iloc[0]
+
+    assert len(qa) == 4
+    assert rec_ex_01["displayed_finding_count"] == 4
+    assert rec_ex_01["distinct_issue_group_count"] == 2
+    assert rec_ex_01["max_severity"] == "blocking"
+    assert bool(rec_ex_01["has_blocking"])
+
+
 def write_reconciliation_qa_inputs(
     processed: Path,
     amount_rows: list[dict[str, object]] | None = None,
@@ -6637,6 +6650,36 @@ def test_qa_reconciliation_quantity_price_in_principal_candidate_is_blocking(tmp
     assert severities == {"blocking"}
 
 
+def test_rec_ex_09_blocks_principal_candidate_with_quantity_or_price_unit(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, cashflow_rows=[
+        {
+            "transaction_type": "deposit",
+            "cashflow_role": "external_principal",
+            "currency_native": "KRW",
+            "amount_krw": 1000,
+            "amount_review_status": "ok",
+            "affects_principal": True,
+            "quantity_unit": "shares",
+        },
+        {
+            "transaction_type": "withdrawal",
+            "cashflow_role": "external_principal",
+            "currency_native": "KRW",
+            "amount_krw": 1000,
+            "amount_review_status": "ok",
+            "affects_principal": True,
+            "price_unit": "native_per_share",
+        },
+    ])
+
+    qa = qa_for_processed(tmp_path)
+    rec_ex_09 = qa[qa["exception_id"].eq("REC-EX-09")]
+
+    assert set(rec_ex_09["severity"]) == {"blocking"}
+    assert len(rec_ex_09) == 2
+
+
 def test_qa_reconciliation_total_return_unavailable_creates_exception(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     write_reconciliation_qa_inputs(processed, reconciliation_rows=valid_reconciliation_summary_rows(
@@ -6697,6 +6740,75 @@ def test_qa_reconciliation_non_krw_amount_without_provenance_creates_exception(t
     severities = set(qa.loc[qa["exception_id"].eq("REC-EX-08"), "severity"])
 
     assert severities == {"blocking"}
+
+
+def test_rec_ex_08_allows_non_krw_amount_with_fx_rate_to_krw(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, amount_rows=[
+        {
+            "amount_review_status": "ok",
+            "currency_native": "USD",
+            "amount_native": 100,
+            "amount_krw": 140000,
+            "fx_rate_to_krw": 1400,
+            "amount_krw_source": "derived_krw_from_fx",
+            "amount_basis": "raw_native",
+        },
+    ])
+
+    qa = qa_for_processed(tmp_path)
+
+    assert "REC-EX-08" not in set(qa["exception_id"])
+
+
+def test_rec_ex_08_allows_non_krw_amount_with_broker_krw_source(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, amount_rows=[
+        {
+            "amount_review_status": "ok",
+            "currency_native": "USD",
+            "amount_native": 100,
+            "amount_krw": 140000,
+            "fx_rate_to_krw": "",
+            "amount_krw_source": "broker_krw",
+            "amount_basis": "raw_native",
+        },
+    ])
+
+    qa = qa_for_processed(tmp_path)
+
+    assert "REC-EX-08" not in set(qa["exception_id"])
+
+
+def test_inv_ex_11_reports_unclassified_rows_without_private_details(tmp_path: Path):
+    private_tokens = [
+        "PRIVATE_RAW_FILE_TOKEN",
+        "PRIVATE_HEADER_TOKEN",
+        "PRIVATE_ACCOUNT_TOKEN",
+        "PRIVATE_TICKER_TOKEN",
+        "PRIVATE_MEMO_TOKEN",
+        "999999999",
+    ]
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed)
+    pd.DataFrame([{
+        "source_file": "PRIVATE_RAW_FILE_TOKEN.xlsx",
+        "raw_header": "PRIVATE_HEADER_TOKEN",
+        "account_identifier": "PRIVATE_ACCOUNT_TOKEN",
+        "ticker": "PRIVATE_TICKER_TOKEN",
+        "raw_memo": "PRIVATE_MEMO_TOKEN",
+        "amount": "999999999",
+    }]).to_csv(processed / "unclassified_rows.csv", index=False)
+
+    qa = qa_for_processed(tmp_path)
+    inv_ex_11 = qa[qa["exception_id"].eq("INV-EX-11")]
+    serialized = inv_ex_11.to_json(force_ascii=False)
+
+    assert set(inv_ex_11["severity"]) == {"blocking"}
+    assert len(inv_ex_11) == 1
+    assert set(inv_ex_11["file"]) == {"70_Imports/processed/unclassified_rows.csv"}
+    for token in private_tokens:
+        assert token not in serialized
 
 
 def test_qa_flags_missing_performance_accounting_outputs_and_schema_gaps(tmp_path: Path):
