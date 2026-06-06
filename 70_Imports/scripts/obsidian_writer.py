@@ -1022,10 +1022,57 @@ def qa_exception_table(rows: pd.DataFrame, limit: int | None = None) -> str:
     return markdown_table(pd.DataFrame(out))
 
 
-def qa_exception_cards(qa: pd.DataFrame) -> str:
+def qa_exception_rollup_summary(rollup: pd.DataFrame | None) -> str:
+    required = {
+        "exception_id",
+        "severity",
+        "displayed_finding_count",
+        "distinct_issue_group_count",
+        "max_severity",
+        "has_blocking",
+    }
+    if rollup is None or rollup.empty or not required.issubset(set(rollup.columns)):
+        return EMPTY_DATA
+    view = rollup.copy()
+    view["displayed_finding_count"] = pd.to_numeric(view["displayed_finding_count"], errors="coerce").fillna(0).astype(int)
+    view["distinct_issue_group_count"] = pd.to_numeric(view["distinct_issue_group_count"], errors="coerce").fillna(0).astype(int)
+    view["_has_blocking"] = (
+        view["has_blocking"].apply(bool_value)
+        | view["severity"].fillna("").astype(str).str.lower().eq("blocking")
+        | view["max_severity"].fillna("").astype(str).str.lower().eq("blocking")
+    )
+    severity_rank = {"blocking": 0, "advisory": 1}
+    view["_severity_rank"] = view["severity"].fillna("").astype(str).str.lower().map(severity_rank).fillna(2).astype(int)
+    view = view.sort_values(["_severity_rank", "_has_blocking", "displayed_finding_count"], ascending=[True, False, False])
+    total_findings = int(view["displayed_finding_count"].sum())
+    total_groups = int(view["distinct_issue_group_count"].sum())
+    blocking_rollups = int(view["_has_blocking"].sum())
+    rows = []
+    for _, row in view.iterrows():
+        rows.append({
+            "exception": inline_code(row_text(row, "exception_id") or "UNKNOWN"),
+            "severity": severity_tag(row_text(row, "severity")),
+            "row-level findings": int(row.get("displayed_finding_count", 0)),
+            "safe triage groups": int(row.get("distinct_issue_group_count", 0)),
+            "max severity": severity_tag(row_text(row, "max_severity") or row_text(row, "severity")),
+            "blocking": "yes" if bool_value(row.get("_has_blocking", False)) else "no",
+        })
+    return "\n\n".join([
+        dashboard_kpi_grid([
+            snapshot_card("row-level findings", total_findings),
+            snapshot_card("safe triage groups", total_groups),
+            snapshot_card("blocking rollup rows", blocking_rollups),
+        ]),
+        markdown_table(pd.DataFrame(rows)),
+    ])
+
+
+def qa_exception_cards(qa: pd.DataFrame, rollup: pd.DataFrame | None = None) -> str:
     if qa.empty:
         return "\n\n".join([
             queue_snapshot(pd.DataFrame(columns=["severity"]), "QA Exceptions"),
+            "## Rollup Summary",
+            qa_exception_rollup_summary(rollup),
             "## Exception Summary",
             EMPTY_DATA,
         ])
@@ -1038,6 +1085,8 @@ def qa_exception_cards(qa: pd.DataFrame) -> str:
         queue_snapshot(view, "QA Exceptions"),
         "## Exception Summary",
         count_summary_table(view, ["exception_id", "severity"], "exception"),
+        "## Rollup Summary",
+        qa_exception_rollup_summary(rollup),
         "## Blocking",
         qa_exception_table(blocking),
     ]
@@ -2117,6 +2166,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     skipped = read_csv(processed_dir / "skipped_rows.csv")
     amount_audit = read_csv(processed_dir / "amount_unit_audit.csv")
     unit_mismatch = read_csv(processed_dir / "unit_mismatch_audit.csv")
+    qa_rollup = read_csv(processed_dir / "qa_exception_rollup.csv")
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
@@ -2138,7 +2188,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "History_Queue.md":
         return history_queue_cards(history)
     if name == "QA_Exceptions.md":
-        return qa_exception_cards(qa)
+        return qa_exception_cards(qa, qa_rollup)
     return "_Unsupported dashboard._"
 
 
