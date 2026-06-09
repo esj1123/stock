@@ -1,5 +1,23 @@
 # Stock Baseline Agent Rules
 
+## Read Order
+
+Before changing files, read these repository-level contracts in order:
+
+1. `AGENTS.md`
+2. `PRODUCT.md`
+3. `MVP.md`
+4. `STATUS.md`
+5. `PROJECT_BOUNDARY.md`
+6. `DATA_SCOPE.md`
+7. `PHASE_PLAN.md`
+8. `APPROVALS.md`
+9. `SAFETY_POLICY.md`
+10. `VERIFICATION.md`
+11. `ACCEPTANCE_TRACE.md`
+12. `AI_HANDOFF.md`
+13. `README.md`
+
 ## Project Scope
 - This repository is the clean GitHub baseline for `06_Stock` automation code, templates, prompts, and documentation.
 - It is not the live investment vault and it is not the actual Obsidian folder.

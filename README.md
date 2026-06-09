@@ -4,6 +4,28 @@ This repository is a safe public/private GitHub structure for Stock Obsidian vau
 
 The live `06_Stock` vault should stay local/private. Use this repository as the clean baseline for scripts, templates, prompts, and documentation that can be reviewed without exposing account activity, holdings, trades, attachments, or generated import outputs.
 
+## Repository Contracts
+
+Future Codex or AI-assisted work should read `AGENTS.md` first, then the root
+contract documents added for the governed baseline:
+
+- `PRODUCT.md`
+- `MVP.md`
+- `STATUS.md`
+- `PROJECT_BOUNDARY.md`
+- `DATA_SCOPE.md`
+- `PHASE_PLAN.md`
+- `APPROVALS.md`
+- `SAFETY_POLICY.md`
+- `VERIFICATION.md`
+- `ACCEPTANCE_TRACE.md`
+- `AI_HANDOFF.md`
+
+These documents define scope, no-touch zones, data handling, approval gates,
+verification expectations, and closeout requirements. They do not authorize
+live-vault writes, raw-data commits, provider network calls, trading behavior,
+pushes, tags, releases, or CI changes.
+
 ## What Is Included
 
 - `00_Config/`: setup guides, prompt cards, QA rules, and automation notes
