@@ -1,0 +1,499 @@
+from __future__ import annotations
+
+import argparse
+import csv
+import hashlib
+import json
+import os
+import re
+from dataclasses import dataclass
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any, Iterable
+
+from portfolio_model import FX_RATES_COLUMNS
+
+
+REQUIREMENT_COLUMNS = [
+    "event_date",
+    "currency",
+    "use_case",
+    "row_count",
+    "amount_native_sum",
+    "missing_reason",
+    "source_file_type",
+    "status",
+]
+
+FX_ARCHIVE_EXTRA_COLUMNS = [
+    "archive_id",
+    "fetched_at_utc",
+    "request_date",
+    "rate_type_class",
+    "unit_factor",
+    "derivation_method",
+    "provider_series_key",
+    "provider_timestamp",
+    "response_sha256",
+    "source_url_template",
+    "parser_version",
+    "rule_version",
+    "supersedes_archive_id",
+]
+
+FX_ARCHIVE_COLUMNS = FX_RATES_COLUMNS + FX_ARCHIVE_EXTRA_COLUMNS
+DEFAULT_QUOTE_CURRENCY = "KRW"
+DEFAULT_PARSER_VERSION = "fx_provenance_fetcher_v1"
+DEFAULT_RULE_VERSION = "rec_ex_01_a1_same_date_v1"
+NETWORK_OPT_IN_ENV = "FX_PROVENANCE_ENABLE_NETWORK"
+BOK_API_KEY_ENV = "BOK_ECOS_API_KEY"
+EXIMBANK_API_KEY_ENV = "KOREAEXIM_API_KEY"
+
+
+def text_value(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if text.lower() in {"nan", "none", "<na>"}:
+        return ""
+    return text
+
+
+def normalize_date_text(value: Any) -> str:
+    text = text_value(value)
+    if not text:
+        return ""
+    if re.fullmatch(r"\d{8}", text):
+        return f"{text[:4]}-{text[4:6]}-{text[6:8]}"
+    return text[:10]
+
+
+def is_currency_code(value: str) -> bool:
+    return bool(re.fullmatch(r"[A-Z]{3}", value))
+
+
+def looks_like_fx_rate(value: str) -> bool:
+    return bool(re.fullmatch(r"\d+(\.\d+)?", value.strip()))
+
+
+def normalize_use_case(value: Any) -> str:
+    text = text_value(value).lower()
+    return text or "all"
+
+
+@dataclass(frozen=True)
+class NormalizedFxRequirement:
+    requirement_key: str
+    event_date: str
+    base_currency: str
+    quote_currency: str
+    use_case: str
+    status: str
+    fetch_target: bool = True
+    invalid_reason: str = ""
+
+
+def invalid_requirement_key(index: int, reason: str) -> str:
+    return f"invalid_requirement_{index}_{reason}"
+
+
+def make_requirement_key(event_date: str, base_currency: str, use_case: str) -> str:
+    return f"{event_date}|{base_currency}|{use_case}"
+
+
+def normalize_requirement_row(row: dict[str, Any], index: int = 1) -> NormalizedFxRequirement:
+    event_date = normalize_date_text(row.get("event_date", ""))
+    base_currency = text_value(row.get("currency", "")).upper()
+    use_case = normalize_use_case(row.get("use_case", ""))
+    status = text_value(row.get("status", "")).lower() or "fx_missing"
+
+    if not event_date:
+        return NormalizedFxRequirement(
+            requirement_key=invalid_requirement_key(index, "missing_event_date"),
+            event_date="",
+            base_currency="",
+            quote_currency=DEFAULT_QUOTE_CURRENCY,
+            use_case=use_case,
+            status=status,
+            fetch_target=False,
+            invalid_reason="invalid_requirement",
+        )
+    if not is_currency_code(base_currency):
+        reason = "invalid_currency"
+        if looks_like_fx_rate(base_currency):
+            reason = "invalid_currency_fx_rate_value"
+        return NormalizedFxRequirement(
+            requirement_key=invalid_requirement_key(index, reason),
+            event_date=event_date,
+            base_currency="",
+            quote_currency=DEFAULT_QUOTE_CURRENCY,
+            use_case=use_case,
+            status=status,
+            fetch_target=False,
+            invalid_reason=reason,
+        )
+    if base_currency == DEFAULT_QUOTE_CURRENCY:
+        return NormalizedFxRequirement(
+            requirement_key=make_requirement_key(event_date, base_currency, use_case),
+            event_date=event_date,
+            base_currency=base_currency,
+            quote_currency=DEFAULT_QUOTE_CURRENCY,
+            use_case=use_case,
+            status=status,
+            fetch_target=False,
+            invalid_reason="not_required",
+        )
+    return NormalizedFxRequirement(
+        requirement_key=make_requirement_key(event_date, base_currency, use_case),
+        event_date=event_date,
+        base_currency=base_currency,
+        quote_currency=DEFAULT_QUOTE_CURRENCY,
+        use_case=use_case,
+        status=status,
+    )
+
+
+def normalize_requirements(rows: Iterable[dict[str, Any]]) -> list[NormalizedFxRequirement]:
+    normalized: list[NormalizedFxRequirement] = []
+    seen_keys: set[str] = set()
+    for index, row in enumerate(rows, start=1):
+        requirement = normalize_requirement_row(row, index=index)
+        if not requirement.invalid_reason and requirement.requirement_key in seen_keys:
+            continue
+        if not requirement.invalid_reason:
+            seen_keys.add(requirement.requirement_key)
+        normalized.append(requirement)
+    return normalized
+
+
+def sha256_text(value: str) -> str:
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def utc_now_text() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def redact_secrets(text: str) -> str:
+    redacted = text_value(text)
+    for env_name in [BOK_API_KEY_ENV, EXIMBANK_API_KEY_ENV]:
+        env_value = os.getenv(env_name, "")
+        if env_value and len(env_value) >= 4:
+            redacted = redacted.replace(env_value, "<redacted>")
+    redacted = re.sub(
+        r"(?i)(api[_-]?key|auth[_-]?key|token|secret|password)=([^&\s]+)",
+        r"\1=<redacted>",
+        redacted,
+    )
+    return redacted
+
+
+@dataclass(frozen=True)
+class FxArchiveCandidate:
+    effective_date: str
+    base_currency: str
+    quote_currency: str
+    rate: str
+    source_type: str
+    provider: str
+    use_case: str
+    status: str
+    source_note: str
+    archive_id: str = ""
+    fetched_at_utc: str = ""
+    request_date: str = ""
+    rate_type_class: str = "official_reference"
+    unit_factor: str = "1"
+    derivation_method: str = "direct_provider_rate"
+    provider_series_key: str = ""
+    provider_timestamp: str = ""
+    response_sha256: str = ""
+    source_url_template: str = ""
+    parser_version: str = DEFAULT_PARSER_VERSION
+    rule_version: str = DEFAULT_RULE_VERSION
+    supersedes_archive_id: str = ""
+
+    def with_archive_metadata(self) -> "FxArchiveCandidate":
+        fetched_at = self.fetched_at_utc or utc_now_text()
+        request_date = self.request_date or self.effective_date
+        response_hash = self.response_sha256
+        identity = "|".join(
+            [
+                self.effective_date,
+                self.base_currency,
+                self.quote_currency,
+                str(self.rate),
+                self.provider,
+                self.use_case,
+                response_hash,
+                request_date,
+            ]
+        )
+        archive_id = self.archive_id or sha256_text(identity)[:16]
+        return FxArchiveCandidate(
+            effective_date=self.effective_date,
+            base_currency=self.base_currency.upper(),
+            quote_currency=self.quote_currency.upper(),
+            rate=str(self.rate),
+            source_type=self.source_type,
+            provider=self.provider,
+            use_case=normalize_use_case(self.use_case),
+            status=self.status,
+            source_note=redact_secrets(self.source_note),
+            archive_id=archive_id,
+            fetched_at_utc=fetched_at,
+            request_date=request_date,
+            rate_type_class=self.rate_type_class,
+            unit_factor=str(self.unit_factor),
+            derivation_method=self.derivation_method,
+            provider_series_key=self.provider_series_key,
+            provider_timestamp=self.provider_timestamp,
+            response_sha256=response_hash,
+            source_url_template=redact_secrets(self.source_url_template),
+            parser_version=self.parser_version,
+            rule_version=self.rule_version,
+            supersedes_archive_id=self.supersedes_archive_id,
+        )
+
+    def to_archive_row(self, include_extra: bool = True) -> dict[str, str]:
+        candidate = self.with_archive_metadata()
+        row = {
+            "effective_date": candidate.effective_date,
+            "base_currency": candidate.base_currency,
+            "quote_currency": candidate.quote_currency,
+            "rate": str(candidate.rate),
+            "source_type": candidate.source_type,
+            "provider": candidate.provider,
+            "use_case": candidate.use_case,
+            "status": candidate.status,
+            "source_note": candidate.source_note,
+            "archive_id": candidate.archive_id,
+            "fetched_at_utc": candidate.fetched_at_utc,
+            "request_date": candidate.request_date,
+            "rate_type_class": candidate.rate_type_class,
+            "unit_factor": candidate.unit_factor,
+            "derivation_method": candidate.derivation_method,
+            "provider_series_key": candidate.provider_series_key,
+            "provider_timestamp": candidate.provider_timestamp,
+            "response_sha256": candidate.response_sha256,
+            "source_url_template": candidate.source_url_template,
+            "parser_version": candidate.parser_version,
+            "rule_version": candidate.rule_version,
+            "supersedes_archive_id": candidate.supersedes_archive_id,
+        }
+        columns = FX_ARCHIVE_COLUMNS if include_extra else FX_RATES_COLUMNS
+        return {column: row.get(column, "") for column in columns}
+
+
+def archive_candidate_from_response(
+    *,
+    requirement: NormalizedFxRequirement,
+    rate: Any,
+    provider: str,
+    source_type: str,
+    status: str,
+    source_note: str,
+    response_text: str,
+    source_url_template: str = "",
+    provider_series_key: str = "",
+    provider_timestamp: str = "",
+) -> FxArchiveCandidate:
+    return FxArchiveCandidate(
+        effective_date=requirement.event_date,
+        base_currency=requirement.base_currency,
+        quote_currency=requirement.quote_currency,
+        rate=str(rate),
+        source_type=source_type,
+        provider=provider,
+        use_case=requirement.use_case,
+        status=status,
+        source_note=source_note,
+        response_sha256=sha256_text(response_text),
+        source_url_template=source_url_template,
+        provider_series_key=provider_series_key,
+        provider_timestamp=provider_timestamp,
+    ).with_archive_metadata()
+
+
+class FxProviderError(Exception):
+    def __init__(self, category: str, message: str) -> None:
+        super().__init__(redact_secrets(message))
+        self.category = category
+        self.safe_message = redact_secrets(message)
+
+
+class FxProviderClient:
+    provider_name = "base"
+
+    def fetch_rate(
+        self,
+        *,
+        date: str,
+        base_currency: str,
+        quote_currency: str,
+        use_case: str,
+    ) -> FxArchiveCandidate:
+        raise FxProviderError("provider_error", "provider adapter is not implemented")
+
+
+class BokFxProviderClient(FxProviderClient):
+    provider_name = "bok"
+
+    def fetch_rate(
+        self,
+        *,
+        date: str,
+        base_currency: str,
+        quote_currency: str,
+        use_case: str,
+    ) -> FxArchiveCandidate:
+        if quote_currency.upper() != DEFAULT_QUOTE_CURRENCY:
+            raise FxProviderError("policy_blocked", "BOK adapter only supports KRW quote currency in this PoC")
+        if os.getenv(NETWORK_OPT_IN_ENV) != "1":
+            raise FxProviderError("policy_blocked", "network fetch disabled; set FX_PROVENANCE_ENABLE_NETWORK=1 to opt in")
+        if not os.getenv(BOK_API_KEY_ENV):
+            raise FxProviderError("provider_error", "BOK API key is missing")
+        raise FxProviderError("provider_error", "BOK network adapter is intentionally out of scope for A-1 PoC")
+
+
+class KoreaEximFxProviderClient(FxProviderClient):
+    provider_name = "eximbank"
+
+    def fetch_rate(
+        self,
+        *,
+        date: str,
+        base_currency: str,
+        quote_currency: str,
+        use_case: str,
+    ) -> FxArchiveCandidate:
+        if quote_currency.upper() != DEFAULT_QUOTE_CURRENCY:
+            raise FxProviderError("policy_blocked", "Eximbank adapter only supports KRW quote currency in this PoC")
+        if os.getenv(NETWORK_OPT_IN_ENV) != "1":
+            raise FxProviderError("policy_blocked", "network fetch disabled; set FX_PROVENANCE_ENABLE_NETWORK=1 to opt in")
+        if not os.getenv(EXIMBANK_API_KEY_ENV):
+            raise FxProviderError("provider_error", "Korea Eximbank API key is missing")
+        raise FxProviderError("provider_error", "Eximbank network adapter is intentionally out of scope for A-1 PoC")
+
+
+def provider_client(name: str) -> FxProviderClient:
+    key = text_value(name).lower()
+    if key in {"bok", "bank_of_korea"}:
+        return BokFxProviderClient()
+    if key in {"eximbank", "koreaexim", "korea_eximbank"}:
+        return KoreaEximFxProviderClient()
+    raise FxProviderError("provider_not_found", f"provider not allowlisted: {redact_secrets(name)}")
+
+
+def read_csv_rows(path: Path) -> list[dict[str, str]]:
+    with path.open("r", encoding="utf-8-sig", newline="") as handle:
+        return list(csv.DictReader(handle))
+
+
+def write_csv_rows(path: Path, rows: list[dict[str, Any]], columns: list[str]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+        writer.writeheader()
+        writer.writerows(rows)
+
+
+def provider_error_record(requirement: NormalizedFxRequirement, provider: str, error: FxProviderError) -> dict[str, str]:
+    return {
+        "requirement_key": requirement.requirement_key,
+        "decision": error.category,
+        "reason_code": error.category,
+        "provider": text_value(provider).lower(),
+        "use_case": requirement.use_case,
+        "parser_version": DEFAULT_PARSER_VERSION,
+        "rule_version": DEFAULT_RULE_VERSION,
+    }
+
+
+def merge_failure_counts(report: dict[str, int], failures: list[dict[str, str]]) -> dict[str, int]:
+    merged = dict(report)
+    for failure in failures:
+        key = f"{text_value(failure.get('decision')).lower()}_count"
+        if key in merged:
+            merged[key] += 1
+    return merged
+
+
+def fetch_candidates(
+    requirements: list[NormalizedFxRequirement],
+    provider_names: list[str],
+) -> tuple[list[FxArchiveCandidate], list[dict[str, str]]]:
+    candidates: list[FxArchiveCandidate] = []
+    failures: list[dict[str, str]] = []
+    for requirement in requirements:
+        if not requirement.fetch_target:
+            continue
+        for provider_name in provider_names:
+            try:
+                client = provider_client(provider_name)
+                candidates.append(
+                    client.fetch_rate(
+                        date=requirement.event_date,
+                        base_currency=requirement.base_currency,
+                        quote_currency=requirement.quote_currency,
+                        use_case=requirement.use_case,
+                    )
+                )
+                break
+            except FxProviderError as error:
+                failures.append(provider_error_record(requirement, provider_name, error))
+    return candidates, failures
+
+
+def parse_provider_names(value: str) -> list[str]:
+    names = [name.strip().lower() for name in value.split(",") if name.strip()]
+    return names or ["bok", "eximbank"]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description="Build sanitized FX provenance archive candidates from requirements.")
+    parser.add_argument("--requirements-path", required=True, help="Private fx_rate_requirements.csv path.")
+    parser.add_argument("--archive-in", help="Optional private archive CSV to validate.")
+    parser.add_argument("--archive-out", help="Optional private archive output path. Ignored in report-only mode.")
+    parser.add_argument("--validation-out", help="Optional private sanitized validation CSV output path.")
+    parser.add_argument("--provider", default="bok,eximbank", help="Comma-separated provider names.")
+    parser.add_argument("--report-only", action="store_true", default=True, help="Default: do not fetch network or write archive.")
+    parser.add_argument("--fetch", action="store_false", dest="report_only", help="Opt in to provider fetch attempts.")
+    parser.add_argument("--write-archive", action="store_true", help="Allow writing --archive-out when candidates exist.")
+    return parser
+
+
+def main(argv: list[str] | None = None) -> int:
+    from fx_provenance_validator import build_validation_report, validation_result_rows, validate_requirements_against_archive
+
+    args = build_parser().parse_args(argv)
+    requirement_rows = read_csv_rows(Path(args.requirements_path))
+    requirements = normalize_requirements(requirement_rows)
+    provider_names = parse_provider_names(args.provider)
+
+    archive_rows: list[dict[str, str]] = []
+    provider_failures: list[dict[str, str]] = []
+    if args.archive_in:
+        archive_rows.extend(read_csv_rows(Path(args.archive_in)))
+    if not args.report_only:
+        candidates, provider_failures = fetch_candidates(requirements, provider_names)
+        archive_rows.extend([candidate.to_archive_row(include_extra=True) for candidate in candidates])
+        if args.archive_out and args.write_archive:
+            write_csv_rows(Path(args.archive_out), archive_rows, FX_ARCHIVE_COLUMNS)
+
+    results = validate_requirements_against_archive(requirements, archive_rows)
+    result_rows = validation_result_rows(results) + provider_failures
+    report = merge_failure_counts(build_validation_report(results, requirements_total=len(requirements)), provider_failures)
+
+    if args.validation_out:
+        write_csv_rows(
+            Path(args.validation_out),
+            result_rows,
+            ["requirement_key", "decision", "reason_code", "provider", "use_case", "parser_version", "rule_version"],
+        )
+    print(json.dumps(report, ensure_ascii=False, sort_keys=True))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

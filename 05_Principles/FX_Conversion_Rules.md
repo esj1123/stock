@@ -41,6 +41,19 @@ When a non-KRW row needs an FX rate and no permitted same-date source exists, th
 
 The requirements file is a work queue, not a rate source. Adding a requirement row does not make any KRW total official.
 
+## Official FX Archive Candidate PoC
+
+`70_Imports/scripts/fx_provenance_fetcher.py` and `70_Imports/scripts/fx_provenance_validator.py` support an A-1 proof of concept for official FX archive candidates.
+
+This PoC does not read raw broker files, does not regenerate processed outputs, does not write the live vault, and does not close REC-EX-01.
+
+Validation produces candidate decisions only:
+
+- `candidate_resolved_by_archived_fx` means a same-date archived FX candidate can be reviewed by the operator.
+- `still_review_gated` and all error/blocking decisions mean the requirement remains review-gated.
+
+Official archive candidates must remain append-only and must include a non-empty source note plus a response digest. A live/current FX response is not ledger evidence until archived and validated.
+
 ## USD Income And Realized PnL
 
 USD dividend income can be KRW-converted when same-date provenance exists.

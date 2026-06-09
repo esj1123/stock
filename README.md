@@ -190,6 +190,16 @@ effective_date,base_currency,quote_currency,rate,source_type,provider,use_case,s
 
 Only archived same-date rows with usable status such as `approved`, `cached`, `official`, or `verified` are eligible for conversion.
 
+## FX Provenance A-1 PoC
+
+`70_Imports/scripts/fx_provenance_fetcher.py` and `70_Imports/scripts/fx_provenance_validator.py` provide a minimal official-FX archive candidate workflow for REC-EX-01 review support.
+
+This workflow is not a live-vault write path and does not close REC-EX-01. It treats `fx_rate_requirements.csv` as a private work queue, generates or validates append-only archive candidates, and emits sanitized validation decisions such as `candidate_resolved_by_archived_fx` or `still_review_gated`.
+
+Default operation is report-only. Provider network attempts require explicit opt-in with `FX_PROVENANCE_ENABLE_NETWORK=1`, and provider secrets must come only from environment variables such as `BOK_ECOS_API_KEY` or `KOREAEXIM_API_KEY`.
+
+See `40_Knowledge/FX_Provenance_Runbook.md` for the operator workflow. Keep private requirement, archive, and validation CSVs outside Git.
+
 ## Safety Notes
 
 - Do not copy `.git/` from the live vault.
