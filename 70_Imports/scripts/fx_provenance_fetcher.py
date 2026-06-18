@@ -6,10 +6,13 @@ import hashlib
 import json
 import os
 import re
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Callable, Iterable
+from urllib.parse import urlencode
 
 from portfolio_model import FX_RATES_COLUMNS
 
@@ -48,6 +51,12 @@ DEFAULT_RULE_VERSION = "rec_ex_01_a1_same_date_v1"
 NETWORK_OPT_IN_ENV = "FX_PROVENANCE_ENABLE_NETWORK"
 BOK_API_KEY_ENV = "BOK_ECOS_API_KEY"
 EXIMBANK_API_KEY_ENV = "KOREAEXIM_API_KEY"
+BOK_STAT_CODE_ENV = "BOK_ECOS_STAT_CODE"
+BOK_USD_ITEM_CODE_ENV = "BOK_ECOS_USD_ITEM_CODE"
+PROVIDER_TIMEOUT_SECONDS = 15
+EXIMBANK_SOURCE_URL_TEMPLATE = "https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey=<redacted>&searchdate={date}&data=AP01"
+BOK_SOURCE_URL_TEMPLATE = "https://ecos.bok.or.kr/api/StatisticSearch/<redacted>/json/kr/1/100/{stat_code}/D/{date}/{date}/{item_code}"
+HttpGet = Callable[[str, int], str]
 
 
 def text_value(value: Any) -> str:
@@ -188,6 +197,17 @@ def redact_secrets(text: str) -> str:
     return redacted
 
 
+def http_get_text(url: str, timeout: int = PROVIDER_TIMEOUT_SECONDS) -> str:
+    try:
+        request = urllib.request.Request(url, headers={"User-Agent": "06_Stock-fx-provenance/1.0"})
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.read().decode("utf-8")
+    except urllib.error.HTTPError as error:
+        raise FxProviderError("provider_error", f"provider HTTP error: {error.code}") from error
+    except urllib.error.URLError as error:
+        raise FxProviderError("provider_error", f"provider network error: {type(error.reason).__name__}") from error
+
+
 @dataclass(frozen=True)
 class FxArchiveCandidate:
     effective_date: str
@@ -315,6 +335,138 @@ def archive_candidate_from_response(
     ).with_archive_metadata()
 
 
+def parse_decimal_text(value: Any) -> str:
+    text = text_value(value).replace(",", "")
+    if not text:
+        raise FxProviderError("provider_error", "provider response missing FX rate")
+    try:
+        parsed = float(text)
+    except ValueError as error:
+        raise FxProviderError("provider_error", "provider response has invalid FX rate") from error
+    if parsed <= 0:
+        raise FxProviderError("policy_blocked", "provider response has non-positive FX rate")
+    return f"{parsed:.10f}".rstrip("0").rstrip(".")
+
+
+def eximbank_request_date(date_text: str) -> str:
+    normalized = normalize_date_text(date_text)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+        raise FxProviderError("provider_error", "invalid request date")
+    return normalized.replace("-", "")
+
+
+def eximbank_request_url(api_key: str, date_text: str) -> str:
+    query = urlencode({"authkey": api_key, "searchdate": eximbank_request_date(date_text), "data": "AP01"})
+    return f"https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?{query}"
+
+
+def parse_eximbank_exchange_response(
+    *,
+    requirement: NormalizedFxRequirement,
+    response_text: str,
+    request_date: str,
+) -> FxArchiveCandidate:
+    try:
+        payload = json.loads(response_text)
+    except json.JSONDecodeError as error:
+        raise FxProviderError("provider_error", "Eximbank response is not valid JSON") from error
+    if not isinstance(payload, list):
+        raise FxProviderError("provider_error", "Eximbank response schema is not a list")
+    if not payload:
+        raise FxProviderError("provider_not_found", "Eximbank response has no rates for request date")
+
+    expected_date = normalize_date_text(request_date)
+    row = next((item for item in payload if text_value(item.get("cur_unit")).upper() == requirement.base_currency), None)
+    if row is None:
+        raise FxProviderError("provider_not_found", "Eximbank response has no matching base currency")
+
+    response_date = normalize_date_text(row.get("search_date") or row.get("date") or row.get("base_date") or expected_date)
+    if response_date != expected_date:
+        raise FxProviderError("date_mismatch", "Eximbank response date does not match request date")
+
+    rate = parse_decimal_text(row.get("deal_bas_r"))
+    return archive_candidate_from_response(
+        requirement=requirement,
+        rate=rate,
+        provider="eximbank",
+        source_type="api_archive",
+        status="available",
+        source_note="Korea Eximbank same-date USD/KRW deal_bas_r archive candidate",
+        response_text=response_text,
+        source_url_template=EXIMBANK_SOURCE_URL_TEMPLATE.format(date=eximbank_request_date(request_date)),
+        provider_series_key="koreaexim:exchangeJSON:AP01:USD:deal_bas_r",
+        provider_timestamp=expected_date,
+    )
+
+
+def bok_request_date(date_text: str) -> str:
+    normalized = normalize_date_text(date_text)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", normalized):
+        raise FxProviderError("provider_error", "invalid request date")
+    return normalized.replace("-", "")
+
+
+def bok_request_url(api_key: str, stat_code: str, item_code: str, date_text: str) -> str:
+    request_date = bok_request_date(date_text)
+    safe_stat = text_value(stat_code)
+    safe_item = text_value(item_code)
+    return (
+        "https://ecos.bok.or.kr/api/StatisticSearch/"
+        f"{api_key}/json/kr/1/100/{safe_stat}/D/{request_date}/{request_date}/{safe_item}"
+    )
+
+
+def parse_bok_exchange_response(
+    *,
+    requirement: NormalizedFxRequirement,
+    response_text: str,
+    request_date: str,
+    stat_code: str,
+    item_code: str,
+) -> FxArchiveCandidate:
+    try:
+        payload = json.loads(response_text)
+    except json.JSONDecodeError as error:
+        raise FxProviderError("provider_error", "BOK response is not valid JSON") from error
+    if not isinstance(payload, dict):
+        raise FxProviderError("provider_error", "BOK response schema is not an object")
+    rows = payload.get("StatisticSearch", {}).get("row")
+    if rows is None:
+        raise FxProviderError("provider_not_found", "BOK response has no StatisticSearch rows")
+    if not isinstance(rows, list):
+        raise FxProviderError("provider_error", "BOK response row schema is not a list")
+    if not rows:
+        raise FxProviderError("provider_not_found", "BOK response has no rates for request date")
+
+    expected_date = normalize_date_text(request_date)
+    matched = None
+    for row in rows:
+        row_item = text_value(row.get("ITEM_CODE1") or row.get("ITEM_CODE") or row.get("ITEM_NAME1"))
+        if row_item in {item_code, ""}:
+            matched = row
+            break
+    if matched is None:
+        raise FxProviderError("provider_not_found", "BOK response has no matching USD item")
+
+    response_date = normalize_date_text(matched.get("TIME") or expected_date)
+    if response_date != expected_date:
+        raise FxProviderError("date_mismatch", "BOK response date does not match request date")
+
+    rate = parse_decimal_text(matched.get("DATA_VALUE"))
+    return archive_candidate_from_response(
+        requirement=requirement,
+        rate=rate,
+        provider="bok",
+        source_type="api_archive",
+        status="available",
+        source_note="BOK ECOS configured same-date USD/KRW daily archive candidate",
+        response_text=response_text,
+        source_url_template=BOK_SOURCE_URL_TEMPLATE.format(stat_code=stat_code, date=bok_request_date(request_date), item_code=item_code),
+        provider_series_key=f"bok:StatisticSearch:{stat_code}:D:{item_code}:DATA_VALUE",
+        provider_timestamp=expected_date,
+    )
+
+
 class FxProviderError(Exception):
     def __init__(self, category: str, message: str) -> None:
         super().__init__(redact_secrets(message))
@@ -324,6 +476,9 @@ class FxProviderError(Exception):
 
 class FxProviderClient:
     provider_name = "base"
+
+    def __init__(self, http_get: HttpGet | None = None) -> None:
+        self.http_get = http_get or http_get_text
 
     def fetch_rate(
         self,
@@ -348,12 +503,34 @@ class BokFxProviderClient(FxProviderClient):
         use_case: str,
     ) -> FxArchiveCandidate:
         if quote_currency.upper() != DEFAULT_QUOTE_CURRENCY:
-            raise FxProviderError("policy_blocked", "BOK adapter only supports KRW quote currency in this PoC")
+            raise FxProviderError("policy_blocked", "BOK adapter only supports KRW quote currency")
         if os.getenv(NETWORK_OPT_IN_ENV) != "1":
             raise FxProviderError("policy_blocked", "network fetch disabled; set FX_PROVENANCE_ENABLE_NETWORK=1 to opt in")
-        if not os.getenv(BOK_API_KEY_ENV):
+        api_key = os.getenv(BOK_API_KEY_ENV)
+        if not api_key:
             raise FxProviderError("provider_error", "BOK API key is missing")
-        raise FxProviderError("provider_error", "BOK network adapter is intentionally out of scope for A-1 PoC")
+        stat_code = os.getenv(BOK_STAT_CODE_ENV, "")
+        item_code = os.getenv(BOK_USD_ITEM_CODE_ENV, "")
+        if not stat_code or not item_code:
+            raise FxProviderError("policy_blocked", "BOK ECOS series configuration is missing")
+        if base_currency.upper() != "USD":
+            raise FxProviderError("provider_not_found", "BOK adapter currently supports USD/KRW only")
+        request = NormalizedFxRequirement(
+            requirement_key=make_requirement_key(date, base_currency.upper(), use_case),
+            event_date=normalize_date_text(date),
+            base_currency=base_currency.upper(),
+            quote_currency=quote_currency.upper(),
+            use_case=normalize_use_case(use_case),
+            status="fx_missing",
+        )
+        response_text = self.http_get(bok_request_url(api_key, stat_code, item_code, date), PROVIDER_TIMEOUT_SECONDS)
+        return parse_bok_exchange_response(
+            requirement=request,
+            response_text=response_text,
+            request_date=date,
+            stat_code=stat_code,
+            item_code=item_code,
+        )
 
 
 class KoreaEximFxProviderClient(FxProviderClient):
@@ -368,12 +545,24 @@ class KoreaEximFxProviderClient(FxProviderClient):
         use_case: str,
     ) -> FxArchiveCandidate:
         if quote_currency.upper() != DEFAULT_QUOTE_CURRENCY:
-            raise FxProviderError("policy_blocked", "Eximbank adapter only supports KRW quote currency in this PoC")
+            raise FxProviderError("policy_blocked", "Eximbank adapter only supports KRW quote currency")
         if os.getenv(NETWORK_OPT_IN_ENV) != "1":
             raise FxProviderError("policy_blocked", "network fetch disabled; set FX_PROVENANCE_ENABLE_NETWORK=1 to opt in")
-        if not os.getenv(EXIMBANK_API_KEY_ENV):
+        api_key = os.getenv(EXIMBANK_API_KEY_ENV)
+        if not api_key:
             raise FxProviderError("provider_error", "Korea Eximbank API key is missing")
-        raise FxProviderError("provider_error", "Eximbank network adapter is intentionally out of scope for A-1 PoC")
+        if base_currency.upper() != "USD":
+            raise FxProviderError("provider_not_found", "Eximbank adapter currently supports USD/KRW only")
+        request = NormalizedFxRequirement(
+            requirement_key=make_requirement_key(date, base_currency.upper(), use_case),
+            event_date=normalize_date_text(date),
+            base_currency=base_currency.upper(),
+            quote_currency=quote_currency.upper(),
+            use_case=normalize_use_case(use_case),
+            status="fx_missing",
+        )
+        response_text = self.http_get(eximbank_request_url(api_key, date), PROVIDER_TIMEOUT_SECONDS)
+        return parse_eximbank_exchange_response(requirement=request, response_text=response_text, request_date=date)
 
 
 def provider_client(name: str) -> FxProviderClient:
@@ -457,8 +646,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--archive-out", help="Optional private archive output path. Ignored in report-only mode.")
     parser.add_argument("--validation-out", help="Optional private sanitized validation CSV output path.")
     parser.add_argument("--provider", default="bok,eximbank", help="Comma-separated provider names.")
-    parser.add_argument("--report-only", action="store_true", default=True, help="Default: do not fetch network or write archive.")
-    parser.add_argument("--fetch", action="store_false", dest="report_only", help="Opt in to provider fetch attempts.")
+    mode = parser.add_mutually_exclusive_group()
+    mode.add_argument("--fetch", action="store_true", help="Explicitly perform provider fetch attempts.")
+    mode.add_argument("--report-only", action="store_true", help="Validate existing archive only; do not fetch providers.")
     parser.add_argument("--write-archive", action="store_true", help="Allow writing --archive-out when candidates exist.")
     return parser
 
@@ -475,7 +665,8 @@ def main(argv: list[str] | None = None) -> int:
     provider_failures: list[dict[str, str]] = []
     if args.archive_in:
         archive_rows.extend(read_csv_rows(Path(args.archive_in)))
-    if not args.report_only:
+    fetch_enabled = bool(args.fetch)
+    if fetch_enabled:
         candidates, provider_failures = fetch_candidates(requirements, provider_names)
         archive_rows.extend([candidate.to_archive_row(include_extra=True) for candidate in candidates])
         if args.archive_out and args.write_archive:

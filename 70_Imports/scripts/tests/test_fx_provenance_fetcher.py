@@ -1,16 +1,28 @@
 from __future__ import annotations
 
+import urllib.error
+
 import pytest
 
 from fx_provenance_fetcher import (
     BOK_API_KEY_ENV,
+    BOK_STAT_CODE_ENV,
+    BOK_USD_ITEM_CODE_ENV,
+    EXIMBANK_API_KEY_ENV,
     FX_ARCHIVE_COLUMNS,
+    NETWORK_OPT_IN_ENV,
     BokFxProviderClient,
     FxProviderError,
+    KoreaEximFxProviderClient,
     archive_candidate_from_response,
+    build_parser,
+    http_get_text,
+    main,
     merge_failure_counts,
     normalize_requirement_row,
     normalize_requirements,
+    parse_bok_exchange_response,
+    parse_eximbank_exchange_response,
     provider_error_record,
     redact_secrets,
     sha256_text,
@@ -87,7 +99,7 @@ def test_archive_candidate_export_includes_pipeline_fx_rates_columns():
 
 
 def test_provider_network_disabled_is_policy_blocked(monkeypatch):
-    monkeypatch.delenv("FX_PROVENANCE_ENABLE_NETWORK", raising=False)
+    monkeypatch.delenv(NETWORK_OPT_IN_ENV, raising=False)
 
     with pytest.raises(FxProviderError) as error:
         BokFxProviderClient().fetch_rate(
@@ -132,3 +144,191 @@ def test_provider_failures_are_counted_in_aggregate_report():
     assert merged["provider_error_count"] == 1
     assert merged["policy_blocked_count"] == 1
     assert base_report["provider_error_count"] == 0
+
+
+def test_fetch_and_report_only_are_mutually_exclusive():
+    parser = build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--requirements-path", "placeholder.csv", "--fetch", "--report-only"])
+
+
+def test_write_archive_without_fetch_does_not_create_archive(tmp_path):
+    requirements_path = tmp_path / "requirements.csv"
+    archive_out = tmp_path / "archive.csv"
+    requirements_path.write_text(
+        "event_date,currency,use_case,row_count,amount_native_sum,missing_reason,source_file_type,status\n"
+        "2026-01-10,USD,income_dividend,1,999999,same-date FX required,transaction_history,fx_missing\n",
+        encoding="utf-8",
+    )
+
+    assert main(["--requirements-path", str(requirements_path), "--archive-out", str(archive_out), "--write-archive"]) == 0
+
+    assert not archive_out.exists()
+
+
+def test_eximbank_valid_same_date_usd_response_builds_candidate():
+    normalized = normalize_requirement_row(requirement(), index=1)
+    response_text = '[{"cur_unit":"USD","deal_bas_r":"1,350.25","search_date":"2026-01-10"}]'
+
+    candidate = parse_eximbank_exchange_response(
+        requirement=normalized,
+        response_text=response_text,
+        request_date="2026-01-10",
+    )
+
+    assert candidate.provider == "eximbank"
+    assert candidate.effective_date == "2026-01-10"
+    assert candidate.base_currency == "USD"
+    assert candidate.quote_currency == "KRW"
+    assert candidate.rate == "1350.25"
+    assert candidate.source_type == "api_archive"
+    assert candidate.status == "available"
+    assert candidate.response_sha256 == sha256_text(response_text)
+    assert "authkey=<redacted>" in candidate.source_url_template
+
+
+def test_eximbank_empty_response_is_provider_not_found():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(requirement=normalized, response_text="[]", request_date="2026-01-10")
+
+    assert error.value.category == "provider_not_found"
+
+
+def test_eximbank_response_date_mismatch_is_date_mismatch():
+    normalized = normalize_requirement_row(requirement(), index=1)
+    response_text = '[{"cur_unit":"USD","deal_bas_r":"1,350.25","search_date":"2026-01-09"}]'
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(
+            requirement=normalized,
+            response_text=response_text,
+            request_date="2026-01-10",
+        )
+
+    assert error.value.category == "date_mismatch"
+
+
+def test_eximbank_malformed_response_is_provider_error():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(requirement=normalized, response_text='{"unexpected": true}', request_date="2026-01-10")
+
+    assert error.value.category == "provider_error"
+
+
+def test_http_error_is_sanitized_provider_error(monkeypatch):
+    secret = "DUMMY_REDACTION_VALUE_12345"
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.HTTPError(
+            url=f"https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey={secret}",
+            code=500,
+            msg="server error",
+            hdrs=None,
+            fp=None,
+        )
+
+    monkeypatch.setenv(EXIMBANK_API_KEY_ENV, secret)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(FxProviderError) as error:
+        http_get_text(f"https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey={secret}")
+
+    assert error.value.category == "provider_error"
+    assert secret not in str(error.value)
+    assert "authkey=" not in str(error.value)
+
+
+def test_timeout_error_is_sanitized_provider_error(monkeypatch):
+    secret = "DUMMY_REDACTION_VALUE_12345"
+
+    def fake_urlopen(request, timeout):
+        raise urllib.error.URLError(TimeoutError("timed out while using secret"))
+
+    monkeypatch.setenv(EXIMBANK_API_KEY_ENV, secret)
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    with pytest.raises(FxProviderError) as error:
+        http_get_text(f"https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey={secret}")
+
+    assert error.value.category == "provider_error"
+    assert secret not in str(error.value)
+    assert "authkey=" not in str(error.value)
+
+
+def test_eximbank_client_redacts_api_key_from_candidate(monkeypatch):
+    secret = "DUMMY_REDACTION_VALUE_12345"
+    captured_urls = []
+
+    def fake_http_get(url, timeout):
+        captured_urls.append(url)
+        return '[{"cur_unit":"USD","deal_bas_r":"1,350.25","search_date":"2026-01-10"}]'
+
+    monkeypatch.setenv(NETWORK_OPT_IN_ENV, "1")
+    monkeypatch.setenv(EXIMBANK_API_KEY_ENV, secret)
+    candidate = KoreaEximFxProviderClient(http_get=fake_http_get).fetch_rate(
+        date="2026-01-10",
+        base_currency="USD",
+        quote_currency="KRW",
+        use_case="income_dividend",
+    )
+
+    assert secret in captured_urls[0]
+    serialized = str(candidate.to_archive_row(include_extra=True))
+    assert secret not in serialized
+    assert "authkey=<redacted>" in candidate.source_url_template
+
+
+def test_bok_valid_mocked_response_builds_candidate(monkeypatch):
+    normalized = normalize_requirement_row(requirement(), index=1)
+    response_text = '{"StatisticSearch":{"row":[{"TIME":"20260110","ITEM_CODE1":"USD","DATA_VALUE":"1350.25"}]}}'
+
+    candidate = parse_bok_exchange_response(
+        requirement=normalized,
+        response_text=response_text,
+        request_date="2026-01-10",
+        stat_code="TEST_STAT",
+        item_code="USD",
+    )
+
+    assert candidate.provider == "bok"
+    assert candidate.effective_date == "2026-01-10"
+    assert candidate.rate == "1350.25"
+    assert candidate.source_type == "api_archive"
+    assert candidate.response_sha256 == sha256_text(response_text)
+
+
+def test_bok_malformed_response_is_provider_error():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_bok_exchange_response(
+            requirement=normalized,
+            response_text='{"StatisticSearch":{"row":{"TIME":"20260110"}}}',
+            request_date="2026-01-10",
+            stat_code="TEST_STAT",
+            item_code="USD",
+        )
+
+    assert error.value.category == "provider_error"
+
+
+def test_bok_series_configuration_missing_is_policy_blocked(monkeypatch):
+    monkeypatch.setenv(NETWORK_OPT_IN_ENV, "1")
+    monkeypatch.setenv(BOK_API_KEY_ENV, "DUMMY_REDACTION_VALUE_12345")
+    monkeypatch.delenv(BOK_STAT_CODE_ENV, raising=False)
+    monkeypatch.delenv(BOK_USD_ITEM_CODE_ENV, raising=False)
+
+    with pytest.raises(FxProviderError) as error:
+        BokFxProviderClient(http_get=lambda url, timeout: "{}").fetch_rate(
+            date="2026-01-10",
+            base_currency="USD",
+            quote_currency="KRW",
+            use_case="income_dividend",
+        )
+
+    assert error.value.category == "policy_blocked"

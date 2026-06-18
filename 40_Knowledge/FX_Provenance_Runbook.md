@@ -2,11 +2,11 @@
 
 ## Purpose
 
-This runbook describes the A-1 proof of concept for REC-EX-01 FX/KRW provenance support.
+This runbook describes the A-1/A-2 proof of concept for REC-EX-01 FX/KRW provenance support.
 
 The goal is not to close REC-EX-01. The goal is to turn historical `fx_rate_requirements.csv` work-queue rows into official same-date FX archive candidates, then validate those candidates before any operator decides whether they can become private archive evidence.
 
-## A-1 Scope
+## A-1/A-2 Scope
 
 Included:
 
@@ -14,6 +14,8 @@ Included:
 - Generate append-only FX archive candidate rows.
 - Validate candidates against same-date, KRW quote, provider, source type, status, source note, and response hash rules.
 - Produce sanitized validation reports for human review.
+- Fetch same-date official FX candidates from configured providers when explicitly requested.
+- Keep provider responses as candidate evidence only until operator review.
 
 Excluded:
 
@@ -24,7 +26,6 @@ Excluded:
 - Broker portal automation.
 - Chrome extension, Computer Use, or browser workflows.
 - Broker-header-audit implementation.
-- Commercial FX provider integration.
 - Default integration tests that need real API keys.
 
 ## Inputs
@@ -56,8 +57,14 @@ Use only environment variables for secrets:
 - `FX_PROVENANCE_ENABLE_NETWORK=1`
 - `BOK_ECOS_API_KEY`
 - `KOREAEXIM_API_KEY`
+- `BOK_ECOS_STAT_CODE`
+- `BOK_ECOS_USD_ITEM_CODE`
 
 Never place API keys in CLI arguments, docs, source files, output CSVs, request URLs, or logs.
+
+The Korea Eximbank adapter uses `KOREAEXIM_API_KEY` and the official HTTPS API host `oapi.koreaexim.go.kr`. It currently accepts only USD/KRW same-date candidates using `deal_bas_r`.
+
+The BOK ECOS adapter is intentionally configuration-gated. It does not guess official series metadata. Set `BOK_ECOS_STAT_CODE` and `BOK_ECOS_USD_ITEM_CODE` only after verifying the official daily USD/KRW series metadata. Without those values, BOK returns `policy_blocked`.
 
 ## CLI Pattern
 
@@ -77,14 +84,32 @@ Provider fetch attempts require both explicit CLI and environment opt-in:
 ```bash
 FX_PROVENANCE_ENABLE_NETWORK=1 python 70_Imports/scripts/fx_provenance_fetcher.py \
   --requirements-path <private_fx_rate_requirements.csv> \
-  --archive-out <private_fx_archive_candidates.csv> \
   --validation-out <private_fx_validation_result.csv> \
   --provider bok,eximbank \
-  --fetch \
-  --write-archive
+  --fetch
 ```
 
-The A-1 provider adapters are safe skeletons. Real network parsing is a later phase.
+Provider preview does not write archive rows unless a separate operation explicitly supplies `--archive-out` and `--write-archive`. Archive write is not approved for REC-EX-01 preview.
+
+`--fetch` and `--report-only` are mutually exclusive. If neither mode is supplied, the CLI defaults to report-only behavior.
+
+## Aggregate Semantics
+
+Validation decisions are requirement-level. These counts should add up by distinct requirement key:
+
+- `candidate_resolved_count`
+- `still_review_gated_count`
+- `invalid_requirement_count`
+- `date_mismatch_count`
+- `policy_blocked_count`
+- `insufficient_evidence_count`
+
+Provider failure counts are attempt-level during fetch preview:
+
+- `provider_error_count`
+- `provider_not_found_count`
+
+For example, if BOK fails for one requirement and Eximbank then succeeds for the same requirement, the report can show both one provider failure attempt and one candidate-resolved requirement. This is expected. Do not interpret provider failure counts as unresolved requirement counts.
 
 ## Validation Decisions
 
