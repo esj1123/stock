@@ -14,6 +14,7 @@ from fx_provenance_fetcher import (
     FX_ARCHIVE_COLUMNS,
     FxArchiveCandidate,
     NormalizedFxRequirement,
+    empty_provider_diagnostics,
     normalize_date_text,
     normalize_requirements,
     normalize_use_case,
@@ -284,6 +285,7 @@ def validation_result_rows(results: list[FxValidationResult]) -> list[dict[str, 
             "reason_code": row.reason_code,
             "provider": row.provider,
             "use_case": row.use_case,
+            **empty_provider_diagnostics(),
             "parser_version": row.parser_version,
             "rule_version": row.rule_version,
         }
@@ -297,7 +299,16 @@ def write_validation_report_csv(path: Path, results: list[FxValidationResult]) -
     with path.open("w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(
             handle,
-            fieldnames=["requirement_key", "decision", "reason_code", "provider", "use_case", "parser_version", "rule_version"],
+            fieldnames=[
+                "requirement_key",
+                "decision",
+                "reason_code",
+                "provider",
+                "use_case",
+                *empty_provider_diagnostics().keys(),
+                "parser_version",
+                "rule_version",
+            ],
         )
         writer.writeheader()
         writer.writerows(rows)

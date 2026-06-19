@@ -16,6 +16,7 @@ from fx_provenance_fetcher import (
     KoreaEximFxProviderClient,
     archive_candidate_from_response,
     build_parser,
+    eximbank_request_url,
     http_get_text,
     main,
     merge_failure_counts,
@@ -153,6 +154,13 @@ def test_fetch_and_report_only_are_mutually_exclusive():
         parser.parse_args(["--requirements-path", "placeholder.csv", "--fetch", "--report-only"])
 
 
+def test_eximbank_request_uses_yyyymmdd_searchdate():
+    url = eximbank_request_url("DUMMY_REDACTION_VALUE_12345", "2026-01-10")
+
+    assert "searchdate=20260110" in url
+    assert "data=AP01" in url
+
+
 def test_write_archive_without_fetch_does_not_create_archive(tmp_path):
     requirements_path = tmp_path / "requirements.csv"
     archive_out = tmp_path / "archive.csv"
@@ -165,6 +173,29 @@ def test_write_archive_without_fetch_does_not_create_archive(tmp_path):
     assert main(["--requirements-path", str(requirements_path), "--archive-out", str(archive_out), "--write-archive"]) == 0
 
     assert not archive_out.exists()
+
+
+def test_canary_mode_does_not_write_archive(tmp_path):
+    archive_out = tmp_path / "archive.csv"
+    validation_out = tmp_path / "validation.csv"
+
+    assert (
+        main(
+            [
+                "--canary-date",
+                "2026-01-10",
+                "--archive-out",
+                str(archive_out),
+                "--validation-out",
+                str(validation_out),
+                "--write-archive",
+            ]
+        )
+        == 0
+    )
+
+    assert not archive_out.exists()
+    assert validation_out.exists()
 
 
 def test_eximbank_valid_same_date_usd_response_builds_candidate():
@@ -195,6 +226,8 @@ def test_eximbank_empty_response_is_provider_not_found():
         parse_eximbank_exchange_response(requirement=normalized, response_text="[]", request_date="2026-01-10")
 
     assert error.value.category == "provider_not_found"
+    assert error.value.reason_code == "provider_empty_response"
+    assert error.value.diagnostics["response_row_count"] == "0"
 
 
 def test_eximbank_response_date_mismatch_is_date_mismatch():
@@ -209,6 +242,8 @@ def test_eximbank_response_date_mismatch_is_date_mismatch():
         )
 
     assert error.value.category == "date_mismatch"
+    assert error.value.reason_code == "date_mismatch"
+    assert error.value.diagnostics["effective_date_match"] == "false"
 
 
 def test_eximbank_malformed_response_is_provider_error():
@@ -218,6 +253,66 @@ def test_eximbank_malformed_response_is_provider_error():
         parse_eximbank_exchange_response(requirement=normalized, response_text='{"unexpected": true}', request_date="2026-01-10")
 
     assert error.value.category == "provider_error"
+    assert error.value.reason_code == "provider_schema_mismatch"
+
+
+def test_eximbank_provider_status_error_is_separated():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(
+            requirement=normalized,
+            response_text='[{"result":"4"}]',
+            request_date="2026-01-10",
+        )
+
+    assert error.value.category == "provider_error"
+    assert error.value.reason_code == "provider_status_error"
+    assert error.value.diagnostics["provider_status_category"] == "4"
+
+
+def test_eximbank_valid_rows_without_usd_are_usd_row_missing():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(
+            requirement=normalized,
+            response_text='[{"cur_unit":"EUR","deal_bas_r":"1,500.25","search_date":"2026-01-10"}]',
+            request_date="2026-01-10",
+        )
+
+    assert error.value.category == "provider_not_found"
+    assert error.value.reason_code == "usd_row_missing"
+    assert error.value.diagnostics["usd_candidate_row_count"] == "0"
+
+
+def test_eximbank_usd_without_valid_rate_is_rate_missing_or_invalid():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(
+            requirement=normalized,
+            response_text='[{"cur_unit":"USD","deal_bas_r":"","search_date":"2026-01-10"}]',
+            request_date="2026-01-10",
+        )
+
+    assert error.value.category == "provider_error"
+    assert error.value.reason_code == "rate_missing_or_invalid"
+
+
+def test_eximbank_usd_without_date_is_requested_date_missing():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(
+            requirement=normalized,
+            response_text='[{"cur_unit":"USD","deal_bas_r":"1,350.25"}]',
+            request_date="2026-01-10",
+        )
+
+    assert error.value.category == "provider_not_found"
+    assert error.value.reason_code == "requested_date_missing"
+    assert error.value.diagnostics["effective_date_match"] == "unknown"
 
 
 def test_http_error_is_sanitized_provider_error(monkeypatch):
@@ -281,6 +376,27 @@ def test_eximbank_client_redacts_api_key_from_candidate(monkeypatch):
     serialized = str(candidate.to_archive_row(include_extra=True))
     assert secret not in serialized
     assert "authkey=<redacted>" in candidate.source_url_template
+
+
+def test_provider_failure_report_excludes_key_url_and_body(tmp_path):
+    normalized = normalize_requirement_row(requirement(), index=1)
+    response_text = '[{"cur_unit":"USD","deal_bas_r":"","search_date":"2026-01-10"}]'
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(
+            requirement=normalized,
+            response_text=response_text,
+            request_date="2026-01-10",
+        )
+
+    record = provider_error_record(normalized, "eximbank", error.value)
+    serialized = str(record)
+
+    assert record["reason_code"] == "rate_missing_or_invalid"
+    assert record["response_sha256"] == sha256_text(response_text)
+    assert response_text not in serialized
+    assert "authkey=" not in serialized
+    assert "DUMMY_REDACTION_VALUE_12345" not in serialized
 
 
 def test_bok_valid_mocked_response_builds_candidate(monkeypatch):

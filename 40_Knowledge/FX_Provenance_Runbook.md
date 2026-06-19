@@ -93,6 +93,47 @@ Provider preview does not write archive rows unless a separate operation explici
 
 `--fetch` and `--report-only` are mutually exclusive. If neither mode is supplied, the CLI defaults to report-only behavior.
 
+Provider canary checks do not use private requirement files and do not write archives:
+
+```bash
+FX_PROVENANCE_ENABLE_NETWORK=1 python 70_Imports/scripts/fx_provenance_fetcher.py \
+  --canary-date <YYYY-MM-DD> \
+  --validation-out <private_fx_validation_result.csv> \
+  --provider eximbank \
+  --fetch
+```
+
+Canary output is parser/connectivity preview only. It does not affect REC-EX-01.
+
+## Provider Diagnostics
+
+Provider fetch preview writes only sanitized diagnostic metadata:
+
+- `provider`
+- `request_date`
+- `http_status_class`
+- `content_type_class`
+- `response_row_count`
+- `usd_candidate_row_count`
+- `provider_status_category`
+- `effective_date_match`
+- `response_sha256`
+- `parser_version`
+- `reason_code`
+
+The raw provider response body and full request URL are not stored.
+
+Eximbank not-found/error reasons are separated where possible:
+
+- `provider_empty_response`
+- `provider_status_error`
+- `provider_schema_mismatch`
+- `usd_row_missing`
+- `rate_missing_or_invalid`
+- `requested_date_missing`
+- `date_mismatch`
+- `provider_not_found`
+
 ## Aggregate Semantics
 
 Validation decisions are requirement-level. These counts should add up by distinct requirement key:

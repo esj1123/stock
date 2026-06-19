@@ -57,6 +57,26 @@ PROVIDER_TIMEOUT_SECONDS = 15
 EXIMBANK_SOURCE_URL_TEMPLATE = "https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey=<redacted>&searchdate={date}&data=AP01"
 BOK_SOURCE_URL_TEMPLATE = "https://ecos.bok.or.kr/api/StatisticSearch/<redacted>/json/kr/1/100/{stat_code}/D/{date}/{date}/{item_code}"
 HttpGet = Callable[[str, int], str]
+PROVIDER_DIAGNOSTIC_COLUMNS = [
+    "request_date",
+    "http_status_class",
+    "content_type_class",
+    "response_row_count",
+    "usd_candidate_row_count",
+    "provider_status_category",
+    "effective_date_match",
+    "response_sha256",
+]
+VALIDATION_REPORT_COLUMNS = [
+    "requirement_key",
+    "decision",
+    "reason_code",
+    "provider",
+    "use_case",
+    *PROVIDER_DIAGNOSTIC_COLUMNS,
+    "parser_version",
+    "rule_version",
+]
 
 
 def text_value(value: Any) -> str:
@@ -208,6 +228,37 @@ def http_get_text(url: str, timeout: int = PROVIDER_TIMEOUT_SECONDS) -> str:
         raise FxProviderError("provider_error", f"provider network error: {type(error.reason).__name__}") from error
 
 
+def empty_provider_diagnostics() -> dict[str, str]:
+    return {column: "" for column in PROVIDER_DIAGNOSTIC_COLUMNS}
+
+
+def provider_diagnostics(
+    *,
+    request_date: str,
+    response_text: str = "",
+    response_row_count: int | str = "",
+    usd_candidate_row_count: int | str = "",
+    provider_status_category: str = "",
+    effective_date_match: str = "",
+    http_status_class: str = "",
+    content_type_class: str = "",
+) -> dict[str, str]:
+    diagnostics = empty_provider_diagnostics()
+    diagnostics.update(
+        {
+            "request_date": normalize_date_text(request_date),
+            "http_status_class": text_value(http_status_class),
+            "content_type_class": text_value(content_type_class),
+            "response_row_count": text_value(response_row_count),
+            "usd_candidate_row_count": text_value(usd_candidate_row_count),
+            "provider_status_category": text_value(provider_status_category),
+            "effective_date_match": text_value(effective_date_match),
+            "response_sha256": sha256_text(response_text) if response_text else "",
+        }
+    )
+    return diagnostics
+
+
 @dataclass(frozen=True)
 class FxArchiveCandidate:
     effective_date: str
@@ -338,13 +389,13 @@ def archive_candidate_from_response(
 def parse_decimal_text(value: Any) -> str:
     text = text_value(value).replace(",", "")
     if not text:
-        raise FxProviderError("provider_error", "provider response missing FX rate")
+        raise FxProviderError("provider_error", "provider response missing FX rate", reason_code="rate_missing_or_invalid")
     try:
         parsed = float(text)
     except ValueError as error:
-        raise FxProviderError("provider_error", "provider response has invalid FX rate") from error
+        raise FxProviderError("provider_error", "provider response has invalid FX rate", reason_code="rate_missing_or_invalid") from error
     if parsed <= 0:
-        raise FxProviderError("policy_blocked", "provider response has non-positive FX rate")
+        raise FxProviderError("provider_error", "provider response has non-positive FX rate", reason_code="rate_missing_or_invalid")
     return f"{parsed:.10f}".rstrip("0").rstrip(".")
 
 
@@ -366,25 +417,97 @@ def parse_eximbank_exchange_response(
     response_text: str,
     request_date: str,
 ) -> FxArchiveCandidate:
+    expected_date = normalize_date_text(request_date)
+    base_diagnostics = provider_diagnostics(request_date=expected_date, response_text=response_text)
     try:
         payload = json.loads(response_text)
     except json.JSONDecodeError as error:
-        raise FxProviderError("provider_error", "Eximbank response is not valid JSON") from error
+        raise FxProviderError(
+            "provider_error",
+            "Eximbank response is not valid JSON",
+            reason_code="provider_schema_mismatch",
+            diagnostics=base_diagnostics,
+        ) from error
     if not isinstance(payload, list):
-        raise FxProviderError("provider_error", "Eximbank response schema is not a list")
+        raise FxProviderError(
+            "provider_error",
+            "Eximbank response schema is not a list",
+            reason_code="provider_schema_mismatch",
+            diagnostics=base_diagnostics,
+        )
     if not payload:
-        raise FxProviderError("provider_not_found", "Eximbank response has no rates for request date")
+        raise FxProviderError(
+            "provider_not_found",
+            "Eximbank response has no rates for request date",
+            reason_code="provider_empty_response",
+            diagnostics=provider_diagnostics(request_date=expected_date, response_text=response_text, response_row_count=0, usd_candidate_row_count=0),
+        )
 
-    expected_date = normalize_date_text(request_date)
-    row = next((item for item in payload if text_value(item.get("cur_unit")).upper() == requirement.base_currency), None)
+    if not all(isinstance(item, dict) for item in payload):
+        raise FxProviderError(
+            "provider_error",
+            "Eximbank response row schema is invalid",
+            reason_code="provider_schema_mismatch",
+            diagnostics=provider_diagnostics(request_date=expected_date, response_text=response_text, response_row_count=len(payload)),
+        )
+
+    status_rows = [item for item in payload if "result" in item and not text_value(item.get("cur_unit"))]
+    if status_rows:
+        status_category = text_value(status_rows[0].get("result")) or "unknown"
+        raise FxProviderError(
+            "provider_error",
+            "Eximbank response contains non-success provider status",
+            reason_code="provider_status_error",
+            diagnostics=provider_diagnostics(
+                request_date=expected_date,
+                response_text=response_text,
+                response_row_count=len(payload),
+                provider_status_category=status_category,
+            ),
+        )
+
+    usd_rows = [item for item in payload if text_value(item.get("cur_unit")).upper() == requirement.base_currency]
+    row = usd_rows[0] if usd_rows else None
+    diagnostics = provider_diagnostics(
+        request_date=expected_date,
+        response_text=response_text,
+        response_row_count=len(payload),
+        usd_candidate_row_count=len(usd_rows),
+    )
     if row is None:
-        raise FxProviderError("provider_not_found", "Eximbank response has no matching base currency")
+        raise FxProviderError(
+            "provider_not_found",
+            "Eximbank response has no matching base currency",
+            reason_code="usd_row_missing",
+            diagnostics=diagnostics,
+        )
 
-    response_date = normalize_date_text(row.get("search_date") or row.get("date") or row.get("base_date") or expected_date)
+    response_date_value = row.get("search_date") or row.get("date") or row.get("base_date")
+    if not text_value(response_date_value):
+        raise FxProviderError(
+            "provider_not_found",
+            "Eximbank response has no effective date field",
+            reason_code="requested_date_missing",
+            diagnostics={**diagnostics, "effective_date_match": "unknown"},
+        )
+    response_date = normalize_date_text(response_date_value)
     if response_date != expected_date:
-        raise FxProviderError("date_mismatch", "Eximbank response date does not match request date")
+        raise FxProviderError(
+            "date_mismatch",
+            "Eximbank response date does not match request date",
+            reason_code="date_mismatch",
+            diagnostics={**diagnostics, "effective_date_match": "false"},
+        )
 
-    rate = parse_decimal_text(row.get("deal_bas_r"))
+    try:
+        rate = parse_decimal_text(row.get("deal_bas_r"))
+    except FxProviderError as error:
+        raise FxProviderError(
+            error.category,
+            error.safe_message,
+            reason_code="rate_missing_or_invalid",
+            diagnostics={**diagnostics, "effective_date_match": "true"},
+        ) from error
     return archive_candidate_from_response(
         requirement=requirement,
         rate=rate,
@@ -468,10 +591,19 @@ def parse_bok_exchange_response(
 
 
 class FxProviderError(Exception):
-    def __init__(self, category: str, message: str) -> None:
+    def __init__(
+        self,
+        category: str,
+        message: str,
+        *,
+        reason_code: str | None = None,
+        diagnostics: dict[str, str] | None = None,
+    ) -> None:
         super().__init__(redact_secrets(message))
         self.category = category
         self.safe_message = redact_secrets(message)
+        self.reason_code = reason_code or category
+        self.diagnostics = {**empty_provider_diagnostics(), **(diagnostics or {})}
 
 
 class FxProviderClient:
@@ -588,15 +720,17 @@ def write_csv_rows(path: Path, rows: list[dict[str, Any]], columns: list[str]) -
 
 
 def provider_error_record(requirement: NormalizedFxRequirement, provider: str, error: FxProviderError) -> dict[str, str]:
-    return {
+    row = {
         "requirement_key": requirement.requirement_key,
         "decision": error.category,
-        "reason_code": error.category,
+        "reason_code": error.reason_code,
         "provider": text_value(provider).lower(),
         "use_case": requirement.use_case,
         "parser_version": DEFAULT_PARSER_VERSION,
         "rule_version": DEFAULT_RULE_VERSION,
     }
+    row.update(error.diagnostics)
+    return row
 
 
 def merge_failure_counts(report: dict[str, int], failures: list[dict[str, str]]) -> dict[str, int]:
@@ -641,11 +775,12 @@ def parse_provider_names(value: str) -> list[str]:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build sanitized FX provenance archive candidates from requirements.")
-    parser.add_argument("--requirements-path", required=True, help="Private fx_rate_requirements.csv path.")
+    parser.add_argument("--requirements-path", help="Private fx_rate_requirements.csv path.")
     parser.add_argument("--archive-in", help="Optional private archive CSV to validate.")
     parser.add_argument("--archive-out", help="Optional private archive output path. Ignored in report-only mode.")
     parser.add_argument("--validation-out", help="Optional private sanitized validation CSV output path.")
     parser.add_argument("--provider", default="bok,eximbank", help="Comma-separated provider names.")
+    parser.add_argument("--canary-date", help="Public provider connectivity/parser canary date in YYYY-MM-DD format. Does not use private requirements or write archive.")
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--fetch", action="store_true", help="Explicitly perform provider fetch attempts.")
     mode.add_argument("--report-only", action="store_true", help="Validate existing archive only; do not fetch providers.")
@@ -653,23 +788,42 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def canary_requirement(canary_date: str) -> NormalizedFxRequirement:
+    event_date = normalize_date_text(canary_date)
+    if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", event_date):
+        raise FxProviderError("provider_error", "invalid canary date", reason_code="provider_schema_mismatch")
+    return NormalizedFxRequirement(
+        requirement_key=make_requirement_key(event_date, "USD", "provider_canary"),
+        event_date=event_date,
+        base_currency="USD",
+        quote_currency=DEFAULT_QUOTE_CURRENCY,
+        use_case="provider_canary",
+        status="fx_missing",
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     from fx_provenance_validator import build_validation_report, validation_result_rows, validate_requirements_against_archive
 
     args = build_parser().parse_args(argv)
-    requirement_rows = read_csv_rows(Path(args.requirements_path))
-    requirements = normalize_requirements(requirement_rows)
+    if args.canary_date:
+        requirements = [canary_requirement(args.canary_date)]
+    else:
+        if not args.requirements_path:
+            raise SystemExit("--requirements-path is required unless --canary-date is supplied")
+        requirement_rows = read_csv_rows(Path(args.requirements_path))
+        requirements = normalize_requirements(requirement_rows)
     provider_names = parse_provider_names(args.provider)
 
     archive_rows: list[dict[str, str]] = []
     provider_failures: list[dict[str, str]] = []
-    if args.archive_in:
+    if args.archive_in and not args.canary_date:
         archive_rows.extend(read_csv_rows(Path(args.archive_in)))
     fetch_enabled = bool(args.fetch)
     if fetch_enabled:
         candidates, provider_failures = fetch_candidates(requirements, provider_names)
         archive_rows.extend([candidate.to_archive_row(include_extra=True) for candidate in candidates])
-        if args.archive_out and args.write_archive:
+        if args.archive_out and args.write_archive and not args.canary_date:
             write_csv_rows(Path(args.archive_out), archive_rows, FX_ARCHIVE_COLUMNS)
 
     results = validate_requirements_against_archive(requirements, archive_rows)
@@ -680,7 +834,7 @@ def main(argv: list[str] | None = None) -> int:
         write_csv_rows(
             Path(args.validation_out),
             result_rows,
-            ["requirement_key", "decision", "reason_code", "provider", "use_case", "parser_version", "rule_version"],
+            VALIDATION_REPORT_COLUMNS,
         )
     print(json.dumps(report, ensure_ascii=False, sort_keys=True))
     return 0
