@@ -57,6 +57,10 @@ PROVIDER_TIMEOUT_SECONDS = 15
 EXIMBANK_SOURCE_URL_TEMPLATE = "https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?authkey=<redacted>&searchdate={date}&data=AP01"
 BOK_SOURCE_URL_TEMPLATE = "https://ecos.bok.or.kr/api/StatisticSearch/<redacted>/json/kr/1/100/{stat_code}/D/{date}/{date}/{item_code}"
 HttpGet = Callable[[str, int], str]
+EXIMBANK_VERIFIED_RESULT_CODE_MAP: dict[str, tuple[str, str, str]] = {
+    # Keep this map limited to result codes verified from official Korea Eximbank documentation.
+    # Unverified codes, including operator-observed result=3, must use the safe generic fallback.
+}
 PROVIDER_DIAGNOSTIC_COLUMNS = [
     "request_date",
     "http_status_class",
@@ -411,6 +415,20 @@ def eximbank_request_url(api_key: str, date_text: str) -> str:
     return f"https://oapi.koreaexim.go.kr/site/program/financial/exchangeJSON?{query}"
 
 
+def eximbank_status_error(result_code: Any) -> tuple[str, str, str, str]:
+    status_category = text_value(result_code) or "unknown"
+    mapping = EXIMBANK_VERIFIED_RESULT_CODE_MAP.get(status_category)
+    if mapping:
+        category, reason_code, safe_message = mapping
+        return category, reason_code, safe_message, status_category
+    return (
+        "provider_error",
+        "provider_status_error",
+        "Eximbank returned an unverified provider status",
+        status_category,
+    )
+
+
 def parse_eximbank_exchange_response(
     *,
     requirement: NormalizedFxRequirement,
@@ -453,11 +471,11 @@ def parse_eximbank_exchange_response(
 
     status_rows = [item for item in payload if "result" in item and not text_value(item.get("cur_unit"))]
     if status_rows:
-        status_category = text_value(status_rows[0].get("result")) or "unknown"
+        category, reason_code, safe_message, status_category = eximbank_status_error(status_rows[0].get("result"))
         raise FxProviderError(
-            "provider_error",
-            "Eximbank response contains non-success provider status",
-            reason_code="provider_status_error",
+            category,
+            safe_message,
+            reason_code=reason_code,
             diagnostics=provider_diagnostics(
                 request_date=expected_date,
                 response_text=response_text,
@@ -680,7 +698,7 @@ class KoreaEximFxProviderClient(FxProviderClient):
             raise FxProviderError("policy_blocked", "Eximbank adapter only supports KRW quote currency")
         if os.getenv(NETWORK_OPT_IN_ENV) != "1":
             raise FxProviderError("policy_blocked", "network fetch disabled; set FX_PROVENANCE_ENABLE_NETWORK=1 to opt in")
-        api_key = os.getenv(EXIMBANK_API_KEY_ENV)
+        api_key = text_value(os.getenv(EXIMBANK_API_KEY_ENV))
         if not api_key:
             raise FxProviderError("provider_error", "Korea Eximbank API key is missing")
         if base_currency.upper() != "USD":

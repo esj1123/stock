@@ -64,6 +64,8 @@ Never place API keys in CLI arguments, docs, source files, output CSVs, request 
 
 The Korea Eximbank adapter uses `KOREAEXIM_API_KEY` and the official HTTPS API host `oapi.koreaexim.go.kr`. It currently accepts only USD/KRW same-date candidates using `deal_bas_r`.
 
+The Eximbank key is trimmed before request construction. Whitespace-only keys are blocked before any HTTP request. The normalized key value, key length, fingerprint, full request URL, and raw response body must not be logged or written to reports.
+
 The BOK ECOS adapter is intentionally configuration-gated. It does not guess official series metadata. Set `BOK_ECOS_STAT_CODE` and `BOK_ECOS_USD_ITEM_CODE` only after verifying the official daily USD/KRW series metadata. Without those values, BOK returns `policy_blocked`.
 
 ## CLI Pattern
@@ -133,6 +135,24 @@ Eximbank not-found/error reasons are separated where possible:
 - `requested_date_missing`
 - `date_mismatch`
 - `provider_not_found`
+
+Eximbank provider `result` status codes must be mapped only when the meaning is verified from official Korea Eximbank documentation. Unverified status codes, including operator-observed `result=3` until official meaning is confirmed, remain generic `provider_status_error` with the numeric status preserved only as `provider_status_category`.
+
+Provider status errors are not the same as FX provenance absence. If canary returns a provider status error, keep private requirement preview and archive write blocked until the provider key/status issue is resolved and canary is rerun.
+
+Safe operator checks for Eximbank provider status errors:
+
+1. Confirm whether `KOREAEXIM_API_KEY` is the key issued for the Korea Eximbank Open API, not a generic public-data portal service key.
+2. Confirm issuance, approval, activation, and quota status in the official provider portal.
+3. Replace copied keys through SecretStore without printing the value:
+
+```powershell
+Set-Secret -Name KOREAEXIM_API_KEY
+```
+
+Enter the key only in the PowerShell prompt. Do not paste it into Codex, docs, logs, shell history, or report files.
+4. Confirm the launcher uses `oapi.koreaexim.go.kr`.
+5. Rerun the public canary before any private requirement preview.
 
 ## Aggregate Semantics
 

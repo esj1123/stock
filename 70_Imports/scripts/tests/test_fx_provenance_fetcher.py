@@ -271,6 +271,36 @@ def test_eximbank_provider_status_error_is_separated():
     assert error.value.diagnostics["provider_status_category"] == "4"
 
 
+def test_eximbank_result_3_stays_generic_when_official_mapping_unverified():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(
+            requirement=normalized,
+            response_text='[{"result":"3"}]',
+            request_date="2026-01-10",
+        )
+
+    assert error.value.category == "provider_error"
+    assert error.value.reason_code == "provider_status_error"
+    assert error.value.safe_message == "Eximbank returned an unverified provider status"
+    assert error.value.diagnostics["provider_status_category"] == "3"
+
+
+def test_eximbank_numeric_status_code_is_normalized_like_string_code():
+    normalized = normalize_requirement_row(requirement(), index=1)
+
+    with pytest.raises(FxProviderError) as error:
+        parse_eximbank_exchange_response(
+            requirement=normalized,
+            response_text='[{"result":3}]',
+            request_date="2026-01-10",
+        )
+
+    assert error.value.reason_code == "provider_status_error"
+    assert error.value.diagnostics["provider_status_category"] == "3"
+
+
 def test_eximbank_valid_rows_without_usd_are_usd_row_missing():
     normalized = normalize_requirement_row(requirement(), index=1)
 
@@ -376,6 +406,49 @@ def test_eximbank_client_redacts_api_key_from_candidate(monkeypatch):
     serialized = str(candidate.to_archive_row(include_extra=True))
     assert secret not in serialized
     assert "authkey=<redacted>" in candidate.source_url_template
+
+
+def test_eximbank_client_trims_api_key_before_urlencoding(monkeypatch):
+    secret = "DUMMY REDACTION VALUE"
+    captured_urls = []
+
+    def fake_http_get(url, timeout):
+        captured_urls.append(url)
+        return '[{"cur_unit":"USD","deal_bas_r":"1,350.25","search_date":"2026-01-10"}]'
+
+    monkeypatch.setenv(NETWORK_OPT_IN_ENV, "1")
+    monkeypatch.setenv(EXIMBANK_API_KEY_ENV, f"  {secret}\n")
+    candidate = KoreaEximFxProviderClient(http_get=fake_http_get).fetch_rate(
+        date="2026-01-10",
+        base_currency="USD",
+        quote_currency="KRW",
+        use_case="income_dividend",
+    )
+
+    assert "authkey=DUMMY+REDACTION+VALUE" in captured_urls[0]
+    assert "  " not in captured_urls[0]
+    assert "\n" not in captured_urls[0]
+    assert secret not in str(candidate.to_archive_row(include_extra=True))
+    assert "authkey=<redacted>" in candidate.source_url_template
+
+
+def test_eximbank_client_rejects_whitespace_only_api_key(monkeypatch):
+    def fake_http_get(url, timeout):
+        raise AssertionError("network should not be called with a blank key")
+
+    monkeypatch.setenv(NETWORK_OPT_IN_ENV, "1")
+    monkeypatch.setenv(EXIMBANK_API_KEY_ENV, " \n\t ")
+
+    with pytest.raises(FxProviderError) as error:
+        KoreaEximFxProviderClient(http_get=fake_http_get).fetch_rate(
+            date="2026-01-10",
+            base_currency="USD",
+            quote_currency="KRW",
+            use_case="income_dividend",
+        )
+
+    assert error.value.category == "provider_error"
+    assert error.value.safe_message == "Korea Eximbank API key is missing"
 
 
 def test_provider_failure_report_excludes_key_url_and_body(tmp_path):
