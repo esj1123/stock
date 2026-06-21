@@ -75,12 +75,14 @@ VALIDATION_REPORT_COLUMNS = [
     "requirement_key",
     "decision",
     "reason_code",
+    "operator_review_label",
     "provider",
     "use_case",
     *PROVIDER_DIAGNOSTIC_COLUMNS,
     "parser_version",
     "rule_version",
 ]
+OFFICIAL_FX_UNAVAILABLE_LABEL = "official_fx_unavailable_non_business_day"
 
 
 def text_value(value: Any) -> str:
@@ -261,6 +263,16 @@ def provider_diagnostics(
         }
     )
     return diagnostics
+
+
+def operator_review_label(decision: str, reason_code: str) -> str:
+    reason = text_value(reason_code).lower()
+    normalized_decision = text_value(decision).lower()
+    if reason in {"provider_empty_response", "official_fx_unavailable_same_date"}:
+        return OFFICIAL_FX_UNAVAILABLE_LABEL
+    if normalized_decision == "candidate_resolved_by_archived_fx":
+        return "candidate_archive_review"
+    return ""
 
 
 @dataclass(frozen=True)
@@ -740,6 +752,7 @@ def provider_error_record(requirement: NormalizedFxRequirement, provider: str, e
         "requirement_key": requirement.requirement_key,
         "decision": error.category,
         "reason_code": error.reason_code,
+        "operator_review_label": operator_review_label(error.category, error.reason_code),
         "provider": text_value(provider).lower(),
         "use_case": requirement.use_case,
         "parser_version": DEFAULT_PARSER_VERSION,
@@ -819,7 +832,12 @@ def canary_requirement(canary_date: str) -> NormalizedFxRequirement:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from fx_provenance_validator import build_validation_report, validation_result_rows, validate_requirements_against_archive
+    from fx_provenance_validator import (
+        apply_provider_failure_review_gates,
+        build_validation_report,
+        validation_result_rows,
+        validate_requirements_against_archive,
+    )
 
     args = build_parser().parse_args(argv)
     if args.canary_date:
@@ -843,6 +861,8 @@ def main(argv: list[str] | None = None) -> int:
             write_csv_rows(Path(args.archive_out), archive_rows, FX_ARCHIVE_COLUMNS)
 
     results = validate_requirements_against_archive(requirements, archive_rows)
+    if fetch_enabled:
+        results = apply_provider_failure_review_gates(results, provider_failures)
     result_rows = validation_result_rows(results) + provider_failures
     report = merge_failure_counts(build_validation_report(results, requirements_total=len(requirements)), provider_failures)
 

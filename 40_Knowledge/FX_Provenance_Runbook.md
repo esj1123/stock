@@ -138,6 +138,8 @@ Eximbank not-found/error reasons are separated where possible:
 - `date_mismatch`
 - `provider_not_found`
 
+When `provider_empty_response` occurs for an Eximbank AP01 same-date request, the sanitized report may add `operator_review_label=official_fx_unavailable_non_business_day`. This label means the requirement is a review-gated exception because the official same-date provider did not return a rate for that date. It is not a provenance resolution, and it must not trigger previous-business-day substitution, today-rate backfill, archive write, or REC-EX-01 closure.
+
 Eximbank provider `result` status codes must be mapped only when the meaning is verified from official Korea Eximbank documentation. Unverified status codes, including operator-observed `result=3` until official meaning is confirmed, remain generic `provider_status_error` with the numeric status preserved only as `provider_status_category`.
 
 Provider status errors are not the same as FX provenance absence. If canary returns a provider status error, keep private requirement preview and archive write blocked until the provider key/status issue is resolved and canary is rerun.
@@ -162,6 +164,7 @@ Validation decisions are requirement-level. These counts should add up by distin
 
 - `candidate_resolved_count`
 - `still_review_gated_count`
+- `official_fx_unavailable_count`
 - `invalid_requirement_count`
 - `date_mismatch_count`
 - `policy_blocked_count`
@@ -173,6 +176,8 @@ Provider failure counts are attempt-level during fetch preview:
 - `provider_not_found_count`
 
 For example, if BOK fails for one requirement and Eximbank then succeeds for the same requirement, the report can show both one provider failure attempt and one candidate-resolved requirement. This is expected. Do not interpret provider failure counts as unresolved requirement counts.
+
+`official_fx_unavailable_count` is a supplemental requirement-level count inside the still-review-gated population. It is for known official same-date provider absence such as non-business-day or holiday-like empty Eximbank AP01 responses.
 
 ## Validation Decisions
 
@@ -189,6 +194,8 @@ Possible decisions:
 - `insufficient_evidence`
 
 `candidate_resolved_by_archived_fx` is a review candidate only. It does not close REC-EX-01.
+
+Operator-facing labels are explanatory only. For non-business-day or holiday-like empty Eximbank responses, use `official_fx_unavailable_non_business_day` as a review-gated exception label instead of treating the row as an unknown unresolved issue.
 
 ## Strict Matching Rules
 
@@ -226,6 +233,7 @@ Blocked cases:
 ## Keep Review-Gated When
 
 - No same-date official FX candidate exists.
+- The official same-date provider returns an empty response for a non-business-day or holiday-like date.
 - The candidate uses a previous business day.
 - The candidate uses today's rate for a historical event date.
 - The provider/source/status is not allowlisted.

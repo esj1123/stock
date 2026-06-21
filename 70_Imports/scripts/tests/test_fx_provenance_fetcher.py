@@ -127,6 +127,19 @@ def test_provider_error_does_not_print_api_secret(monkeypatch):
     assert record["requirement_key"] == "2026-01-10|USD|income_dividend"
 
 
+def test_provider_empty_response_gets_review_gated_exception_label():
+    normalized = normalize_requirement_row(requirement(), index=1)
+    record = provider_error_record(
+        normalized,
+        "eximbank",
+        FxProviderError("provider_not_found", "no rates", reason_code="provider_empty_response"),
+    )
+
+    assert record["decision"] == "provider_not_found"
+    assert record["reason_code"] == "provider_empty_response"
+    assert record["operator_review_label"] == "official_fx_unavailable_non_business_day"
+
+
 def test_provider_failures_are_counted_in_aggregate_report():
     base_report = {
         "requirements_total": 1,

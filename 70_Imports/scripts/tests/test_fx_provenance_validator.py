@@ -5,6 +5,7 @@ from datetime import date
 
 from fx_provenance_fetcher import normalize_requirement_row, sha256_text
 from fx_provenance_validator import (
+    apply_provider_failure_review_gates,
     archive_export_columns_are_compatible,
     build_validation_report,
     use_case_matches,
@@ -74,6 +75,38 @@ def test_effective_date_mismatch_is_blocked():
 
     assert result.decision == "date_mismatch"
     assert result.reason_code == "effective_date_mismatch"
+
+
+def test_provider_empty_response_relabels_nearby_mismatch_as_review_gated_exception():
+    requirements = [
+        requirement(event_date="2026-01-10"),
+        requirement(event_date="2026-01-12"),
+    ]
+    results = validate_requirements_against_archive(requirements, [archive_row(effective_date="2026-01-10", provider="eximbank")])
+    provider_failures = [
+        {
+            "requirement_key": "2026-01-12|USD|income_dividend",
+            "decision": "provider_not_found",
+            "reason_code": "provider_empty_response",
+            "provider": "eximbank",
+            "use_case": "income_dividend",
+        }
+    ]
+
+    converted = apply_provider_failure_review_gates(results, provider_failures)
+    review_row = [row for row in converted if row.requirement_key == "2026-01-12|USD|income_dividend"][0]
+    rows = validation_result_rows(converted)
+    review_report_row = [row for row in rows if row["requirement_key"] == review_row.requirement_key][0]
+    report = build_validation_report(converted)
+
+    assert review_row.decision == "still_review_gated"
+    assert review_row.reason_code == "official_fx_unavailable_same_date"
+    assert review_row.provider == "eximbank"
+    assert review_report_row["operator_review_label"] == "official_fx_unavailable_non_business_day"
+    assert report["candidate_resolved_count"] == 1
+    assert report["still_review_gated_count"] == 1
+    assert report["official_fx_unavailable_count"] == 1
+    assert report["date_mismatch_count"] == 0
 
 
 def test_previous_business_day_substitution_does_not_auto_pass():

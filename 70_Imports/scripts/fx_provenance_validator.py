@@ -18,6 +18,7 @@ from fx_provenance_fetcher import (
     normalize_date_text,
     normalize_requirements,
     normalize_use_case,
+    operator_review_label,
     read_csv_rows,
     redact_secrets,
     text_value,
@@ -249,6 +250,48 @@ def validate_requirements_against_archive(
     return results
 
 
+def apply_provider_failure_review_gates(
+    results: list[FxValidationResult],
+    provider_failures: list[dict[str, str]],
+) -> list[FxValidationResult]:
+    unavailable_by_key = {
+        text_value(row.get("requirement_key")): text_value(row.get("provider")).lower()
+        for row in provider_failures
+        if text_value(row.get("reason_code")).lower() == "provider_empty_response"
+    }
+    resolved_keys = {
+        row.requirement_key
+        for row in results
+        if row.decision == "candidate_resolved_by_archived_fx"
+    }
+    converted: list[FxValidationResult] = []
+    for row in results:
+        provider = unavailable_by_key.get(row.requirement_key, "")
+        should_convert = (
+            provider
+            and row.requirement_key not in resolved_keys
+            and (
+                (row.decision == "date_mismatch" and row.reason_code == "effective_date_mismatch")
+                or (row.decision == "still_review_gated" and row.reason_code == "no_archive_candidate")
+            )
+        )
+        if should_convert:
+            converted.append(
+                FxValidationResult(
+                    requirement_key=row.requirement_key,
+                    decision="still_review_gated",
+                    reason_code="official_fx_unavailable_same_date",
+                    provider=provider,
+                    use_case=row.use_case,
+                    parser_version=row.parser_version,
+                    rule_version=row.rule_version,
+                )
+            )
+        else:
+            converted.append(row)
+    return converted
+
+
 def build_validation_report(
     results: list[FxValidationResult],
     requirements_total: int | None = None,
@@ -262,6 +305,7 @@ def build_validation_report(
         "invalid_requirement_count": 0,
         "provider_error_count": 0,
         "provider_not_found_count": 0,
+        "official_fx_unavailable_count": 0,
         "policy_blocked_count": 0,
         "date_mismatch_count": 0,
         "rate_type_blocked_count": 0,
@@ -274,6 +318,8 @@ def build_validation_report(
             key = f"{row.decision}_count"
             if key in report:
                 report[key] += 1
+        if row.reason_code == "official_fx_unavailable_same_date":
+            report["official_fx_unavailable_count"] += 1
     return report
 
 
@@ -283,6 +329,7 @@ def validation_result_rows(results: list[FxValidationResult]) -> list[dict[str, 
             "requirement_key": row.requirement_key,
             "decision": row.decision,
             "reason_code": row.reason_code,
+            "operator_review_label": operator_review_label(row.decision, row.reason_code),
             "provider": row.provider,
             "use_case": row.use_case,
             **empty_provider_diagnostics(),
@@ -303,6 +350,7 @@ def write_validation_report_csv(path: Path, results: list[FxValidationResult]) -
                 "requirement_key",
                 "decision",
                 "reason_code",
+                "operator_review_label",
                 "provider",
                 "use_case",
                 *empty_provider_diagnostics().keys(),
