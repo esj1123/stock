@@ -66,6 +66,8 @@ The Korea Eximbank adapter uses `KOREAEXIM_API_KEY` and the official HTTPS API h
 
 The Eximbank key is trimmed before request construction. Whitespace-only keys are blocked before any HTTP request. The normalized key value, key length, fingerprint, full request URL, and raw response body must not be logged or written to reports.
 
+Eximbank AP01 responses are request-date-backed candidates. The official Korea Eximbank API page defines `searchdate` as the requested search date, `AP01` as exchange-rate data, and the response schema does not include a row-level effective-date field. It also states that the exchange-rate API provides daily rate data updated around 11:00 on business days, and that non-business-day data or same-business-day data requested before 11:00 returns null. Under this policy, an Eximbank AP01 USD row without a row-level date can use the requested `searchdate` as the candidate `effective_date` only when the USD row exists, `deal_bas_r` is a valid positive value, and the provider response is not a provider status error. This remains candidate evidence only; it does not close REC-EX-01 and does not approve archive write.
+
 The BOK ECOS adapter is intentionally configuration-gated. It does not guess official series metadata. Set `BOK_ECOS_STAT_CODE` and `BOK_ECOS_USD_ITEM_CODE` only after verifying the official daily USD/KRW series metadata. Without those values, BOK returns `policy_blocked`.
 
 ## CLI Pattern

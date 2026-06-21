@@ -501,21 +501,19 @@ def parse_eximbank_exchange_response(
         )
 
     response_date_value = row.get("search_date") or row.get("date") or row.get("base_date")
-    if not text_value(response_date_value):
-        raise FxProviderError(
-            "provider_not_found",
-            "Eximbank response has no effective date field",
-            reason_code="requested_date_missing",
-            diagnostics={**diagnostics, "effective_date_match": "unknown"},
-        )
-    response_date = normalize_date_text(response_date_value)
-    if response_date != expected_date:
-        raise FxProviderError(
-            "date_mismatch",
-            "Eximbank response date does not match request date",
-            reason_code="date_mismatch",
-            diagnostics={**diagnostics, "effective_date_match": "false"},
-        )
+    if text_value(response_date_value):
+        response_date = normalize_date_text(response_date_value)
+        if response_date != expected_date:
+            raise FxProviderError(
+                "date_mismatch",
+                "Eximbank response date does not match request date",
+                reason_code="date_mismatch",
+                diagnostics={**diagnostics, "effective_date_match": "false"},
+            )
+        source_note = "Korea Eximbank same-date USD/KRW deal_bas_r archive candidate"
+    else:
+        response_date = expected_date
+        source_note = "Korea Eximbank AP01 request-date-backed USD/KRW deal_bas_r archive candidate"
 
     try:
         rate = parse_decimal_text(row.get("deal_bas_r"))
@@ -532,11 +530,11 @@ def parse_eximbank_exchange_response(
         provider="eximbank",
         source_type="api_archive",
         status="available",
-        source_note="Korea Eximbank same-date USD/KRW deal_bas_r archive candidate",
+        source_note=source_note,
         response_text=response_text,
         source_url_template=EXIMBANK_SOURCE_URL_TEMPLATE.format(date=eximbank_request_date(request_date)),
         provider_series_key="koreaexim:exchangeJSON:AP01:USD:deal_bas_r",
-        provider_timestamp=expected_date,
+        provider_timestamp=response_date,
     )
 
 

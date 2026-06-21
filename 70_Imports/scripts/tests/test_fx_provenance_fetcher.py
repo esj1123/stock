@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import urllib.error
 
 import pytest
@@ -198,6 +199,53 @@ def test_canary_mode_does_not_write_archive(tmp_path):
     assert validation_out.exists()
 
 
+def test_canary_fetch_accepts_eximbank_request_date_backed_response(tmp_path, monkeypatch, capsys):
+    class FakeResponse:
+        headers = {"Content-Type": "application/json"}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):
+            return False
+
+        def read(self):
+            return b'[{"result":1,"cur_unit":"USD","deal_bas_r":"1,350.25"}]'
+
+    def fake_urlopen(request, timeout):
+        return FakeResponse()
+
+    validation_out = tmp_path / "validation.csv"
+    monkeypatch.setenv(NETWORK_OPT_IN_ENV, "1")
+    monkeypatch.setenv(EXIMBANK_API_KEY_ENV, "DUMMY_REDACTION_VALUE_12345")
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    assert (
+        main(
+            [
+                "--canary-date",
+                "2026-01-10",
+                "--validation-out",
+                str(validation_out),
+                "--provider",
+                "eximbank",
+                "--fetch",
+            ]
+        )
+        == 0
+    )
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["candidate_resolved_count"] == 1
+    assert report["still_review_gated_count"] == 0
+    assert report["provider_not_found_count"] == 0
+    assert validation_out.exists()
+    serialized = validation_out.read_text(encoding="utf-8-sig")
+    assert "candidate_resolved_by_archived_fx" in serialized
+    assert "DUMMY_REDACTION_VALUE_12345" not in serialized
+    assert "authkey=" not in serialized
+
+
 def test_eximbank_valid_same_date_usd_response_builds_candidate():
     normalized = normalize_requirement_row(requirement(), index=1)
     response_text = '[{"cur_unit":"USD","deal_bas_r":"1,350.25","search_date":"2026-01-10"}]'
@@ -330,19 +378,22 @@ def test_eximbank_usd_without_valid_rate_is_rate_missing_or_invalid():
     assert error.value.reason_code == "rate_missing_or_invalid"
 
 
-def test_eximbank_usd_without_date_is_requested_date_missing():
+def test_eximbank_usd_without_row_date_uses_request_date_backed_candidate():
     normalized = normalize_requirement_row(requirement(), index=1)
+    response_text = '[{"result":1,"cur_unit":"USD","deal_bas_r":"1,350.25"}]'
 
-    with pytest.raises(FxProviderError) as error:
-        parse_eximbank_exchange_response(
-            requirement=normalized,
-            response_text='[{"cur_unit":"USD","deal_bas_r":"1,350.25"}]',
-            request_date="2026-01-10",
-        )
+    candidate = parse_eximbank_exchange_response(
+        requirement=normalized,
+        response_text=response_text,
+        request_date="2026-01-10",
+    )
 
-    assert error.value.category == "provider_not_found"
-    assert error.value.reason_code == "requested_date_missing"
-    assert error.value.diagnostics["effective_date_match"] == "unknown"
+    assert candidate.effective_date == "2026-01-10"
+    assert candidate.provider == "eximbank"
+    assert candidate.rate == "1350.25"
+    assert candidate.response_sha256 == sha256_text(response_text)
+    assert "request-date-backed" in candidate.source_note
+    assert "authkey=<redacted>" in candidate.source_url_template
 
 
 def test_http_error_is_sanitized_provider_error(monkeypatch):
