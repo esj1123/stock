@@ -230,6 +230,52 @@ Blocked cases:
 6. Only after human review should private `fx_rates.csv` or cache be updated.
 7. Re-run the import pipeline separately after normal dry-run and live-write gates.
 
+## Cache Promotion
+
+`70_Imports/scripts/fx_cache_promoter.py` supports an operator-reviewed bridge
+from validated archive candidates to a private `fx_rates.csv` cache. It is not
+a provider fetcher and it is not a REC-EX-01 closure path.
+
+Default behavior is preview/package generation only. The tool promotes only
+validation rows with `candidate_resolved_by_archived_fx` and
+`same_date_archived_fx_candidate`. Rows labeled `still_review_gated`,
+`official_fx_unavailable_same_date`, provider failures, invalid requirements,
+date mismatches, and insufficient evidence are excluded.
+
+Actual private cache mutation requires `--apply` plus an explicit `--cache-path`.
+The append step checks existing cache rows first. Equivalent existing rows are
+skipped, but conflicting rows with the same date, currency, provider, and
+use-case key stop the run before appending. The tool refuses output paths inside
+the repository, live vault, synced folders, raw, processed, exports, or logs.
+It also rechecks archive candidate provider, source type, status, response hash,
+and redacted source URL before packaging.
+
+Example private promotion preview:
+
+```bash
+python 70_Imports/scripts/fx_cache_promoter.py \
+  --archive-candidates <private_fx_archive_candidates.csv> \
+  --validation-report <private_fx_validation_result.csv> \
+  --promotion-out <private_fx_rates_promotion_package.csv> \
+  --manifest-out <private_fx_rates_promotion_manifest.json> \
+  --expected-count <reviewed_candidate_count>
+```
+
+Example approved append-only cache update:
+
+```bash
+python 70_Imports/scripts/fx_cache_promoter.py \
+  --archive-candidates <private_fx_archive_candidates.csv> \
+  --validation-report <private_fx_validation_result.csv> \
+  --cache-path <private_vault_cache_fx_rates.csv> \
+  --apply \
+  --expected-count <reviewed_candidate_count>
+```
+
+After cache promotion, run a live-vault dry-run before any actual live-vault
+write. A reduced `fx_rate_requirements.csv` count is operational evidence only;
+it does not close REC-EX-01 by itself.
+
 ## Keep Review-Gated When
 
 - No same-date official FX candidate exists.
