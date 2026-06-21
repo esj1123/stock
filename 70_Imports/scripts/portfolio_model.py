@@ -245,6 +245,10 @@ def usable_fx_rate_rows(fx_rates: pd.DataFrame, event_date: str, currency: str, 
     view["_use_case"] = view["use_case"].fillna("").astype(str).str.strip().str.lower()
     view["_status"] = view["status"].fillna("").astype(str).str.strip().str.lower()
     view["_rate"] = pd.to_numeric(view["rate"], errors="coerce")
+    if "_source_path_order" not in view.columns:
+        view["_source_path_order"] = 0
+    if "_source_row_order" not in view.columns:
+        view["_source_row_order"] = range(len(view))
     view = view[
         view["_effective_date"].eq(event_date)
         & view["_base_currency"].eq(currency)
@@ -376,6 +380,11 @@ def income_fx_use_case(row: pd.Series) -> str:
     return f"income_{income_type}" if income_type else "income"
 
 
+def expense_fx_use_case(row: pd.Series) -> str:
+    expense_type = text_value(row.get("expense_type")).lower()
+    return f"expense_{expense_type}" if expense_type else "expense"
+
+
 def combine_status_reason(existing_reason: Any, extra_reason: str) -> str:
     reasons = [text_value(existing_reason), text_value(extra_reason)]
     return "; ".join(dict.fromkeys(reason for reason in reasons if reason))
@@ -426,6 +435,35 @@ def apply_income_fx_rates(income: pd.DataFrame, fx_rates: pd.DataFrame) -> pd.Da
         elif row_currency(row) != "KRW" and not terminal_review_status:
             output.at[idx, "tax_krw"] = ""
     return output.reindex(columns=income.columns)
+
+
+def apply_expense_fx_rates(expenses: pd.DataFrame, fx_rates: pd.DataFrame) -> pd.DataFrame:
+    if expenses.empty:
+        return expenses.reindex(columns=expenses.columns)
+    output = expenses.copy().astype(object)
+    for idx, row in output.iterrows():
+        use_case = expense_fx_use_case(row)
+        resolved = resolve_fx_rate(row, fx_rates, use_case)
+        current_status = text_value(row.get("amount_review_status")).lower() or "ok"
+        terminal_review_status = current_status not in {"ok", "fx_missing", "missing"}
+        if resolved.get("status") == "ok":
+            output.at[idx, "amount_krw"] = resolved.get("amount_krw", "")
+            output.at[idx, "fx_rate_to_krw"] = resolved.get("fx_rate_to_krw", "")
+            output.at[idx, "fx_rate_source"] = resolved.get("fx_rate_source", "")
+            if not terminal_review_status:
+                output.at[idx, "amount_review_status"] = "ok"
+                output.at[idx, "amount_review_reason"] = ""
+            else:
+                output.at[idx, "amount_review_status"] = current_status
+            if text_value(resolved.get("amount_krw_source")) in {"local_fx_rates", "api_cached_fx_rates", "broker_raw_fx"}:
+                output.at[idx, "amount_basis"] = "derived_krw_from_fx"
+                output.at[idx, "amount_confidence"] = "derived"
+        elif not terminal_review_status:
+            output.at[idx, "amount_review_status"] = resolved.get("status", "fx_missing")
+            output.at[idx, "amount_review_reason"] = combine_status_reason(row.get("amount_review_reason"), resolved.get("missing_reason", ""))
+            if row_currency(row) != "KRW":
+                output.at[idx, "amount_krw"] = ""
+    return output.reindex(columns=expenses.columns)
 
 
 def status_counts_summary(values: list[str]) -> str:
@@ -491,12 +529,11 @@ def expense_fx_requirement_records(expenses: pd.DataFrame) -> list[dict[str, Any
         status = row_review_status(row)
         if status != "fx_missing":
             continue
-        expense_type = text_value(row.get("expense_type")).lower() or "expense"
         record = fx_requirement_record(
             row,
             event_date=row.get("trade_date"),
             currency=row_currency(row),
-            use_case=f"expense_{expense_type}",
+            use_case=expense_fx_use_case(row),
             amount_native=first_number(row, ["amount_native"]),
             missing_reason=text_value(row.get("amount_review_reason")),
         )
@@ -2268,6 +2305,7 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     expenses = load_csv(processed_dir / "processed_expenses.csv")
     fx_rates = load_fx_rates(processed_dir)
     income = apply_income_fx_rates(load_csv(processed_dir / "processed_income.csv"), fx_rates)
+    expenses = apply_expense_fx_rates(expenses, fx_rates)
     income_summary = build_income_summary(income)
     realized = realized_pnl_ledger(transactions, holdings)
     fx_requirements = build_fx_rate_requirements(income, transactions=transactions, expenses=expenses)
@@ -2304,6 +2342,7 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     monthly_cashflow.to_csv(processed_dir / "monthly_cashflow_summary.csv", index=False, encoding="utf-8-sig")
     performance_history.to_csv(processed_dir / "performance_history.csv", index=False, encoding="utf-8-sig")
     income.to_csv(processed_dir / "processed_income.csv", index=False, encoding="utf-8-sig")
+    expenses.to_csv(processed_dir / "processed_expenses.csv", index=False, encoding="utf-8-sig")
     income_summary.to_csv(processed_dir / "income_summary.csv", index=False, encoding="utf-8-sig")
     fx_requirements.to_csv(processed_dir / "fx_rate_requirements.csv", index=False, encoding="utf-8-sig")
     realized.to_csv(processed_dir / "processed_realized_pnl.csv", index=False, encoding="utf-8-sig")
