@@ -6867,6 +6867,57 @@ def test_rec_ex_09_blocks_principal_candidate_with_quantity_or_price_unit(tmp_pa
     assert len(rec_ex_09) == 2
 
 
+def test_rec_ex_09_ignores_holdings_valuation_snapshots_with_quantity_price_units(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    amount_row = {
+        "source_file_type": "holdings",
+        "transaction_type": "deposit",
+        "raw_quantity": 8,
+        "raw_price": 51.5,
+        "quantity_unit": "shares",
+        "price_unit": "native_per_share",
+        "amount_kind": "evaluation_amount",
+        "amount_basis": "raw_native",
+        "amount_krw": 1000,
+        "cashflow_role": "valuation_snapshot",
+        "affects_principal": False,
+        "is_valuation_snapshot": True,
+        "amount_review_status": "ok",
+    }
+    unit_mismatch_row = {
+        "source_file_type": "holdings",
+        "transaction_type": "deposit",
+        "quantity": 8,
+        "price": 51.5,
+        "cashflow_role": "valuation_snapshot",
+        "affects_principal": False,
+    }
+    holdings_row = {
+        "source_file_type": "holdings",
+        "transaction_type": "deposit",
+        "quantity": 8,
+        "price": 51.5,
+        "quantity_unit": "shares",
+        "price_unit": "native_per_share",
+        "amount_kind": "evaluation_amount",
+        "amount_basis": "raw_native",
+        "amount_krw": 1000,
+        "cashflow_role": "valuation_snapshot",
+        "affects_principal": False,
+        "is_valuation_snapshot": True,
+        "amount_review_status": "ok",
+    }
+    write_reconciliation_qa_inputs(
+        processed,
+        amount_rows=[amount_row],
+        unit_mismatch_rows=[unit_mismatch_row],
+        holdings_rows=[holdings_row],
+    )
+
+    qa = qa_for_processed(tmp_path)
+
+    assert qa[qa["exception_id"].eq("REC-EX-09")].empty
+
 def test_qa_reconciliation_total_return_unavailable_creates_exception(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     write_reconciliation_qa_inputs(processed, reconciliation_rows=valid_reconciliation_summary_rows(

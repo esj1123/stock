@@ -450,7 +450,19 @@ def add_holding_non_krw_official_total_exceptions(rows: list[dict[str, Any]], ho
             )
 
 
+def is_balance_valuation_snapshot(row: pd.Series) -> bool:
+    source_file_type = lower_value(row.get("source_file_type", ""))
+    role = lower_value(row.get("cashflow_role", ""))
+    return (
+        source_file_type in {"holdings", "overseas_balance"}
+        and role == "valuation_snapshot"
+        and not bool_value(row.get("affects_principal", ""))
+    )
+
+
 def is_principal_candidate(row: pd.Series) -> bool:
+    if is_balance_valuation_snapshot(row):
+        return False
     role = lower_value(row.get("cashflow_role", ""))
     tx_type = lower_value(row.get("transaction_type", ""))
     return (
