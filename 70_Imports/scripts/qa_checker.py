@@ -399,7 +399,11 @@ def row_has_krw_without_provenance(row: pd.Series) -> bool:
     currency = row_currency(row)
     if not currency or currency == "KRW":
         return False
-    if is_blank(row.get("amount_krw", "")):
+    amount_krw = optional_number(row.get("amount_krw", ""))
+    if amount_krw is None:
+        return False
+    amount_native = optional_number(row.get("amount_native", ""))
+    if amount_native is not None and abs(amount_native) <= 1e-9 and abs(amount_krw) <= 1e-9:
         return False
     fx_rate = row.get("fx_rate_to_krw", row.get("fx_rate", ""))
     amount_source = lower_value(row.get("amount_krw_source", ""))

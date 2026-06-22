@@ -6980,6 +6980,24 @@ def test_qa_reconciliation_non_krw_amount_without_provenance_creates_exception(t
     assert severities == {"blocking"}
 
 
+def test_rec_ex_08_allows_zero_non_krw_native_and_krw_amount_without_fx(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, amount_rows=[
+        {
+            "amount_review_status": "ok",
+            "currency_native": "USD",
+            "amount_native": 0,
+            "amount_krw": 0,
+            "fx_rate_to_krw": "",
+            "amount_krw_source": "raw_native",
+            "amount_basis": "raw_native",
+        },
+    ])
+
+    qa = qa_for_processed(tmp_path)
+
+    assert "REC-EX-08" not in set(qa["exception_id"])
+
 def test_rec_ex_08_allows_non_krw_amount_with_fx_rate_to_krw(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     write_reconciliation_qa_inputs(processed, amount_rows=[
