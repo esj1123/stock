@@ -276,6 +276,25 @@ After cache promotion, run a live-vault dry-run before any actual live-vault
 write. A reduced `fx_rate_requirements.csv` count is operational evidence only;
 it does not close REC-EX-01 by itself.
 
+## REC-EX-01 Review-Gated Exception State
+
+After reviewed same-date Eximbank candidates are promoted into the private FX
+cache, a live-vault dry-run and actual-write pass may reduce the requirement
+queue while still leaving an official-FX-unavailable exception.
+
+Interpret the post-promotion state this way:
+
+- Promoted cache rows can support official KRW conversion only for their exact
+  date, currency, and use-case keys.
+- A remaining Eximbank empty same-date response for a non-business-day or
+  holiday-like date is `official_fx_unavailable_non_business_day`.
+- This state is not `resolved by provenance`; it remains a review-gated
+  exception because no same-date official FX row exists.
+- Do not substitute the previous business day, do not forward-fill, and do not
+  apply today's rate.
+- Do not close REC-EX-01 automatically. Keep REC-EX-01 Group A accepted as
+  review-gated unless a separate human decision changes the QA closure state.
+
 ## Keep Review-Gated When
 
 - No same-date official FX candidate exists.
