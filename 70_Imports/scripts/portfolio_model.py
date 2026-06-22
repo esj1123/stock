@@ -264,6 +264,53 @@ def usable_fx_rate_rows(fx_rates: pd.DataFrame, event_date: str, currency: str, 
     return view.sort_values(["_source_priority", "_source_path_order", "_source_row_order"], na_position="last")
 
 
+def build_fx_rate_lookup(fx_rates: pd.DataFrame) -> dict[tuple[str, str], list[dict[str, Any]]]:
+    if fx_rates.empty:
+        return {}
+    view = fx_rates.copy()
+    for column in FX_RATES_COLUMNS:
+        if column not in view.columns:
+            view[column] = ""
+    view["_effective_date"] = view["effective_date"].apply(normalized_date_text)
+    view["_base_currency"] = view["base_currency"].fillna("").astype(str).str.strip().str.upper()
+    view["_quote_currency"] = view["quote_currency"].fillna("").astype(str).str.strip().str.upper()
+    view["_use_case"] = view["use_case"].fillna("").astype(str).str.strip().str.lower()
+    view["_status"] = view["status"].fillna("").astype(str).str.strip().str.lower()
+    view["_rate"] = pd.to_numeric(view["rate"], errors="coerce")
+    if "_source_path_order" not in view.columns:
+        view["_source_path_order"] = 0
+    if "_source_row_order" not in view.columns:
+        view["_source_row_order"] = range(len(view))
+    view = view[
+        view["_effective_date"].ne("")
+        & view["_base_currency"].ne("")
+        & view["_quote_currency"].eq("KRW")
+        & view["_status"].isin(USABLE_FX_RATE_STATUSES)
+        & view["_rate"].notna()
+        & view["_rate"].gt(0)
+    ].copy()
+    if view.empty:
+        return {}
+    view["_source_priority"] = view["source_type"].fillna("").astype(str).apply(fx_source_priority)
+    lookup: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for row in view.sort_values(["_source_priority", "_source_path_order", "_source_row_order"], na_position="last").to_dict("records"):
+        lookup.setdefault((row["_effective_date"], row["_base_currency"]), []).append(row)
+    return lookup
+
+
+def lookup_fx_rate_row(
+    fx_lookup: dict[tuple[str, str], list[dict[str, Any]]],
+    event_date: str,
+    currency: str,
+    use_case: str,
+) -> dict[str, Any] | None:
+    aliases = fx_use_case_aliases(use_case)
+    for row in fx_lookup.get((event_date, currency), []):
+        if text_value(row.get("_use_case")).lower() in aliases:
+            return row
+    return None
+
+
 def fx_rate_source_label(source_type: str) -> str:
     key = source_type.strip().lower()
     if key in API_CACHED_FX_SOURCE_TYPES:
@@ -271,7 +318,12 @@ def fx_rate_source_label(source_type: str) -> str:
     return "local_fx_rates"
 
 
-def resolve_fx_rate(row: pd.Series | dict[str, Any], fx_rates: pd.DataFrame, use_case: str) -> dict[str, Any]:
+def resolve_fx_rate(
+    row: pd.Series | dict[str, Any],
+    fx_rates: pd.DataFrame,
+    use_case: str,
+    fx_lookup: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     currency = (
         text_value(row.get("currency_native") if isinstance(row, dict) else row.get("currency_native")).upper()
         or text_value(row.get("currency") if isinstance(row, dict) else row.get("currency")).upper()
@@ -351,14 +403,17 @@ def resolve_fx_rate(row: pd.Series | dict[str, Any], fx_rates: pd.DataFrame, use
             "fx_status": "fx_missing",
             "missing_reason": "event_date is missing",
         }
-    matched = usable_fx_rate_rows(fx_rates, event_date, currency, use_case)
-    if matched.empty:
+    if fx_lookup is not None:
+        rate_row = lookup_fx_rate_row(fx_lookup, event_date, currency, use_case)
+    else:
+        matched = usable_fx_rate_rows(fx_rates, event_date, currency, use_case)
+        rate_row = None if matched.empty else matched.iloc[0]
+    if rate_row is None:
         return {
             "status": "fx_missing",
             "fx_status": "fx_missing",
             "missing_reason": "no same-date archived FX rate found",
         }
-    rate_row = matched.iloc[0]
     rate = float(rate_row["_rate"])
     source = fx_rate_source_label(text_value(rate_row.get("source_type")))
     return {
@@ -547,8 +602,9 @@ def realized_fx_requirement_records(transactions: pd.DataFrame, fx_rates: pd.Dat
     trades = sorted_trade_rows(transactions)
     if trades.empty:
         return records
+    fx_lookup = build_fx_rate_lookup(fx_rates) if fx_rates is not None else None
     for _, row in trades.iterrows():
-        amount = trade_amounts(row, fx_rates=fx_rates)
+        amount = trade_amounts(row, fx_rates=fx_rates, fx_lookup=fx_lookup)
         if amount.get("status") != "fx_missing":
             continue
         record = fx_requirement_record(
@@ -1507,6 +1563,7 @@ def trade_money_amounts(
     *,
     default_zero: bool = False,
     fx_rates: pd.DataFrame | None = None,
+    fx_lookup: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
     use_case: str = "realized_pnl_trade_settlement",
 ) -> dict[str, Any]:
     currency = row_currency(row)
@@ -1521,6 +1578,8 @@ def trade_money_amounts(
         native = krw
     if krw is None and currency == "KRW" and native is not None:
         krw = native
+    if currency != "KRW" and native not in {None, 0.0} and krw == 0.0:
+        krw = None
 
     status = "ok"
     reason = ""
@@ -1536,7 +1595,7 @@ def trade_money_amounts(
         fx_row = row.copy()
         fx_row["amount_native"] = native
         fx_row["amount_krw"] = ""
-        resolved = resolve_fx_rate(fx_row, fx_rates, use_case)
+        resolved = resolve_fx_rate(fx_row, fx_rates, use_case, fx_lookup=fx_lookup)
         if resolved.get("status") == "ok":
             krw = first_number(pd.Series(resolved), ["amount_krw"])
             resolved_fx_status = text_value(resolved.get("fx_status")) or "available"
@@ -1557,8 +1616,6 @@ def trade_money_amounts(
     elif currency != "KRW" and krw is None:
         status = "fx_missing"
         reason = "trade amount has no KRW-normalized value"
-    if currency != "KRW" and status != "ok" and native not in {None, 0.0} and krw == 0.0:
-        krw = None
 
     if currency == "KRW":
         fx_status = "not_required"
@@ -1580,21 +1637,34 @@ def trade_money_amounts(
     }
 
 
-def trade_amounts(row: pd.Series, fx_rates: pd.DataFrame | None = None) -> dict[str, Any]:
+def trade_amounts(
+    row: pd.Series,
+    fx_rates: pd.DataFrame | None = None,
+    fx_lookup: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     return trade_money_amounts(
         row,
         ["trade_amount_native", "amount_native", "trade_amount", "settlement_amount_native", "settlement_amount"],
         ["trade_amount_krw", "amount_krw", "settlement_amount_krw"],
         fx_rates=fx_rates,
+        fx_lookup=fx_lookup,
     )
 
 
-def trade_fee_amounts(row: pd.Series, fx_rates: pd.DataFrame | None = None) -> dict[str, Any]:
-    return trade_money_amounts(row, ["fee_native", "fee"], ["fee_krw"], default_zero=True, fx_rates=fx_rates)
+def trade_fee_amounts(
+    row: pd.Series,
+    fx_rates: pd.DataFrame | None = None,
+    fx_lookup: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    return trade_money_amounts(row, ["fee_native", "fee"], ["fee_krw"], default_zero=True, fx_rates=fx_rates, fx_lookup=fx_lookup)
 
 
-def trade_tax_amounts(row: pd.Series, fx_rates: pd.DataFrame | None = None) -> dict[str, Any]:
-    return trade_money_amounts(row, ["tax_native", "tax"], ["tax_krw"], default_zero=True, fx_rates=fx_rates)
+def trade_tax_amounts(
+    row: pd.Series,
+    fx_rates: pd.DataFrame | None = None,
+    fx_lookup: dict[tuple[str, str], list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
+    return trade_money_amounts(row, ["tax_native", "tax"], ["tax_krw"], default_zero=True, fx_rates=fx_rates, fx_lookup=fx_lookup)
 
 
 def fx_status_from_list(statuses: list[str]) -> str:
@@ -1655,6 +1725,7 @@ def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame, fx_r
         return pd.DataFrame(columns=REALIZED_PNL_COLUMNS)
 
     current_identities = current_holding_identities(holdings)
+    fx_lookup = build_fx_rate_lookup(fx_rates) if fx_rates is not None else None
     records: list[dict[str, Any]] = []
     for _identity, group in trades.groupby(trades.apply(trade_identity, axis=1), sort=False):
         lots: list[dict[str, Any]] = []
@@ -1662,9 +1733,9 @@ def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame, fx_r
         for _, row in group.iterrows():
             tx_type = text_value(row.get("transaction_type")).lower()
             quantity = trade_quantity(row)
-            amount = trade_amounts(row, fx_rates=fx_rates)
-            fee = trade_fee_amounts(row, fx_rates=fx_rates)
-            tax = trade_tax_amounts(row, fx_rates=fx_rates)
+            amount = trade_amounts(row, fx_rates=fx_rates, fx_lookup=fx_lookup)
+            fee = trade_fee_amounts(row, fx_rates=fx_rates, fx_lookup=fx_lookup)
+            tax = trade_tax_amounts(row, fx_rates=fx_rates, fx_lookup=fx_lookup)
             if tx_type == "buy":
                 native_status = native_status_for_amount(amount)
                 krw_status = amount["status"] if amount["status"] != "ok" or quantity is None else "ok"
