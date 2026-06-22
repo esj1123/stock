@@ -24,6 +24,16 @@ BLANK_VALUES = {"", "nan", "none", "na", "n/a", "<na>", "-", "--"}
 BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
 FX_KRW_SOURCES = {"fx_rate_to_krw", "derived_krw_from_fx"}
 RESIDUAL_EXCEPTION_THRESHOLD_KRW = 1000.0
+REC_EX_01_ISSUE = (
+    "Same-date FX/KRW provenance is not accepted for a non-KRW amount needed "
+    "before official reconciliation."
+)
+REC_EX_01_SUGGESTED_FIX = (
+    "Review broker KRW, broker raw FX, or archived same-date FX evidence. If the "
+    "official same-date provider is unavailable for a non-business-day or "
+    "holiday-like date, keep the row as a review-gated exception; do not use "
+    "today-rate, forward fill, or previous-business-day substitution."
+)
 REQUIRED_QA_OUTPUT_SCHEMAS = {
     "income_summary.csv": {
         "income_type", "currency_native", "amount_native_sum", "amount_krw_sum", "tax_native_sum",
@@ -345,8 +355,8 @@ def add_status_exception(rows: list[dict[str, Any]], status: str, file_name: str
             "REC-EX-01",
             "blocking",
             processed_row_ref(file_name, idx),
-            "FX rate missing for a non-KRW amount needed before reconciliation can be official.",
-            "Review FX source or broker-provided KRW amount provenance; keep the row out of official KRW totals until resolved.",
+            REC_EX_01_ISSUE,
+            REC_EX_01_SUGGESTED_FIX,
         )
     elif status == "currency_ambiguous":
         add(
@@ -682,7 +692,7 @@ def add_realized_ledger_exceptions(rows: list[dict[str, Any]], realized: pd.Data
                 "advisory",
                 processed_row_ref("processed_realized_pnl.csv", idx),
                 "Realized PnL ledger row requires review before official profit decomposition.",
-                "Review amount_review_status/fx_status and keep official KRW realized PnL blank until resolved.",
+                "Review amount_review_status/fx_status and keep official KRW realized PnL blank unless reviewed provenance and cost-basis coverage are accepted.",
             )
         elif fx_status == "fx_missing":
             add(

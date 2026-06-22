@@ -295,6 +295,12 @@ Interpret the post-promotion state this way:
 - Do not close REC-EX-01 automatically. Keep REC-EX-01 Group A accepted as
   review-gated unless a separate human decision changes the QA closure state.
 
+QA exception wording should preserve the same distinction. Generic `fx_missing`
+rows mean same-date FX/KRW provenance is not accepted for official KRW totals.
+When operator evidence shows official same-date FX is unavailable for a
+non-business-day or holiday-like date, describe it as a review-gated exception,
+not as an unknown unresolved issue and not as resolved provenance.
+
 ## Keep Review-Gated When
 
 - No same-date official FX candidate exists.
