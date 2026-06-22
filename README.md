@@ -119,7 +119,7 @@ Accounting rules:
 - FX-missing rows must preserve native amounts and must not make official KRW performance available without FX or broker-provided KRW provenance.
 - FX provenance priority is broker KRW amount, broker raw FX, local `fx_rates.csv`, API-cached archived rate, then `fx_missing`.
 - Historical rows require same-date FX evidence. Do not apply today's rate to older dividends, fees, taxes, trades, or realized PnL.
-- USD dividends may become official KRW income when same-date provenance exists. USD realized PnL remains requirement-only until all underlying proceeds, cost basis, fee, and tax KRW values have provenance.
+- USD dividends and realized PnL may become official KRW amounts only when same-date provenance exists. Realized PnL remains unavailable until all underlying proceeds, cost basis, fee, and tax KRW values have accepted provenance.
 - Transaction-history rows must stay in transaction/realized ledgers and must not be promoted into current holdings.
 - Historical total assets and cumulative return trend points require imported balance snapshots. Do not reconstruct past monthly total assets from raw transactions alone.
 

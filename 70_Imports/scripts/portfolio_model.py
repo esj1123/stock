@@ -542,21 +542,22 @@ def expense_fx_requirement_records(expenses: pd.DataFrame) -> list[dict[str, Any
     return records
 
 
-def realized_fx_requirement_records(transactions: pd.DataFrame) -> list[dict[str, Any]]:
+def realized_fx_requirement_records(transactions: pd.DataFrame, fx_rates: pd.DataFrame | None = None) -> list[dict[str, Any]]:
     records: list[dict[str, Any]] = []
     trades = sorted_trade_rows(transactions)
     if trades.empty:
         return records
     for _, row in trades.iterrows():
-        if row_review_status(row) != "fx_missing":
+        amount = trade_amounts(row, fx_rates=fx_rates)
+        if amount.get("status") != "fx_missing":
             continue
         record = fx_requirement_record(
             row,
             event_date=row.get("trade_date"),
             currency=row_currency(row),
             use_case="realized_pnl_trade_settlement",
-            amount_native=first_number(row, ["trade_amount_native", "amount_native", "settlement_amount_native", "trade_amount", "settlement_amount"]),
-            missing_reason=text_value(row.get("amount_review_reason")) or "realized PnL trade row needs historical FX before official KRW PnL",
+            amount_native=amount.get("native"),
+            missing_reason=text_value(amount.get("reason")) or "realized PnL trade row needs historical FX before official KRW PnL",
         )
         if record:
             records.append(record)
@@ -567,10 +568,11 @@ def build_fx_rate_requirements(
     income: pd.DataFrame,
     transactions: pd.DataFrame | None = None,
     expenses: pd.DataFrame | None = None,
+    fx_rates: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     records = income_fx_requirement_records(income)
     if transactions is not None:
-        records.extend(realized_fx_requirement_records(transactions))
+        records.extend(realized_fx_requirement_records(transactions, fx_rates=fx_rates))
     if expenses is not None:
         records.extend(expense_fx_requirement_records(expenses))
     if not records:
@@ -1504,6 +1506,8 @@ def trade_money_amounts(
     krw_fields: list[str],
     *,
     default_zero: bool = False,
+    fx_rates: pd.DataFrame | None = None,
+    use_case: str = "realized_pnl_trade_settlement",
 ) -> dict[str, Any]:
     currency = row_currency(row)
     review_status = row_review_status(row) or "ok"
@@ -1520,6 +1524,27 @@ def trade_money_amounts(
 
     status = "ok"
     reason = ""
+    resolved_fx_status = ""
+    if (
+        fx_rates is not None
+        and currency
+        and currency != "KRW"
+        and native is not None
+        and krw is None
+        and review_status in {"", "ok", "fx_missing", "missing"}
+    ):
+        fx_row = row.copy()
+        fx_row["amount_native"] = native
+        fx_row["amount_krw"] = ""
+        resolved = resolve_fx_rate(fx_row, fx_rates, use_case)
+        if resolved.get("status") == "ok":
+            krw = first_number(pd.Series(resolved), ["amount_krw"])
+            resolved_fx_status = text_value(resolved.get("fx_status")) or "available"
+            review_status = "ok"
+        elif resolved.get("status") == "fx_missing":
+            review_status = "fx_missing"
+            reason = text_value(resolved.get("missing_reason"))
+
     if not currency or len(currency) != 3 or not currency.isalpha():
         status = "currency_ambiguous"
         reason = "trade currency is missing or invalid"
@@ -1537,6 +1562,8 @@ def trade_money_amounts(
 
     if currency == "KRW":
         fx_status = "not_required"
+    elif resolved_fx_status:
+        fx_status = resolved_fx_status
     elif krw is not None:
         fx_status = "available"
     elif status == "fx_missing":
@@ -1553,20 +1580,21 @@ def trade_money_amounts(
     }
 
 
-def trade_amounts(row: pd.Series) -> dict[str, Any]:
+def trade_amounts(row: pd.Series, fx_rates: pd.DataFrame | None = None) -> dict[str, Any]:
     return trade_money_amounts(
         row,
         ["trade_amount_native", "amount_native", "trade_amount", "settlement_amount_native", "settlement_amount"],
         ["trade_amount_krw", "amount_krw", "settlement_amount_krw"],
+        fx_rates=fx_rates,
     )
 
 
-def trade_fee_amounts(row: pd.Series) -> dict[str, Any]:
-    return trade_money_amounts(row, ["fee_native", "fee"], ["fee_krw"], default_zero=True)
+def trade_fee_amounts(row: pd.Series, fx_rates: pd.DataFrame | None = None) -> dict[str, Any]:
+    return trade_money_amounts(row, ["fee_native", "fee"], ["fee_krw"], default_zero=True, fx_rates=fx_rates)
 
 
-def trade_tax_amounts(row: pd.Series) -> dict[str, Any]:
-    return trade_money_amounts(row, ["tax_native", "tax"], ["tax_krw"], default_zero=True)
+def trade_tax_amounts(row: pd.Series, fx_rates: pd.DataFrame | None = None) -> dict[str, Any]:
+    return trade_money_amounts(row, ["tax_native", "tax"], ["tax_krw"], default_zero=True, fx_rates=fx_rates)
 
 
 def fx_status_from_list(statuses: list[str]) -> str:
@@ -1620,7 +1648,7 @@ def transaction_history_source_available(processed_dir: Path, transactions: pd.D
     return bool(source_types.isin({"transaction_history", "transactions"}).any())
 
 
-def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFrame:
+def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame, fx_rates: pd.DataFrame | None = None) -> pd.DataFrame:
     """Build realized PnL with FIFO lot matching from imported buy/sell rows."""
     trades = sorted_trade_rows(transactions)
     if trades.empty:
@@ -1634,9 +1662,9 @@ def realized_pnl_ledger(transactions: pd.DataFrame, holdings: pd.DataFrame) -> p
         for _, row in group.iterrows():
             tx_type = text_value(row.get("transaction_type")).lower()
             quantity = trade_quantity(row)
-            amount = trade_amounts(row)
-            fee = trade_fee_amounts(row)
-            tax = trade_tax_amounts(row)
+            amount = trade_amounts(row, fx_rates=fx_rates)
+            fee = trade_fee_amounts(row, fx_rates=fx_rates)
+            tax = trade_tax_amounts(row, fx_rates=fx_rates)
             if tx_type == "buy":
                 native_status = native_status_for_amount(amount)
                 krw_status = amount["status"] if amount["status"] != "ok" or quantity is None else "ok"
@@ -2307,8 +2335,8 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     income = apply_income_fx_rates(load_csv(processed_dir / "processed_income.csv"), fx_rates)
     expenses = apply_expense_fx_rates(expenses, fx_rates)
     income_summary = build_income_summary(income)
-    realized = realized_pnl_ledger(transactions, holdings)
-    fx_requirements = build_fx_rate_requirements(income, transactions=transactions, expenses=expenses)
+    realized = realized_pnl_ledger(transactions, holdings, fx_rates=fx_rates)
+    fx_requirements = build_fx_rate_requirements(income, transactions=transactions, expenses=expenses, fx_rates=fx_rates)
     reconciliation = build_reconciliation_summary(
         processed_dir,
         holdings,

@@ -4340,6 +4340,236 @@ def test_generate_reports_writes_fx_requirements_without_officializing_usd_reali
     assert float(performance["fx_rate_requirement_row_count"]) >= 2
 
 
+def test_generate_reports_applies_cached_fx_rates_to_usd_realized_pnl(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[stage9_cash_holding(100000)],
+        transaction_rows=[
+            {
+                "import_id": "buy-usd-synthetic",
+                "source_file": "synthetic_transactions.csv",
+                "source_file_type": "transaction_history",
+                "account_type": "SYNTH",
+                "market": "US",
+                "asset_type": "stock",
+                "ticker": "SYN",
+                "security_name": "Synthetic Equity",
+                "trade_date": "2026-01-10",
+                "transaction_type": "buy",
+                "quantity": 1,
+                "trade_amount": 100,
+                "trade_amount_native": 100,
+                "currency_native": "USD",
+                "amount_review_status": "fx_missing",
+                "amount_review_reason": "trade amount has no KRW-normalized value",
+                "cashflow_role": "trade_settlement",
+            },
+            {
+                "import_id": "sell-usd-synthetic",
+                "source_file": "synthetic_transactions.csv",
+                "source_file_type": "transaction_history",
+                "account_type": "SYNTH",
+                "market": "US",
+                "asset_type": "stock",
+                "ticker": "SYN",
+                "security_name": "Synthetic Equity",
+                "trade_date": "2026-01-11",
+                "transaction_type": "sell",
+                "quantity": 1,
+                "trade_amount": 120,
+                "trade_amount_native": 120,
+                "fee_native": 1,
+                "tax_native": 2,
+                "currency_native": "USD",
+                "amount_review_status": "fx_missing",
+                "amount_review_reason": "trade amount has no KRW-normalized value",
+                "cashflow_role": "trade_settlement",
+            },
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+    )
+    fx_cache = tmp_path / "70_Imports" / "cache"
+    fx_cache.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        {
+            "effective_date": "2026-01-10",
+            "base_currency": "USD",
+            "quote_currency": "KRW",
+            "rate": 1300,
+            "source_type": "api_cached",
+            "provider": "synthetic",
+            "use_case": "realized_pnl_trade_settlement",
+            "status": "available",
+            "source_note": "synthetic same-date archived FX evidence",
+        },
+        {
+            "effective_date": "2026-01-11",
+            "base_currency": "USD",
+            "quote_currency": "KRW",
+            "rate": 1400,
+            "source_type": "api_cached",
+            "provider": "synthetic",
+            "use_case": "realized_pnl_trade_settlement",
+            "status": "available",
+            "source_note": "synthetic same-date archived FX evidence",
+        },
+    ]).to_csv(fx_cache / "fx_rates.csv", index=False)
+
+    generate_reports(tmp_path, processed_dir=processed)
+
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    requirements = read_processed_csv(processed, "fx_rate_requirements.csv")
+    metrics = reconciliation_metrics(processed)
+    row = realized.iloc[0]
+
+    assert requirements.empty
+    assert row["amount_review_status"] == "ok"
+    assert row["fx_status"] == "available"
+    assert float(row["proceeds_krw"]) == pytest.approx(168000)
+    assert float(row["cost_basis_krw"]) == pytest.approx(130000)
+    assert float(row["fee_krw"]) == pytest.approx(1400)
+    assert float(row["tax_krw"]) == pytest.approx(2800)
+    assert float(row["realized_trade_pnl_gross_krw"]) == pytest.approx(38000)
+    assert float(row["realized_trade_pnl_net_krw"]) == pytest.approx(33800)
+    assert metrics["realized_pnl_status"] == "available"
+    assert int(metrics["realized_pnl_unavailable_row_count"]) == 0
+
+
+def test_generate_reports_does_not_forward_fill_realized_pnl_fx_rates(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[stage9_cash_holding(100000)],
+        transaction_rows=[
+            {
+                "import_id": "buy-usd-synthetic",
+                "source_file": "synthetic_transactions.csv",
+                "source_file_type": "transaction_history",
+                "account_type": "SYNTH",
+                "market": "US",
+                "asset_type": "stock",
+                "ticker": "SYN",
+                "security_name": "Synthetic Equity",
+                "trade_date": "2026-01-10",
+                "transaction_type": "buy",
+                "quantity": 1,
+                "trade_amount": 100,
+                "currency_native": "USD",
+                "amount_review_status": "fx_missing",
+                "cashflow_role": "trade_settlement",
+            },
+            {
+                "import_id": "sell-usd-synthetic",
+                "source_file": "synthetic_transactions.csv",
+                "source_file_type": "transaction_history",
+                "account_type": "SYNTH",
+                "market": "US",
+                "asset_type": "stock",
+                "ticker": "SYN",
+                "security_name": "Synthetic Equity",
+                "trade_date": "2026-01-11",
+                "transaction_type": "sell",
+                "quantity": 1,
+                "trade_amount": 120,
+                "currency_native": "USD",
+                "amount_review_status": "fx_missing",
+                "cashflow_role": "trade_settlement",
+            },
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+    )
+    fx_cache = tmp_path / "70_Imports" / "cache"
+    fx_cache.mkdir(parents=True, exist_ok=True)
+    pd.DataFrame([
+        {
+            "effective_date": "2026-01-10",
+            "base_currency": "USD",
+            "quote_currency": "KRW",
+            "rate": 1300,
+            "source_type": "api_cached",
+            "provider": "synthetic",
+            "use_case": "realized_pnl_trade_settlement",
+            "status": "available",
+            "source_note": "synthetic same-date archived FX evidence",
+        },
+    ]).to_csv(fx_cache / "fx_rates.csv", index=False)
+
+    generate_reports(tmp_path, processed_dir=processed)
+
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    requirements = read_processed_csv(processed, "fx_rate_requirements.csv")
+    metrics = reconciliation_metrics(processed)
+
+    assert set(realized["amount_review_status"]) == {"fx_missing"}
+    assert set(realized["fx_status"]) == {"fx_missing"}
+    assert is_blank_or_na(realized.iloc[0]["realized_trade_pnl_gross_krw"])
+    assert metrics["realized_pnl_status"] == "fx_missing"
+    assert set(requirements["use_case"]) == {"realized_pnl_trade_settlement"}
+    assert int(requirements["row_count"].sum()) == 1
+
+
+def test_generate_reports_builds_realized_fx_requirements_when_transaction_status_is_ok_but_krw_missing(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_baseline(
+        processed,
+        holdings_rows=[stage9_cash_holding(100000)],
+        transaction_rows=[
+            {
+                "import_id": "buy-usd-synthetic",
+                "source_file": "synthetic_transactions.csv",
+                "source_file_type": "transaction_history",
+                "account_type": "SYNTH",
+                "market": "US",
+                "asset_type": "stock",
+                "ticker": "SYN",
+                "security_name": "Synthetic Equity",
+                "trade_date": "2026-01-10",
+                "transaction_type": "buy",
+                "quantity": 1,
+                "trade_amount": 100,
+                "currency_native": "USD",
+                "amount_review_status": "ok",
+                "cashflow_role": "trade_settlement",
+            },
+            {
+                "import_id": "sell-usd-synthetic",
+                "source_file": "synthetic_transactions.csv",
+                "source_file_type": "transaction_history",
+                "account_type": "SYNTH",
+                "market": "US",
+                "asset_type": "stock",
+                "ticker": "SYN",
+                "security_name": "Synthetic Equity",
+                "trade_date": "2026-01-11",
+                "transaction_type": "sell",
+                "quantity": 1,
+                "trade_amount": 120,
+                "currency_native": "USD",
+                "amount_review_status": "ok",
+                "cashflow_role": "trade_settlement",
+            },
+        ],
+        cashflow_rows=[
+            {"transaction_type": "deposit", "cashflow_role": "external_principal", "settlement_amount_krw": 100000, "amount_krw": 100000, "amount_review_status": "ok", "affects_principal": True},
+        ],
+    )
+
+    generate_reports(tmp_path, processed_dir=processed)
+
+    realized = read_processed_csv(processed, "processed_realized_pnl.csv")
+    requirements = read_processed_csv(processed, "fx_rate_requirements.csv")
+
+    assert set(realized["amount_review_status"]) == {"fx_missing"}
+    assert set(realized["fx_status"]) == {"fx_missing"}
+    assert set(requirements["use_case"]) == {"realized_pnl_trade_settlement"}
+    assert int(requirements["row_count"].sum()) == 2
+
+
 def test_stage9_fee_tax_are_separate_and_explained_profit_uses_gross_once(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     write_reconciliation_baseline(
