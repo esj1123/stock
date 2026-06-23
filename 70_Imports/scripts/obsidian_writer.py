@@ -509,6 +509,27 @@ def preliminary_reconciliation_warning(summary: pd.DataFrame | None = None) -> s
     ])
 
 
+def fx_review_gate_note(fx_requirements: pd.DataFrame | None = None) -> str:
+    fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
+    if fx_requirements.empty:
+        return ""
+    details = []
+    use_case_text = status_counts_text(fx_requirements, "use_case")
+    status_text = status_counts_text(fx_requirements, "status")
+    if use_case_text:
+        details.append(f"use_case counts `{markdown_cell(use_case_text)}`")
+    if status_text:
+        details.append(f"status counts `{markdown_cell(status_text)}`")
+    detail_text = f" {'; '.join(details)}." if details else ""
+    return "\n".join([
+        "> [!info] FX review gate",
+        f"> Remaining FX requirements: `{len(fx_requirements)}`.{detail_text}",
+        "> These rows are same-date FX/KRW provenance review gates, not automatic resolution or unknown closure. "
+        "Reviewed non-business-day or holiday-like provider-empty dates stay as official-FX-unavailable review-gated exceptions. "
+        "Do not use previous-business-day substitution, forward fill, or today-rate backfill.",
+    ])
+
+
 def portfolio_content(
     summary: pd.DataFrame,
     holdings: pd.DataFrame,
@@ -528,6 +549,9 @@ def portfolio_content(
     if warning:
         parts.append(warning)
     parts.append(preliminary_reconciliation_warning(summary))
+    fx_review_note = fx_review_gate_note(fx_requirements)
+    if fx_review_note:
+        parts.append(fx_review_note)
     value_status = metric(summary, "total_portfolio_value_status", "unknown")
     unit_value_status = metric(reconciliation, "total_assets_status", value_status)
     total_return_status = metric(performance_summary, "performance_status", metric(reconciliation, "total_return_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)))
@@ -596,7 +620,7 @@ def portfolio_content(
         parts.append(
             "> [!warning] Unit-aware reconciliation not official\n"
             f"> Total assets status is `{markdown_cell(unit_value_status)}` and total return status is `{markdown_cell(total_return_status)}`. "
-            "Portfolio value and return are not official until FX, currency, and unit issues are resolved."
+            "Portfolio value and return are not official until FX, currency, and unit review gates are cleared."
         )
     data_warning = metric(summary, "data_quality_warning")
     if data_warning:
@@ -1613,7 +1637,7 @@ def reconciliation_status_warning(reconciliation: pd.DataFrame) -> str:
         f"> total_assets_status=`{markdown_cell(total_assets_status)}`, "
         f"net_external_principal_status=`{markdown_cell(principal_status)}`, "
         f"total_return_status=`{markdown_cell(return_status)}`. "
-        "Do not treat total return as official until unresolved FX, currency, and unit statuses are cleared."
+        "Do not treat total return as official until FX, currency, and unit review gates are cleared."
     )
 
 
@@ -1621,13 +1645,18 @@ def reconciliation_content(
     reconciliation: pd.DataFrame,
     summary: pd.DataFrame | None = None,
     realized: pd.DataFrame | None = None,
+    fx_requirements: pd.DataFrame | None = None,
 ) -> str:
     summary = summary if summary is not None else pd.DataFrame()
     realized = realized if realized is not None else pd.DataFrame()
+    fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
     parts = []
     warning = reconciliation_status_warning(reconciliation)
     if warning:
         parts.append(warning)
+    fx_review_note = fx_review_gate_note(fx_requirements)
+    if fx_review_note:
+        parts.append(fx_review_note)
     parts.extend([
         "## Reconciliation Scope",
         reconciliation_metric_table(reconciliation, [
@@ -1674,7 +1703,7 @@ def reconciliation_content(
         reconciliation_metric_table(reconciliation, ["residual_krw", "residual_status"]),
         "## Realized PnL Ledger (`processed_realized_pnl.csv`)",
         realized_pnl_table(realized),
-        "## Unresolved Status Counts",
+        "## Review-Gated Status Counts",
         reconciliation_metric_table(reconciliation, [
             "fx_missing_row_count",
             "currency_ambiguous_row_count",
@@ -1975,7 +2004,7 @@ def import_review_content(
         ]),
         "## Processed Output Availability",
         output_availability_table(processed_dir) if processed_dir is not None else EMPTY_DATA,
-        "## Unresolved Status Counts",
+        "## Review-Gated Status Counts",
         unresolved_status_count_table(income, expenses, fx_events, unclassified),
         "## Amount/Unit Audit Summary",
         amount_unit_audit_summary_table(amount_audit, unit_mismatch, income, fx_events),
@@ -2172,7 +2201,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Portfolio.md":
         return portfolio_content(summary, holdings, warning, reconciliation, performance, income_summary, performance_history, fx_requirements)
     if name == "Reconciliation.md":
-        return reconciliation_content(reconciliation, summary, realized)
+        return reconciliation_content(reconciliation, summary, realized, fx_requirements)
     if name == "Companies.md":
         return companies_content(holdings)
     if name == "Exposure.md":

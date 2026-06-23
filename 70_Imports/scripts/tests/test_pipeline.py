@@ -5446,7 +5446,7 @@ def test_import_review_dashboard_surfaces_stage8_output_status(tmp_path: Path):
     assert "| processed_income.csv | True | 1 | ok |  |" in content
     assert "| processed_expenses.csv | True | 1 | ok |  |" in content
     assert "| processed_fx_events.csv | True | 1 | ok |  |" in content
-    assert "## Unresolved Status Counts" in content
+    assert "## Review-Gated Status Counts" in content
     assert "income_fx_missing" in content
     assert "| fx_partial | 1 |" in content
     assert "| unclassified_rows | 1 |" in content
@@ -5876,10 +5876,26 @@ def test_reconciliation_dashboard_surfaces_unit_aware_summary(tmp_path: Path):
         fx_missing_row_count="1",
         unit_ambiguous_row_count="2",
     )).to_csv(processed / "reconciliation_summary.csv", index=False)
+    pd.DataFrame([
+        {
+            "event_date": "2026-01-02",
+            "currency": "USD",
+            "use_case": "realized_pnl_trade_settlement",
+            "row_count": "1",
+            "amount_native_sum": "",
+            "missing_reason": "same-date FX/KRW provenance required",
+            "source_file_type": "transaction_history",
+            "status": "fx_missing",
+        }
+    ], columns=FX_RATE_REQUIREMENT_COLUMNS).to_csv(processed / "fx_rate_requirements.csv", index=False)
 
     content = dashboard_content("Reconciliation.md", processed)
 
     assert "## Reconciliation Scope" in content
+    assert "FX review gate" in content
+    assert "Remaining FX requirements: `1`" in content
+    assert "official-FX-unavailable review-gated exceptions" in content
+    assert "previous-business-day substitution" in content
     assert "reconciliation_summary_role" in content
     assert "audit_status_residual" in content
     assert "total_return_alias_of" in content
@@ -5898,7 +5914,7 @@ def test_reconciliation_dashboard_surfaces_unit_aware_summary(tmp_path: Path):
     assert "realized_pnl_krw" in content
     assert "## Residual Status" in content
     assert "## Realized PnL Ledger" in content
-    assert "## Unresolved Status Counts" in content
+    assert "## Review-Gated Status Counts" in content
     assert "| fx_missing_row_count | 1 |" in content
     assert "| unit_ambiguous_row_count | 2 |" in content
 
@@ -6131,9 +6147,25 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
             "income_status": "fx_missing",
         },
     ], columns=INCOME_SUMMARY_OUTPUT_COLUMNS).to_csv(processed / "income_summary.csv", index=False)
+    pd.DataFrame([
+        {
+            "event_date": "2026-01-02",
+            "currency": "USD",
+            "use_case": "income_dividend",
+            "row_count": "1",
+            "amount_native_sum": "",
+            "missing_reason": "same-date FX/KRW provenance required",
+            "source_file_type": "income",
+            "status": "fx_missing",
+        }
+    ], columns=FX_RATE_REQUIREMENT_COLUMNS).to_csv(processed / "fx_rate_requirements.csv", index=False)
 
     content = dashboard_content("Portfolio.md", processed)
 
+    assert "FX review gate" in content
+    assert "Remaining FX requirements: `1`" in content
+    assert "official-FX-unavailable review-gated exceptions" in content
+    assert "today-rate backfill" in content
     assert "## 전체 투자 성과" in content
     assert "## 현재 보유분" in content
     assert "현재 보유분 원가" in content
