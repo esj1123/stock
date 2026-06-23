@@ -276,6 +276,15 @@ After cache promotion, run a live-vault dry-run before any actual live-vault
 write. A reduced `fx_rate_requirements.csv` count is operational evidence only;
 it does not close REC-EX-01 by itself.
 
+If a remaining requirement date appears to be a regular business day, do not
+classify it as an official-FX-unavailable exception from the bulk preview alone.
+Run a single-date public canary or provider preview for that date first. If the
+canary returns a same-date candidate, promote only that candidate through the
+append-only cache workflow and rerun the live-vault dry-run. If the canary still
+returns an empty provider response, provider error, or date mismatch, keep the
+row review-gated and document the safe reason category without applying a
+previous-business-day substitute.
+
 ## REC-EX-01 Review-Gated Exception State
 
 After reviewed same-date Eximbank candidates are promoted into the private FX
@@ -286,14 +295,21 @@ Interpret the post-promotion state this way:
 
 - Promoted cache rows can support official KRW conversion only for their exact
   date, currency, and use-case keys.
-- A remaining Eximbank empty same-date response for a non-business-day or
-  holiday-like date is `official_fx_unavailable_non_business_day`.
+- A remaining Eximbank empty same-date response for a reviewed non-business-day
+  or holiday-like date is `official_fx_unavailable_non_business_day`.
+- A regular-business-day date that succeeds on single-date retry should be
+  promoted as a normal same-date candidate, not left in the unavailable bucket.
 - This state is not `resolved by provenance`; it remains a review-gated
   exception because no same-date official FX row exists.
 - Do not substitute the previous business day, do not forward-fill, and do not
   apply today's rate.
 - Do not close REC-EX-01 automatically. Keep REC-EX-01 Group A accepted as
   review-gated unless a separate human decision changes the QA closure state.
+
+Current closeout example: after the 2026-05-22 regular-business-day retry was
+confirmed by Eximbank and promoted append-only, live processed output retained
+8 FX requirement rows. Those remaining rows stay review-gated official-FX-
+unavailable exceptions until a separate operator decision changes that state.
 
 QA exception wording should preserve the same distinction. Generic `fx_missing`
 rows mean same-date FX/KRW provenance is not accepted for official KRW totals.
