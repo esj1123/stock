@@ -6173,8 +6173,8 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "현재 보유분 평가금액" in content
     assert "현재 보유분 미실현손익" in content
     assert "현재 보유분 평가수익률" in content
-    assert "전체 누적손익" in content
-    assert "전체 누적수익률" in content
+    assert "단순 누적손익 (KRW)" in content
+    assert "단순 누적수익률" in content
     assert "KRW 환산 가능 배당/이자/분배금" in content
     assert '<span class="stock-kpi-label">KRW 환산 가능 배당/이자/분배금</span><strong>150</strong>' in content
     assert '<span class="stock-kpi-label">USD 배당</span><strong>175 USD</strong>' in content
@@ -6190,8 +6190,9 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "profit_result_status=preliminary" in content
     assert "<strong>1,500</strong>" in content
     assert "<strong>1,810</strong>" in content
-    assert '<span class="stock-kpi-label">전체 누적손익</span><strong>310</strong>' in content
-    assert '<span class="stock-kpi-label">전체 누적수익률</span><strong>20.67%</strong>' in content
+    assert '<span class="stock-kpi-label">단순 누적손익 (KRW)</span><strong>310</strong>' in content
+    assert '<span class="stock-kpi-label">단순 누적수익률</span><strong>20.67%</strong>' in content
+    assert '<span class="stock-kpi-label">설명되지 않은 차이 (KRW)</span><strong>-135</strong>' in content
     assert "<strong>-135</strong>" in content
 
 
@@ -6376,14 +6377,20 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
         {"metric": "holding_count", "value": "2"},
         {"metric": "total_cost", "value": "1500"},
         {"metric": "total_portfolio_value", "value": "1800"},
+        {"metric": "total_unrealized_pnl", "value": "300"},
+        {"metric": "pnl_pct", "value": "20"},
         {"metric": "total_portfolio_value_status", "value": "available"},
         {"metric": "balance_data_available", "value": "True"},
     ]).to_csv(processed / "portfolio_summary.csv", index=False)
     pd.DataFrame(valid_reconciliation_summary_rows(
         total_assets_krw="",
         total_assets_status="fx_missing",
+        net_external_principal_krw="1500",
         total_return_krw="",
         total_return_status="fx_missing",
+        unrealized_pnl_krw="",
+        realized_pnl_krw="",
+        realized_pnl_status="unit_ambiguous",
         residual_krw="",
         residual_status="unavailable",
         fx_missing_row_count="1",
@@ -6392,6 +6399,10 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
         {"ticker": "AAA", "security_name": "AAA", "account_type": "ISA", "asset_type": "stock", "currency": "KRW", "currency_native": "KRW", "evaluation_amount": 1000, "evaluation_amount_krw": 1000, "unrealized_pnl": 100, "pnl_pct": 11.11, "weight_pct": 55.56},
         {"ticker": "AAPL", "security_name": "Apple", "account_type": "overseas", "asset_type": "stock", "currency": "USD", "currency_native": "USD", "evaluation_amount": 100, "evaluation_amount_krw": "", "amount_review_status": "fx_missing", "weight_pct": 44.44},
     ]).to_csv(processed / "processed_holdings.csv", index=False)
+    pd.DataFrame([
+        {"realized_trade_pnl_gross_krw": "50", "realized_trade_pnl_net_krw": "45", "amount_review_status": "ok"},
+        {"realized_trade_pnl_gross_krw": "", "realized_trade_pnl_net_krw": "", "amount_review_status": "fx_missing"},
+    ], columns=REALIZED_PNL_OUTPUT_COLUMNS).to_csv(processed / "processed_realized_pnl.csv", index=False)
 
     content = dashboard_content("Portfolio.md", processed)
 
@@ -6399,9 +6410,19 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "fx_missing" in content
     assert "성과 상태" in content
     assert "not official" in content
-    assert "<strong>1800</strong>" not in content
-    assert "<strong>1500</strong>" not in content
-    assert "<strong>-</strong>" in content
+    assert "Portfolio cards show display subtotals" in content
+    assert "display subtotal; official status shown separately" in content
+    assert "not TWR/MWR" in content
+    assert "단순 누적손익 (KRW)" in content
+    assert "실현손익 상태" in content
+    assert "unit_ambiguous" in content
+    assert "KRW available subtotal; gated rows excluded" not in content
+    assert '<span class="stock-kpi-label">실현손익 (KRW)</span>' not in content
+    assert "설명되지 않은 차이" not in content
+    assert "<strong>1,800</strong>" in content
+    assert "<strong>1,500</strong>" in content
+    assert "<strong>300</strong>" in content
+    assert "<strong>20%</strong>" in content
     assert "## Normalized Currency Exposure" in content
     assert "| USD | 1 |  | 1 | 44.44% |" in content
 

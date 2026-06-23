@@ -283,12 +283,6 @@ def status_is_available(status: Any) -> bool:
     return str(status or "").strip().lower() == "available"
 
 
-def official_kpi_value(status: Any, value: Any, default: str = "-") -> Any:
-    if not status_is_available(status):
-        return default
-    return value if markdown_cell(value) else default
-
-
 def number_value(value: Any, default: float = 0.0) -> float:
     if value is None:
         return default
@@ -312,6 +306,29 @@ def metric_sum(summary: pd.DataFrame, metrics: list[str], default: str = "-") ->
     if any(value is None for value in values):
         return default
     return round(sum(value for value in values if value is not None), 6)
+
+
+def first_display_value(*values: Any, default: str = "-") -> Any:
+    for value in values:
+        if markdown_cell(value):
+            return value
+    return default
+
+
+def display_difference(left: Any, right: Any, default: str = "-") -> Any:
+    left_value = optional_number_value(left)
+    right_value = optional_number_value(right)
+    if left_value is None or right_value is None:
+        return default
+    return round(left_value - right_value, 6)
+
+
+def display_ratio_pct(numerator: Any, denominator: Any, default: str = "-") -> Any:
+    numerator_value = optional_number_value(numerator)
+    denominator_value = optional_number_value(denominator)
+    if numerator_value is None or denominator_value in {None, 0}:
+        return default
+    return round(numerator_value / denominator_value * 100, 6)
 
 
 def percent_bar(value: Any, width: int = 20) -> str:
@@ -555,43 +572,81 @@ def portfolio_content(
     value_status = metric(summary, "total_portfolio_value_status", "unknown")
     unit_value_status = metric(reconciliation, "total_assets_status", value_status)
     total_return_status = metric(performance_summary, "performance_status", metric(reconciliation, "total_return_status", metric(summary, "reconciliation_status", RECONCILIATION_STATUS)))
+    realized_pnl_status = metric(performance_summary, "realized_pnl_status", metric(reconciliation, "realized_pnl_status", "unavailable"))
+    residual_status = metric(reconciliation, "residual_status", "unavailable")
     profit_status = metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)
     reconciliation_status = metric(summary, "reconciliation_status", RECONCILIATION_STATUS)
-    legacy_value_fallback = metric(summary, "total_portfolio_value", "-") if reconciliation.empty and performance_summary.empty else "-"
-    current_value_status = unit_value_status if not reconciliation.empty else value_status
-    current_total_assets_value = official_kpi_value(
-        unit_value_status,
-        metric(performance_summary, "current_total_assets_krw", metric(reconciliation, "total_assets_krw", legacy_value_fallback)),
+    current_total_assets_value = first_display_value(
+        metric(performance_summary, "current_total_assets_krw"),
+        metric(reconciliation, "total_assets_krw"),
+        metric(summary, "total_portfolio_value"),
     )
-    unrealized_pnl_value = official_kpi_value(
-        unit_value_status,
-        metric(performance_summary, "unrealized_pnl_krw", metric(reconciliation, "unrealized_pnl_krw", metric(summary, "total_unrealized_pnl", "-") if reconciliation.empty and performance_summary.empty else "-")),
+    net_principal_value = first_display_value(
+        metric(performance_summary, "net_external_principal_krw"),
+        metric(reconciliation, "net_external_principal_krw"),
     )
-    holdings_cost_value = official_kpi_value(current_value_status, metric(summary, "total_cost", "-"))
-    holdings_value = official_kpi_value(current_value_status, metric(summary, "total_portfolio_value", "-"))
-    holdings_unrealized_value = official_kpi_value(current_value_status, metric(summary, "total_unrealized_pnl", "-"))
-    holdings_return_value = official_kpi_value(current_value_status, metric(summary, "pnl_pct", "-"))
+    cumulative_return_value = first_display_value(
+        metric(performance_summary, "cumulative_return_krw"),
+        metric(reconciliation, "total_return_krw"),
+        display_difference(current_total_assets_value, net_principal_value),
+    )
+    cumulative_return_pct_value = first_display_value(
+        metric(performance_summary, "cumulative_return_pct"),
+        metric(reconciliation, "total_return_pct"),
+        display_ratio_pct(cumulative_return_value, net_principal_value),
+    )
+    realized_pnl_value = "-"
+    if status_is_available(realized_pnl_status):
+        realized_pnl_value = first_display_value(
+            metric(performance_summary, "realized_trade_pnl_gross_krw"),
+            metric(reconciliation, "realized_pnl_krw"),
+        )
+    unrealized_pnl_value = first_display_value(
+        metric(performance_summary, "unrealized_pnl_krw"),
+        metric(reconciliation, "unrealized_pnl_krw"),
+        metric(summary, "total_unrealized_pnl"),
+    )
+    income_total_value = metric(
+        performance_summary,
+        "income_total_krw",
+        metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"]),
+    )
+    expense_total_value = metric_sum(
+        performance_summary,
+        ["fee_expense_krw", "tax_expense_krw"],
+        metric_sum(reconciliation, ["fee_expense_krw", "tax_expense_krw"]),
+    )
+    residual_value = "-"
+    if status_is_available(residual_status):
+        residual_value = first_display_value(
+            metric(performance_summary, "reconciliation_residual_krw"),
+            metric(reconciliation, "residual_krw"),
+        )
+    holdings_cost_value = first_display_value(metric(summary, "total_cost"))
+    holdings_value = first_display_value(metric(summary, "total_portfolio_value"))
+    holdings_unrealized_value = first_display_value(metric(summary, "total_unrealized_pnl"))
+    holdings_return_value = first_display_value(metric(summary, "pnl_pct"))
     usd_dividend_native = native_amount_label(income_summary_native_total(income_summary, "dividend", "USD"), "USD")
     income_fx_missing_rows = plain_number_text(income_summary_field_total(income_summary, "fx_missing_row_count"))
     fx_requirement_rows = plain_number_text(len(fx_requirements))
+    performance_cards = [
+        snapshot_card("순투입원금 (KRW)", net_principal_value, "external deposits - withdrawals"),
+        snapshot_card("현재 총자산 (KRW)", current_total_assets_value, "display subtotal; official status shown separately"),
+        snapshot_card("단순 누적손익 (KRW)", cumulative_return_value, "current total assets - net principal; not TWR/MWR"),
+        snapshot_card("단순 누적수익률", cumulative_return_pct_value, "simple PnL / net principal; not TWR/MWR"),
+        snapshot_card("미실현손익 (KRW)", unrealized_pnl_value, "current holdings unrealized PnL"),
+        snapshot_card("KRW 환산 가능 배당/이자/분배금", income_total_value, "recognized official KRW rows only"),
+        snapshot_card("USD 배당", usd_dividend_native, "native USD dividend rows; not KRW converted"),
+        snapshot_card("수수료/세금 (KRW)", expense_total_value, "fee + tax expenses"),
+    ]
+    if status_is_available(realized_pnl_status):
+        performance_cards.append(snapshot_card("실현손익 (KRW)", realized_pnl_value, "official closed-position realized PnL"))
+    if status_is_available(residual_status):
+        performance_cards.append(snapshot_card("설명되지 않은 차이 (KRW)", residual_value, "official total PnL - explained profit"))
     performance = [
         "## 전체 투자 성과",
         '<div class="stock-kpi-grid">',
-        snapshot_card("순투입원금", metric(performance_summary, "net_external_principal_krw", metric(reconciliation, "net_external_principal_krw", "-")), "external deposits - withdrawals"),
-        snapshot_card("현재 총자산", current_total_assets_value, "current cash + current holdings"),
-        snapshot_card("전체 누적손익", metric(performance_summary, "cumulative_return_krw", metric(reconciliation, "total_return_krw", "-")), "current assets - net principal"),
-        snapshot_card("전체 누적수익률", metric(performance_summary, "cumulative_return_pct", metric(reconciliation, "total_return_pct", "-")), "cumulative PnL / net principal"),
-        snapshot_card("실현손익", metric(performance_summary, "realized_trade_pnl_gross_krw", metric(reconciliation, "realized_pnl_krw", "-")), "realized ledger gross PnL"),
-        snapshot_card("미실현손익", unrealized_pnl_value, "current holdings unrealized PnL"),
-        snapshot_card("KRW 환산 가능 배당/이자/분배금", metric(performance_summary, "income_total_krw", metric_sum(reconciliation, ["dividend_income_krw", "interest_income_krw", "distribution_income_krw"])), "recognized official KRW rows only"),
-        snapshot_card("USD 배당", usd_dividend_native, "native USD dividend rows; not KRW converted"),
-        snapshot_card("FX 미해결 income row", income_fx_missing_rows),
-        snapshot_card("FX coverage", income_fx_coverage_text(income_summary, fx_requirements), "broker KRW > broker raw FX > local fx_rates.csv > API cached"),
-        snapshot_card("FX requirements", fx_requirement_rows),
-        snapshot_card("현금성 수익 상태", income_summary_status_text(income_summary)),
-        snapshot_card("수수료/세금", metric_sum(performance_summary, ["fee_expense_krw", "tax_expense_krw"], metric_sum(reconciliation, ["fee_expense_krw", "tax_expense_krw"]))),
-        snapshot_card("설명되지 않은 차이", metric(performance_summary, "reconciliation_residual_krw", metric(reconciliation, "residual_krw", "-")), "total PnL - explained profit"),
-        snapshot_card("성과 상태", total_return_status),
+        *performance_cards,
         "</div>",
     ]
     current_position_snapshot = [
@@ -602,25 +657,43 @@ def portfolio_content(
         snapshot_card("현재 보유분 평가금액", holdings_value),
         snapshot_card("현재 보유분 미실현손익", holdings_unrealized_value, "current holdings only"),
         snapshot_card("현재 보유분 평가수익률", holdings_return_value, "current holdings pnl_pct"),
+        "</div>",
+    ]
+    review_status_snapshot = [
+        "## 검토/상태",
+        '<div class="stock-kpi-grid">',
+        snapshot_card("FX requirements", fx_requirement_rows),
+        snapshot_card("FX coverage", income_fx_coverage_text(income_summary, fx_requirements), "broker KRW > broker raw FX > local fx_rates.csv > API cached"),
+        snapshot_card("FX 미해결 income row", income_fx_missing_rows),
+        snapshot_card("현금성 수익 상태", income_summary_status_text(income_summary)),
+        snapshot_card("실현손익 상태", realized_pnl_status),
+        snapshot_card("성과 상태", total_return_status),
         snapshot_card("수익 집계 상태", profit_status),
         snapshot_card("대사 상태", reconciliation_status),
         snapshot_card("현재 총자산 상태", unit_value_status),
+        snapshot_card("Value Status", value_status),
+        "</div>",
+    ]
+    risk_shortcuts = [
+        "## 리스크 바로가기",
+        '<div class="stock-kpi-grid">',
         snapshot_card("Loss Review", metric(summary, "loss_review_required_count", "0"), "candidate count"),
         snapshot_card("Leveraged ETF", metric(summary, "leveraged_etf_count", "0")),
         snapshot_card("Largest Position", largest_position_label(holdings)),
-        snapshot_card("Value Status", value_status),
         "</div>",
     ]
     parts.append("\n".join(performance))
     parts.append(performance_history_section(performance_history))
     parts.append("\n".join(current_position_snapshot))
+    parts.append("\n".join(review_status_snapshot))
+    parts.append("\n".join(risk_shortcuts))
     if value_status.lower() == "unknown":
         parts.append("> [!warning] Portfolio value status\n> Total portfolio value status is `unknown`. Add current balance files before relying on value-based summaries.")
     if unit_value_status.lower() != "available" or total_return_status.lower() != "available":
         parts.append(
             "> [!warning] Unit-aware reconciliation not official\n"
             f"> Total assets status is `{markdown_cell(unit_value_status)}` and total return status is `{markdown_cell(total_return_status)}`. "
-            "Portfolio value and return are not official until FX, currency, and unit review gates are cleared."
+            "Portfolio cards show display subtotals, but official value and return remain gated until FX, currency, and unit review gates are cleared."
         )
     data_warning = metric(summary, "data_quality_warning")
     if data_warning:
