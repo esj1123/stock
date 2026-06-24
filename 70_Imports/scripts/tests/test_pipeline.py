@@ -6168,6 +6168,7 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "today-rate backfill" in content
     assert "## 전체 투자 성과" in content
     assert "## 현재 보유분" in content
+    assert "## 원금/원가 브릿지" in content
     assert "현재 보유분 원가" in content
     assert "current holdings cost basis; not net external principal" in content
     assert "현재 보유분 평가금액" in content
@@ -6175,6 +6176,10 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "현재 보유분 평가수익률" in content
     assert "단순 누적손익 (KRW)" in content
     assert "단순 누적수익률" in content
+    assert "현재 총자산 (KRW)" in content
+    assert "인식된 현금 (KRW)" in content
+    assert "원금/보유원가 차이 (KRW)" in content
+    assert "not cash and is not confirmed realized profit" in content
     assert "KRW 환산 가능 배당/이자/분배금" in content
     assert '<span class="stock-kpi-label">KRW 환산 가능 배당/이자/분배금</span><strong>150</strong>' in content
     assert '<span class="stock-kpi-label">USD 배당</span><strong>175 USD</strong>' in content
@@ -6192,6 +6197,8 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "<strong>1,810</strong>" in content
     assert '<span class="stock-kpi-label">단순 누적손익 (KRW)</span><strong>310</strong>' in content
     assert '<span class="stock-kpi-label">단순 누적수익률</span><strong>20.67%</strong>' in content
+    assert '<span class="stock-kpi-label">인식된 현금 (KRW)</span><strong>10</strong>' in content
+    assert '<span class="stock-kpi-label">원금/보유원가 차이 (KRW)</span><strong>0</strong>' in content
     assert '<span class="stock-kpi-label">설명되지 않은 차이 (KRW)</span><strong>-135</strong>' in content
     assert "<strong>-135</strong>" in content
 
@@ -6385,6 +6392,7 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     pd.DataFrame(valid_reconciliation_summary_rows(
         total_assets_krw="",
         total_assets_status="fx_missing",
+        current_cash_krw="0",
         net_external_principal_krw="1500",
         total_return_krw="",
         total_return_status="fx_missing",
@@ -6411,9 +6419,13 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "성과 상태" in content
     assert "not official" in content
     assert "Portfolio cards show display subtotals" in content
-    assert "display subtotal; official status shown separately" in content
+    assert "현재 평가금액 (보유분 기준)" in content
+    assert "current holdings valuation fallback; recognized cash shown separately" in content
     assert "not TWR/MWR" in content
     assert "단순 누적손익 (KRW)" in content
+    assert "원금/원가 브릿지" in content
+    assert "원금/보유원가 차이 (KRW)" in content
+    assert '<span class="stock-kpi-label">인식된 현금 (KRW)</span><strong>0</strong>' in content
     assert "실현손익 상태" in content
     assert "unit_ambiguous" in content
     assert "KRW available subtotal; gated rows excluded" not in content

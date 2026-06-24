@@ -331,6 +331,21 @@ def display_ratio_pct(numerator: Any, denominator: Any, default: str = "-") -> A
     return round(numerator_value / denominator_value * 100, 6)
 
 
+def holdings_cash_krw(holdings: pd.DataFrame) -> Any:
+    if holdings.empty or "asset_type" not in holdings.columns:
+        return "-"
+    cash = holdings[holdings["asset_type"].fillna("").astype(str).str.lower() == "cash"]
+    if cash.empty:
+        return 0
+    for column in ["evaluation_amount_krw", "amount_krw", "market_value_krw", "balance_krw"]:
+        if column not in cash.columns:
+            continue
+        values = [optional_number_value(value) for value in cash[column]]
+        if any(value is not None for value in values):
+            return round(sum(value for value in values if value is not None), 6)
+    return "-"
+
+
 def percent_bar(value: Any, width: int = 20) -> str:
     pct = max(0.0, min(100.0, number_value(value)))
     filled = int(round(pct / 100 * width))
@@ -576,10 +591,20 @@ def portfolio_content(
     residual_status = metric(reconciliation, "residual_status", "unavailable")
     profit_status = metric(summary, "profit_result_status", PROFIT_RESULT_STATUS)
     reconciliation_status = metric(summary, "reconciliation_status", RECONCILIATION_STATUS)
-    current_total_assets_value = first_display_value(
+    official_current_total_assets_value = first_display_value(
         metric(performance_summary, "current_total_assets_krw"),
         metric(reconciliation, "total_assets_krw"),
+    )
+    current_total_assets_value = first_display_value(
+        official_current_total_assets_value,
         metric(summary, "total_portfolio_value"),
+    )
+    current_total_assets_is_official = status_is_available(unit_value_status) and bool(markdown_cell(official_current_total_assets_value))
+    current_total_assets_label = "현재 총자산 (KRW)" if current_total_assets_is_official else "현재 평가금액 (보유분 기준)"
+    current_total_assets_hint = (
+        "cash + current holdings; official status available"
+        if current_total_assets_is_official
+        else "current holdings valuation fallback; recognized cash shown separately"
     )
     net_principal_value = first_display_value(
         metric(performance_summary, "net_external_principal_krw"),
@@ -626,13 +651,20 @@ def portfolio_content(
     holdings_value = first_display_value(metric(summary, "total_portfolio_value"))
     holdings_unrealized_value = first_display_value(metric(summary, "total_unrealized_pnl"))
     holdings_return_value = first_display_value(metric(summary, "pnl_pct"))
+    recognized_cash_value = first_display_value(
+        metric(performance_summary, "current_cash_krw"),
+        metric(reconciliation, "current_cash_krw"),
+        holdings_cash_krw(holdings),
+    )
+    principal_cost_gap_value = display_difference(net_principal_value, holdings_cost_value)
     usd_dividend_native = native_amount_label(income_summary_native_total(income_summary, "dividend", "USD"), "USD")
     income_fx_missing_rows = plain_number_text(income_summary_field_total(income_summary, "fx_missing_row_count"))
     fx_requirement_rows = plain_number_text(len(fx_requirements))
     performance_cards = [
         snapshot_card("순투입원금 (KRW)", net_principal_value, "external deposits - withdrawals"),
-        snapshot_card("현재 총자산 (KRW)", current_total_assets_value, "display subtotal; official status shown separately"),
-        snapshot_card("단순 누적손익 (KRW)", cumulative_return_value, "current total assets - net principal; not TWR/MWR"),
+        snapshot_card(current_total_assets_label, current_total_assets_value, current_total_assets_hint),
+        snapshot_card("인식된 현금 (KRW)", recognized_cash_value, "cash recognized in current cash or holdings rows"),
+        snapshot_card("단순 누적손익 (KRW)", cumulative_return_value, "display value - net principal; not TWR/MWR"),
         snapshot_card("단순 누적수익률", cumulative_return_pct_value, "simple PnL / net principal; not TWR/MWR"),
         snapshot_card("미실현손익 (KRW)", unrealized_pnl_value, "current holdings unrealized PnL"),
         snapshot_card("KRW 환산 가능 배당/이자/분배금", income_total_value, "recognized official KRW rows only"),
@@ -658,6 +690,18 @@ def portfolio_content(
         snapshot_card("현재 보유분 미실현손익", holdings_unrealized_value, "current holdings only"),
         snapshot_card("현재 보유분 평가수익률", holdings_return_value, "current holdings pnl_pct"),
         "</div>",
+    ]
+    principal_cost_bridge = [
+        "## 원금/원가 브릿지",
+        '<div class="stock-kpi-grid">',
+        snapshot_card("순투입원금 (KRW)", net_principal_value, "external deposits - withdrawals"),
+        snapshot_card("현재 보유분 원가 (KRW)", holdings_cost_value, "current holdings cost basis"),
+        snapshot_card("원금/보유원가 차이 (KRW)", principal_cost_gap_value, "review bridge; not cash or confirmed profit"),
+        snapshot_card("인식된 현금 (KRW)", recognized_cash_value, "recognized current cash only"),
+        "</div>",
+        "> [!note] Principal/cost bridge\n"
+        "> The principal/cost gap is not cash and is not confirmed realized profit. "
+        "It is a review bridge across external flows, current cost basis, cash, income, expenses, realized PnL, and pending FX/unit gates.",
     ]
     review_status_snapshot = [
         "## 검토/상태",
@@ -685,6 +729,7 @@ def portfolio_content(
     parts.append("\n".join(performance))
     parts.append(performance_history_section(performance_history))
     parts.append("\n".join(current_position_snapshot))
+    parts.append("\n".join(principal_cost_bridge))
     parts.append("\n".join(review_status_snapshot))
     parts.append("\n".join(risk_shortcuts))
     if value_status.lower() == "unknown":
