@@ -2390,6 +2390,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     unit_mismatch = read_csv(processed_dir / "unit_mismatch_audit.csv")
     qa_rollup = read_csv(processed_dir / "qa_exception_rollup.csv")
     warning = balance_data_warning(summary)
+    fx_review_note = fx_review_gate_note(fx_requirements, fx_unavailable_exceptions)
 
     if name == "Portfolio.md":
         return portfolio_content(
@@ -2416,11 +2417,11 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Risk_Watchlist.md":
         return "\n".join([warning, risk_watchlist_cards(risk)]).strip()
     if name == "Review_Queue.md":
-        return "\n".join([warning, review_queue_cards(review)]).strip()
+        return "\n\n".join([part for part in [warning, fx_review_note, review_queue_cards(review)] if part]).strip()
     if name == "History_Queue.md":
         return history_queue_cards(history)
     if name == "QA_Exceptions.md":
-        return qa_exception_cards(qa, qa_rollup)
+        return "\n\n".join([part for part in [fx_review_note, qa_exception_cards(qa, qa_rollup)] if part]).strip()
     return "_Unsupported dashboard._"
 
 

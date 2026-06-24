@@ -6522,6 +6522,54 @@ def test_portfolio_dashboard_summarizes_reviewed_fx_unavailable_exceptions(tmp_p
     assert "reviewed official-FX-unavailable keys `1`; unreviewed keys `1`" in reconciliation_content_text
 
 
+def test_qa_and_review_dashboards_summarize_reviewed_fx_unavailable_exceptions(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    cache = tmp_path / "70_Imports" / "cache"
+    processed.mkdir(parents=True)
+    cache.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "event_date": "2026-01-02",
+            "currency": "USD",
+            "use_case": "income_dividend",
+            "row_count": "1",
+            "amount_native_sum": "",
+            "missing_reason": "same-date FX/KRW provenance required",
+            "source_file_type": "income",
+            "status": "fx_missing",
+        },
+    ], columns=FX_RATE_REQUIREMENT_COLUMNS).to_csv(processed / "fx_rate_requirements.csv", index=False)
+    pd.DataFrame([
+        {
+            "requirement_key": "2026-01-02|USD|income_dividend",
+            "decision": "still_review_gated",
+            "reason_code": "official_fx_unavailable_same_date",
+            "operator_review_label": "official_fx_unavailable_non_business_day",
+            "provider": "eximbank",
+        },
+    ]).to_csv(cache / "fx_unavailable_exceptions.csv", index=False)
+    qa = synthetic_rec_ex_01_rollup_rows()
+    qa.to_csv(processed / "qa_exceptions.csv", index=False)
+    build_qa_exception_rollup(qa).to_csv(processed / "qa_exception_rollup.csv", index=False)
+    pd.DataFrame([
+        {
+            "severity": "blocking",
+            "reason": "FX provenance review gate",
+            "suggested_action": "Review same-date FX provenance.",
+        },
+    ]).to_csv(processed / "review_queue.csv", index=False)
+
+    qa_content = dashboard_content("QA_Exceptions.md", processed)
+    review_content = dashboard_content("Review_Queue.md", processed)
+
+    for content in [qa_content, review_content]:
+        assert "Remaining FX requirements: `1`" in content
+        assert "reviewed official-FX-unavailable keys `1`; unreviewed keys `0`" in content
+        assert "not FX rate provenance, archive promotion, or REC closure" in content
+    assert "## Rollup Summary" in qa_content
+    assert "## Reason summary" in review_content
+
+
 
 def test_deduplicate_overlapping_transaction_rows(tmp_path: Path):
     vault = tmp_path
@@ -6879,6 +6927,49 @@ def test_run_qa_writes_qa_exception_rollup_when_not_dry_run(tmp_path: Path):
     rollup = pd.read_csv(rollup_path)
     assert list(rollup.columns) == QA_EXCEPTION_ROLLUP_COLUMNS
     assert int(rollup["displayed_finding_count"].sum()) == len(qa)
+
+
+def test_run_qa_preserves_reviewed_fx_unavailable_note_when_rewriting_qa_dashboard(tmp_path: Path):
+    vault = tmp_path
+    processed = vault / "70_Imports" / "processed"
+    cache = vault / "70_Imports" / "cache"
+    dashboard = vault / "10_Dashboard" / "QA_Exceptions.md"
+    write_rollup_output_qa_inputs(processed)
+    cache.mkdir(parents=True)
+    dashboard.parent.mkdir(parents=True)
+    dashboard.write_text(
+        f"# QA\n\n{AUTO_START}\nold\n{AUTO_END}\n",
+        encoding="utf-8",
+    )
+    pd.DataFrame([
+        {
+            "event_date": "2026-01-02",
+            "currency": "USD",
+            "use_case": "income_dividend",
+            "row_count": "1",
+            "amount_native_sum": "",
+            "missing_reason": "same-date FX/KRW provenance required",
+            "source_file_type": "income",
+            "status": "fx_missing",
+        },
+    ], columns=FX_RATE_REQUIREMENT_COLUMNS).to_csv(processed / "fx_rate_requirements.csv", index=False)
+    pd.DataFrame([
+        {
+            "requirement_key": "2026-01-02|USD|income_dividend",
+            "decision": "still_review_gated",
+            "reason_code": "official_fx_unavailable_same_date",
+            "operator_review_label": "official_fx_unavailable_non_business_day",
+            "provider": "eximbank",
+        },
+    ]).to_csv(cache / "fx_unavailable_exceptions.csv", index=False)
+
+    run_qa(vault, processed, dry_run=False)
+
+    content = dashboard.read_text(encoding="utf-8")
+    assert "Remaining FX requirements: `1`" in content
+    assert "reviewed official-FX-unavailable keys `1`; unreviewed keys `0`" in content
+    assert "not FX rate provenance, archive promotion, or REC closure" in content
+    assert "## Rollup Summary" in content
 
 
 def test_run_qa_dry_run_does_not_write_qa_exception_rollup(tmp_path: Path):
