@@ -6566,6 +6566,10 @@ def test_qa_and_review_dashboards_summarize_reviewed_fx_unavailable_exceptions(t
         assert "Remaining FX requirements: `1`" in content
         assert "reviewed official-FX-unavailable keys `1`; unreviewed keys `0`" in content
         assert "not FX rate provenance, archive promotion, or REC closure" in content
+    assert "REC-EX-01 row-level findings remain blocking by policy" in qa_content
+    assert "unreviewed FX requirement keys are `0`, not that row-level REC findings are closed" in qa_content
+    assert qa_content.index("REC-EX-01 row-level context") < qa_content.index("## Exception Summary")
+    assert "REC-EX-01 row-level context" not in review_content
     assert "## Rollup Summary" in qa_content
     assert "## Reason summary" in review_content
 
@@ -6969,6 +6973,9 @@ def test_run_qa_preserves_reviewed_fx_unavailable_note_when_rewriting_qa_dashboa
     assert "Remaining FX requirements: `1`" in content
     assert "reviewed official-FX-unavailable keys `1`; unreviewed keys `0`" in content
     assert "not FX rate provenance, archive promotion, or REC closure" in content
+    assert "REC-EX-01 row-level findings remain blocking by policy" in content
+    assert "unreviewed FX requirement keys are `0`, not that row-level REC findings are closed" in content
+    assert content.index("REC-EX-01 row-level context") < content.index("## Exception Summary")
     assert "## Rollup Summary" in content
 
 

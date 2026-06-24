@@ -626,6 +626,32 @@ def fx_review_gate_note(
     return "\n".join(lines)
 
 
+def qa_fx_review_bridge_note(
+    qa: pd.DataFrame | None = None,
+    fx_requirements: pd.DataFrame | None = None,
+    fx_unavailable_exceptions: pd.DataFrame | None = None,
+) -> str:
+    qa = qa if qa is not None else pd.DataFrame()
+    fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
+    if qa.empty or fx_requirements.empty or "exception_id" not in qa.columns:
+        return ""
+    rec_ex_01_rows = int(qa["exception_id"].fillna("").astype(str).eq("REC-EX-01").sum())
+    if rec_ex_01_rows <= 0:
+        return ""
+    current_keys = fx_requirement_key_set(fx_requirements)
+    reviewed_unavailable = reviewed_fx_unavailable_keys(fx_requirements, fx_unavailable_exceptions)
+    if not reviewed_unavailable:
+        return ""
+    unreviewed_count = max(len(current_keys) - len(reviewed_unavailable), 0)
+    return "\n".join([
+        "> [!note] REC-EX-01 row-level context",
+        "> REC-EX-01 row-level findings remain blocking by policy. "
+        f"The reviewed official-FX-unavailable keys above mean unreviewed FX requirement keys are `{unreviewed_count}`, "
+        "not that row-level REC findings are closed.",
+        "> These rows remain review-gated exceptions until a separate REC closure decision.",
+    ])
+
+
 def portfolio_content(
     summary: pd.DataFrame,
     holdings: pd.DataFrame,
@@ -1281,15 +1307,16 @@ def qa_exception_rollup_summary(rollup: pd.DataFrame | None) -> str:
     ])
 
 
-def qa_exception_cards(qa: pd.DataFrame, rollup: pd.DataFrame | None = None) -> str:
+def qa_exception_cards(qa: pd.DataFrame, rollup: pd.DataFrame | None = None, context_note: str = "") -> str:
     if qa.empty:
-        return "\n\n".join([
+        return "\n\n".join(part for part in [
             queue_snapshot(pd.DataFrame(columns=["severity"]), "QA Exceptions"),
+            context_note,
             "## Rollup Summary",
             qa_exception_rollup_summary(rollup),
             "## Exception Summary",
             EMPTY_DATA,
-        ])
+        ] if part)
     view = qa.copy()
     view["severity"] = view.get("severity", "").fillna("").astype(str)
     blocking = view[view["severity"].str.lower() == "blocking"]
@@ -1297,6 +1324,7 @@ def qa_exception_cards(qa: pd.DataFrame, rollup: pd.DataFrame | None = None) -> 
     other = view[~view["severity"].str.lower().isin(["blocking", "advisory"])]
     parts = [
         queue_snapshot(view, "QA Exceptions"),
+        context_note,
         "## Exception Summary",
         count_summary_table(view, ["exception_id", "severity"], "exception"),
         "## Rollup Summary",
@@ -2421,7 +2449,8 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "History_Queue.md":
         return history_queue_cards(history)
     if name == "QA_Exceptions.md":
-        return "\n\n".join([part for part in [fx_review_note, qa_exception_cards(qa, qa_rollup)] if part]).strip()
+        qa_fx_bridge_note = qa_fx_review_bridge_note(qa, fx_requirements, fx_unavailable_exceptions)
+        return "\n\n".join([part for part in [fx_review_note, qa_exception_cards(qa, qa_rollup, qa_fx_bridge_note)] if part]).strip()
     return "_Unsupported dashboard._"
 
 
