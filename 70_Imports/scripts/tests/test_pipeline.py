@@ -6197,6 +6197,7 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "<strong>1,810</strong>" in content
     assert '<span class="stock-kpi-label">단순 누적손익 (KRW)</span><strong>310</strong>' in content
     assert '<span class="stock-kpi-label">단순 누적수익률</span><strong>20.67%</strong>' in content
+    assert '<span class="stock-kpi-label">현재 총자산 (KRW)</span><strong>1,810</strong>' in content
     assert '<span class="stock-kpi-label">인식된 현금 (KRW)</span><strong>10</strong>' in content
     assert '<span class="stock-kpi-label">원금/보유원가 차이 (KRW)</span><strong>0</strong>' in content
     assert '<span class="stock-kpi-label">설명되지 않은 차이 (KRW)</span><strong>-135</strong>' in content
@@ -6423,6 +6424,9 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "current holdings valuation fallback; recognized cash shown separately" in content
     assert "not TWR/MWR" in content
     assert "단순 누적손익 (KRW)" in content
+    assert '<span class="stock-kpi-label">현재 평가금액 (보유분 기준)</span><strong>1,800</strong>' in content
+    assert '<span class="stock-kpi-label">단순 누적손익 (KRW)</span><strong>300</strong>' in content
+    assert '<span class="stock-kpi-label">단순 누적수익률</span><strong>20%</strong>' in content
     assert "원금/원가 브릿지" in content
     assert "원금/보유원가 차이 (KRW)" in content
     assert '<span class="stock-kpi-label">인식된 현금 (KRW)</span><strong>0</strong>' in content

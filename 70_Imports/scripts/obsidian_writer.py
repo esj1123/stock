@@ -310,7 +310,8 @@ def metric_sum(summary: pd.DataFrame, metrics: list[str], default: str = "-") ->
 
 def first_display_value(*values: Any, default: str = "-") -> Any:
     for value in values:
-        if markdown_cell(value):
+        text = markdown_cell(value)
+        if text and text != "-":
             return value
     return default
 
@@ -594,6 +595,7 @@ def portfolio_content(
     official_current_total_assets_value = first_display_value(
         metric(performance_summary, "current_total_assets_krw"),
         metric(reconciliation, "total_assets_krw"),
+        default="",
     )
     current_total_assets_value = first_display_value(
         official_current_total_assets_value,
@@ -655,6 +657,7 @@ def portfolio_content(
         metric(performance_summary, "current_cash_krw"),
         metric(reconciliation, "current_cash_krw"),
         holdings_cash_krw(holdings),
+        default=0,
     )
     principal_cost_gap_value = display_difference(net_principal_value, holdings_cost_value)
     usd_dividend_native = native_amount_label(income_summary_native_total(income_summary, "dividend", "USD"), "USD")
