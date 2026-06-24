@@ -542,25 +542,88 @@ def preliminary_reconciliation_warning(summary: pd.DataFrame | None = None) -> s
     ])
 
 
-def fx_review_gate_note(fx_requirements: pd.DataFrame | None = None) -> str:
+def fx_requirement_key(row: pd.Series) -> str:
+    existing = row_text(row, "requirement_key")
+    if existing:
+        return existing
+    event_date = row_text(row, "event_date") or row_text(row, "request_date")
+    currency = row_text(row, "currency") or row_text(row, "base_currency")
+    use_case = row_text(row, "use_case")
+    if not event_date or not currency or not use_case:
+        return ""
+    return f"{event_date}|{currency}|{use_case}"
+
+
+def fx_requirement_key_set(fx_requirements: pd.DataFrame) -> set[str]:
+    if fx_requirements.empty:
+        return set()
+    return {key for _, row in fx_requirements.iterrows() if (key := fx_requirement_key(row))}
+
+
+def is_reviewed_fx_unavailable_exception(row: pd.Series) -> bool:
+    fields = [
+        row_text(row, "reason_code"),
+        row_text(row, "operator_review_label"),
+        row_text(row, "review_label"),
+        row_text(row, "exception_status"),
+        row_text(row, "review_status"),
+        row_text(row, "status"),
+    ]
+    text = " ".join(fields).lower()
+    return "official_fx_unavailable" in text
+
+
+def reviewed_fx_unavailable_keys(
+    fx_requirements: pd.DataFrame,
+    fx_unavailable_exceptions: pd.DataFrame | None = None,
+) -> set[str]:
+    fx_unavailable_exceptions = fx_unavailable_exceptions if fx_unavailable_exceptions is not None else pd.DataFrame()
+    current_keys = fx_requirement_key_set(fx_requirements)
+    if not current_keys or fx_unavailable_exceptions.empty:
+        return set()
+    reviewed = set()
+    for _, row in fx_unavailable_exceptions.iterrows():
+        key = fx_requirement_key(row)
+        if key in current_keys and is_reviewed_fx_unavailable_exception(row):
+            reviewed.add(key)
+    return reviewed
+
+
+def fx_review_gate_note(
+    fx_requirements: pd.DataFrame | None = None,
+    fx_unavailable_exceptions: pd.DataFrame | None = None,
+) -> str:
     fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
     if fx_requirements.empty:
         return ""
     details = []
     use_case_text = status_counts_text(fx_requirements, "use_case")
     status_text = status_counts_text(fx_requirements, "status")
+    current_keys = fx_requirement_key_set(fx_requirements)
+    reviewed_unavailable = reviewed_fx_unavailable_keys(fx_requirements, fx_unavailable_exceptions)
+    unreviewed_count = max(len(current_keys) - len(reviewed_unavailable), 0)
     if use_case_text:
         details.append(f"use_case counts `{markdown_cell(use_case_text)}`")
     if status_text:
         details.append(f"status counts `{markdown_cell(status_text)}`")
+    if reviewed_unavailable:
+        details.append(
+            f"reviewed official-FX-unavailable keys `{len(reviewed_unavailable)}`; "
+            f"unreviewed keys `{unreviewed_count}`"
+        )
     detail_text = f" {'; '.join(details)}." if details else ""
-    return "\n".join([
+    lines = [
         "> [!info] FX review gate",
         f"> Remaining FX requirements: `{len(fx_requirements)}`.{detail_text}",
         "> These rows are same-date FX/KRW provenance review gates, not automatic resolution or unknown closure. "
         "Reviewed non-business-day or holiday-like provider-empty dates stay as official-FX-unavailable review-gated exceptions. "
         "Do not use previous-business-day substitution, forward fill, or today-rate backfill.",
-    ])
+    ]
+    if reviewed_unavailable:
+        lines.append(
+            "> The private exception register is review context only; it is not FX rate provenance, archive promotion, or REC closure."
+        )
+    return "\n".join(lines)
 
 
 def portfolio_content(
@@ -572,17 +635,19 @@ def portfolio_content(
     income_summary: pd.DataFrame | None = None,
     performance_history: pd.DataFrame | None = None,
     fx_requirements: pd.DataFrame | None = None,
+    fx_unavailable_exceptions: pd.DataFrame | None = None,
 ) -> str:
     reconciliation = reconciliation if reconciliation is not None else pd.DataFrame()
     performance_summary = performance_summary if performance_summary is not None else pd.DataFrame()
     income_summary = income_summary if income_summary is not None else pd.DataFrame()
     performance_history = performance_history if performance_history is not None else pd.DataFrame()
     fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
+    fx_unavailable_exceptions = fx_unavailable_exceptions if fx_unavailable_exceptions is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
     parts.append(preliminary_reconciliation_warning(summary))
-    fx_review_note = fx_review_gate_note(fx_requirements)
+    fx_review_note = fx_review_gate_note(fx_requirements, fx_unavailable_exceptions)
     if fx_review_note:
         parts.append(fx_review_note)
     value_status = metric(summary, "total_portfolio_value_status", "unknown")
@@ -663,6 +728,8 @@ def portfolio_content(
     usd_dividend_native = native_amount_label(income_summary_native_total(income_summary, "dividend", "USD"), "USD")
     income_fx_missing_rows = plain_number_text(income_summary_field_total(income_summary, "fx_missing_row_count"))
     fx_requirement_rows = plain_number_text(len(fx_requirements))
+    fx_reviewed_unavailable_count = len(reviewed_fx_unavailable_keys(fx_requirements, fx_unavailable_exceptions))
+    fx_unreviewed_requirement_count = max(len(fx_requirement_key_set(fx_requirements)) - fx_reviewed_unavailable_count, 0)
     performance_cards = [
         snapshot_card("순투입원금 (KRW)", net_principal_value, "external deposits - withdrawals"),
         snapshot_card(current_total_assets_label, current_total_assets_value, current_total_assets_hint),
@@ -710,6 +777,8 @@ def portfolio_content(
         "## 검토/상태",
         '<div class="stock-kpi-grid">',
         snapshot_card("FX requirements", fx_requirement_rows),
+        snapshot_card("FX reviewed unavailable", fx_reviewed_unavailable_count, "official-FX-unavailable review-gated keys"),
+        snapshot_card("FX unreviewed requirements", fx_unreviewed_requirement_count, "same-date FX keys without reviewed exception"),
         snapshot_card("FX coverage", income_fx_coverage_text(income_summary, fx_requirements), "broker KRW > broker raw FX > local fx_rates.csv > API cached"),
         snapshot_card("FX 미해결 income row", income_fx_missing_rows),
         snapshot_card("현금성 수익 상태", income_summary_status_text(income_summary)),
@@ -1767,15 +1836,17 @@ def reconciliation_content(
     summary: pd.DataFrame | None = None,
     realized: pd.DataFrame | None = None,
     fx_requirements: pd.DataFrame | None = None,
+    fx_unavailable_exceptions: pd.DataFrame | None = None,
 ) -> str:
     summary = summary if summary is not None else pd.DataFrame()
     realized = realized if realized is not None else pd.DataFrame()
     fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
+    fx_unavailable_exceptions = fx_unavailable_exceptions if fx_unavailable_exceptions is not None else pd.DataFrame()
     parts = []
     warning = reconciliation_status_warning(reconciliation)
     if warning:
         parts.append(warning)
-    fx_review_note = fx_review_gate_note(fx_requirements)
+    fx_review_note = fx_review_gate_note(fx_requirements, fx_unavailable_exceptions)
     if fx_review_note:
         parts.append(fx_review_note)
     parts.extend([
@@ -2308,6 +2379,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     income = read_csv(processed_dir / "processed_income.csv")
     income_summary = read_csv(processed_dir / "income_summary.csv")
     fx_requirements = read_csv(processed_dir / "fx_rate_requirements.csv")
+    fx_unavailable_exceptions = read_csv(processed_dir.parent / "cache" / "fx_unavailable_exceptions.csv")
     expenses = read_csv(processed_dir / "processed_expenses.csv")
     fx_events = read_csv(processed_dir / "processed_fx_events.csv")
     sources = read_csv(processed_dir / "source_file_index.csv")
@@ -2320,9 +2392,19 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     warning = balance_data_warning(summary)
 
     if name == "Portfolio.md":
-        return portfolio_content(summary, holdings, warning, reconciliation, performance, income_summary, performance_history, fx_requirements)
+        return portfolio_content(
+            summary,
+            holdings,
+            warning,
+            reconciliation,
+            performance,
+            income_summary,
+            performance_history,
+            fx_requirements,
+            fx_unavailable_exceptions,
+        )
     if name == "Reconciliation.md":
-        return reconciliation_content(reconciliation, summary, realized, fx_requirements)
+        return reconciliation_content(reconciliation, summary, realized, fx_requirements, fx_unavailable_exceptions)
     if name == "Companies.md":
         return companies_content(holdings)
     if name == "Exposure.md":

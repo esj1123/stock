@@ -6443,6 +6443,85 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "| USD | 1 |  | 1 | 44.44% |" in content
 
 
+def test_portfolio_dashboard_summarizes_reviewed_fx_unavailable_exceptions(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    cache = tmp_path / "70_Imports" / "cache"
+    processed.mkdir(parents=True)
+    cache.mkdir(parents=True)
+    pd.DataFrame([
+        {"metric": "holding_count", "value": "1"},
+        {"metric": "total_cost", "value": "1000"},
+        {"metric": "total_portfolio_value", "value": "1200"},
+        {"metric": "total_unrealized_pnl", "value": "200"},
+        {"metric": "pnl_pct", "value": "20"},
+        {"metric": "total_portfolio_value_status", "value": "available"},
+        {"metric": "balance_data_available", "value": "True"},
+    ]).to_csv(processed / "portfolio_summary.csv", index=False)
+    pd.DataFrame([
+        {"ticker": "AAA", "security_name": "AAA", "account_type": "ISA", "asset_type": "stock", "currency": "KRW", "evaluation_amount": 1200, "evaluation_amount_krw": 1200, "weight_pct": 100},
+    ]).to_csv(processed / "processed_holdings.csv", index=False)
+    pd.DataFrame(valid_reconciliation_summary_rows(
+        total_assets_krw="",
+        total_assets_status="fx_missing",
+        current_cash_krw="0",
+        net_external_principal_krw="1000",
+        total_return_krw="",
+        total_return_status="fx_missing",
+        residual_status="unavailable",
+        fx_missing_row_count="2",
+    )).to_csv(processed / "reconciliation_summary.csv", index=False)
+    pd.DataFrame(valid_performance_summary_rows(
+        current_total_assets_krw="",
+        current_cash_krw="",
+        net_external_principal_krw="1000",
+        cumulative_return_krw="",
+        cumulative_return_pct="",
+        performance_status="fx_missing",
+    )).to_csv(processed / "performance_summary.csv", index=False)
+    pd.DataFrame([
+        {
+            "event_date": "2026-01-02",
+            "currency": "USD",
+            "use_case": "income_dividend",
+            "row_count": "1",
+            "amount_native_sum": "",
+            "missing_reason": "same-date FX/KRW provenance required",
+            "source_file_type": "income",
+            "status": "fx_missing",
+        },
+        {
+            "event_date": "2026-01-05",
+            "currency": "USD",
+            "use_case": "realized_pnl_trade_settlement",
+            "row_count": "1",
+            "amount_native_sum": "",
+            "missing_reason": "same-date FX/KRW provenance required",
+            "source_file_type": "transaction_history",
+            "status": "fx_missing",
+        },
+    ], columns=FX_RATE_REQUIREMENT_COLUMNS).to_csv(processed / "fx_rate_requirements.csv", index=False)
+    pd.DataFrame([
+        {
+            "requirement_key": "2026-01-02|USD|income_dividend",
+            "decision": "still_review_gated",
+            "reason_code": "official_fx_unavailable_same_date",
+            "operator_review_label": "official_fx_unavailable_non_business_day",
+            "provider": "eximbank",
+        },
+    ]).to_csv(cache / "fx_unavailable_exceptions.csv", index=False)
+
+    content = dashboard_content("Portfolio.md", processed)
+    reconciliation_content_text = dashboard_content("Reconciliation.md", processed)
+
+    assert "Remaining FX requirements: `2`" in content
+    assert "reviewed official-FX-unavailable keys `1`; unreviewed keys `1`" in content
+    assert "The private exception register is review context only" in content
+    assert "not FX rate provenance, archive promotion, or REC closure" in content
+    assert '<span class="stock-kpi-label">FX reviewed unavailable</span><strong>1</strong>' in content
+    assert '<span class="stock-kpi-label">FX unreviewed requirements</span><strong>1</strong>' in content
+    assert "reviewed official-FX-unavailable keys `1`; unreviewed keys `1`" in reconciliation_content_text
+
+
 
 def test_deduplicate_overlapping_transaction_rows(tmp_path: Path):
     vault = tmp_path
