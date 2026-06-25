@@ -2129,8 +2129,18 @@ def quality_gate(vault_root: Path) -> int:
     else:
         write_result(results, "python main.py all --vault-root ../.. --raw-dir ../raw", "FAIL", output.strip())
 
-    pytest_command = [sys.executable, "-m", "pytest", "tests", "-p", "no:cacheprovider"]
-    code, output = run_command(pytest_command, scripts_dir)
+    with tempfile.TemporaryDirectory(prefix="stock_quality_pytest_") as pytest_temp:
+        pytest_command = [
+            sys.executable,
+            "-m",
+            "pytest",
+            "tests",
+            "-p",
+            "no:cacheprovider",
+            "--basetemp",
+            pytest_temp,
+        ]
+        code, output = run_command(pytest_command, scripts_dir)
     if code == 0:
         detail = output.strip().splitlines()[-1] if output.strip() else "pytest completed"
         write_result(results, "pytest", "PASS", detail)
