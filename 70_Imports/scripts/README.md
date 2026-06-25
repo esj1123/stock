@@ -4,13 +4,16 @@
 `70_Imports/raw/`의 NH/NAMUH Excel 파일을 읽어 정규화 CSV와 SQLite DB를 만들고, Obsidian 대시보드/회사 노트를 AUTO-GENERATED 블록 안에서만 갱신합니다.
 
 ## 실행
-```bash
+```powershell
+$VenvDir = Join-Path $env:LOCALAPPDATA "06_Stock\.venv"
+$env:STOCK_PYTEST_TMPDIR = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_cases"
+python -m venv $VenvDir
 cd 70_Imports/scripts
-pip install -r requirements.txt
-python main.py import --vault-root ../.. --raw-dir ../raw --dry-run
-python main.py all --vault-root ../.. --raw-dir ../raw
-python main.py qa --vault-root ../..
-pytest
+& "$VenvDir\Scripts\python.exe" -m pip install -r requirements.txt
+& "$VenvDir\Scripts\python.exe" main.py import --vault-root ../.. --raw-dir ../raw --dry-run
+& "$VenvDir\Scripts\python.exe" main.py all --vault-root ../.. --raw-dir ../raw
+& "$VenvDir\Scripts\python.exe" main.py qa --vault-root ../..
+& "$VenvDir\Scripts\python.exe" -m pytest -p no:cacheprovider --basetemp (Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_pytest")
 ```
 
 Actual writes to the configured live/final vault root or any child path under it are blocked unless the live-write gate flags are supplied:

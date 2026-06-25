@@ -61,11 +61,14 @@ From a clean clone, keep the Python virtual environment outside the repository a
 
 ```powershell
 $VenvDir = Join-Path $env:LOCALAPPDATA "06_Stock\.venv"
+$PytestTmp = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_cases"
+$PytestBaseTmp = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_pytest"
 python -m venv $VenvDir
 & "$VenvDir\Scripts\python.exe" -m pip install -r 70_Imports\scripts\requirements.txt
+$env:STOCK_PYTEST_TMPDIR = $PytestTmp
 cd 70_Imports\scripts
 & "$VenvDir\Scripts\python.exe" main.py --help
-& "$VenvDir\Scripts\python.exe" -m pytest
+& "$VenvDir\Scripts\python.exe" -m pytest -p no:cacheprovider --basetemp $PytestBaseTmp
 ```
 
 On Windows, if `python` resolves to the Microsoft Store alias, use `py -m venv $VenvDir` instead.
@@ -74,6 +77,7 @@ Expected result:
 
 - `main.py --help` prints the CLI usage.
 - `pytest` passes without requiring raw broker files.
+- No repository-local `.venv`, `.pytest_cache`, or `.tmp_pytest_cases` is required or created by the check.
 
 ## Standard Import Entrypoint
 
@@ -138,8 +142,8 @@ Required sequence before any actual live Vault write:
 
 1. Modify and validate the GitHub baseline.
 2. Add/update tests.
-3. Run pytest.
-4. Run `scripts/quality_gate.py`.
+3. Run pytest with the OS-local venv/temp pattern in `Clean Setup Check`; do not run bare `pytest` from the repo root.
+4. Run `scripts/quality_gate.py` using the same OS-local Python environment.
 5. Run live vault dry-run with `--dry-run-evidence-out`.
 6. Review the expected live vault changes and the generated evidence.
 7. Apply actual live vault write only after explicit user intent for the actual write.

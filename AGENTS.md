@@ -56,8 +56,18 @@ Before changing files, read these repository-level contracts in order:
 
 ## Required Checks Before Closeout
 - Review the diff for duplicate symbols, unnecessary new files, shared utility pollution, scope creep, and accidental private-data exposure.
-- Run `cd 70_Imports/scripts` then `python -m pytest`.
-- Run from the repository root: `python scripts/quality_gate.py`.
+- Do not run bare `python -m pytest` or `pytest` from this repository.
+- Use the OS-local venv and pytest temp roots:
+
+  ```powershell
+  $VenvPython = Join-Path $env:LOCALAPPDATA "06_Stock\.venv\Scripts\python.exe"
+  $env:STOCK_PYTEST_TMPDIR = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_cases"
+  cd 70_Imports/scripts
+  & $VenvPython -m pytest -p no:cacheprovider --basetemp (Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_pytest")
+  cd ../..
+  & $VenvPython scripts/quality_gate.py
+  ```
+
 - Before any live vault write, run the import against the live vault with `--dry-run` and inspect the expected file changes.
 - Report changed files, commands run, safety checks, and any unresolved risks.
 
@@ -87,4 +97,5 @@ Before changing files, read these repository-level contracts in order:
 - Google Drive synced folders are side-effecting live targets.
 - Do not create `.venv`, caches, generated outputs, or temporary agent files inside the live vault or synced folder by default.
 - Use `STOCK_VENV_DIR` for an explicit virtual environment location; otherwise wrappers must use an OS-local app-data path outside the vault.
+- Use `STOCK_PYTEST_TMPDIR` or the OS-local `%LOCALAPPDATA%\06_Stock\pytest_tmp_cases` default for pytest case temp data; do not recreate `.tmp_pytest_cases` inside this repository or the live vault.
 - Live vault execution must preserve raw files, preserve user-written Markdown, and summarize `Import_Review`, `Review_Queue`, and `QA_Exceptions` after execution.
