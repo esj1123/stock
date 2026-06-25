@@ -7547,6 +7547,34 @@ def test_inv_ex_11_reports_unclassified_rows_without_private_details(tmp_path: P
         assert token not in serialized
 
 
+def test_inv_ex_11_distinguishes_quantity_only_non_money_unclassified_rows(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed)
+    pd.DataFrame([{
+        "source_file_type": "transaction_history",
+        "market": "US",
+        "asset_type": "etf",
+        "transaction_type": "unknown",
+        "cashflow_role": "unclassified",
+        "amount_kind": "quantity",
+        "amount_basis": "not_money",
+        "amount_review_status": "not_applicable",
+        "amount_normalization_status": "not_applicable",
+        "currency_native": "USD",
+        "amount_native": "",
+        "amount_krw": "",
+        "quantity": "1",
+    }]).to_csv(processed / "unclassified_rows.csv", index=False)
+
+    qa = qa_for_processed(tmp_path)
+    inv_ex_11 = qa[qa["exception_id"].eq("INV-EX-11")]
+
+    assert set(inv_ex_11["severity"]) == {"blocking"}
+    assert len(inv_ex_11) == 1
+    assert "quantity-only non-money" in inv_ex_11.iloc[0]["issue"]
+    assert "cashflow/KRW totals" in inv_ex_11.iloc[0]["suggested_fix"]
+
+
 def test_qa_flags_missing_performance_accounting_outputs_and_schema_gaps(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     write_reconciliation_qa_inputs(processed, write_required_outputs=False)

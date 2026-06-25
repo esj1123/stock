@@ -276,6 +276,38 @@ def row_status(row: pd.Series, *fields: str) -> str:
     return ""
 
 
+def is_quantity_only_non_money_unclassified(unclassified: pd.DataFrame) -> bool:
+    if unclassified.empty:
+        return False
+
+    required_columns = {
+        "amount_kind",
+        "amount_basis",
+        "amount_review_status",
+        "amount_normalization_status",
+        "amount_native",
+        "amount_krw",
+    }
+    if not required_columns.issubset(set(unclassified.columns)):
+        return False
+
+    amount_kind = unclassified["amount_kind"].map(lower_value)
+    amount_basis = unclassified["amount_basis"].map(lower_value)
+    review_status = unclassified["amount_review_status"].map(lower_value)
+    normalization_status = unclassified["amount_normalization_status"].map(lower_value)
+    native_amount = unclassified["amount_native"].map(text_value).str.strip()
+    krw_amount = unclassified["amount_krw"].map(text_value).str.strip()
+
+    return (
+        amount_kind.eq("quantity").all()
+        and amount_basis.eq("not_money").all()
+        and review_status.eq("not_applicable").all()
+        and normalization_status.eq("not_applicable").all()
+        and native_amount.eq("").all()
+        and krw_amount.eq("").all()
+    )
+
+
 def processed_row_ref(file_name: str, idx: int) -> str:
     return f"70_Imports/processed/{file_name}:row{idx + 2}"
 
@@ -876,7 +908,19 @@ def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = 
                     add(rows, "INV-EX-05", "blocking", f"processed_holdings.csv:{ticker}", "레버리지 ETF 규칙 링크가 없습니다.", "Leveraged_ETF_Rules 링크를 추가하세요.")
 
     unclassified = read_csv(processed_dir / "unclassified_rows.csv")
-    if not unclassified.empty:
+    if is_quantity_only_non_money_unclassified(unclassified):
+        add(
+            rows,
+            "INV-EX-11",
+            "blocking",
+            "70_Imports/processed/unclassified_rows.csv",
+            f"unclassified quantity-only non-money row {len(unclassified)} exists.",
+            (
+                "Review whether these are corporate action, transfer, or lot-coverage events. "
+                "Keep them out of cashflow/KRW totals unless a specific classification rule is accepted."
+            ),
+        )
+    elif not unclassified.empty:
         add(rows, "INV-EX-11", "blocking", "70_Imports/processed/unclassified_rows.csv", f"unclassified row {len(unclassified)}건이 있습니다.", "거래유형 분류 규칙을 보완하세요.")
 
     source_index = read_csv(processed_dir / "source_file_index.csv")
