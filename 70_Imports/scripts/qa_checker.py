@@ -844,7 +844,9 @@ def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = 
     rows: list[dict[str, Any]] = []
     active_note_targets = active_company_note_targets(vault_root, processed_dir)
 
-    company_files = list((vault_root / "20_Companies").glob("*/Company.md"))
+    company_root = vault_root / "20_Companies"
+    note_index = existing_company_note_index(company_root)
+    company_files = list(company_root.glob("*/Company.md"))
     for path in company_files:
         text = path.read_text(encoding="utf-8-sig")
         meta = parse_frontmatter(text)
@@ -904,7 +906,10 @@ def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = 
             if pnl <= -10:
                 add(rows, "INV-EX-04", "blocking", f"processed_holdings.csv:{ticker}", "pnl_pct <= -10이며 최근 리뷰 확인이 필요합니다.", "Risk Event 또는 Review Report를 작성하세요.")
             if is_leveraged_etf_name(r.get("security_name", ""), ticker):
-                note = vault_root / "20_Companies" / ticker / "Company.md"
+                identity = company_note_identity_key(r)
+                note = company_root / safe_component(ticker) / "Company.md"
+                if not note.exists():
+                    note = note_index.get(identity) or note_index.get(f"TICKER:{ticker.upper()}") or note
                 if not note.exists() or "leveraged_etf_rule_link" not in note.read_text(encoding="utf-8-sig"):
                     add(rows, "INV-EX-05", "blocking", f"processed_holdings.csv:{ticker}", "레버리지 ETF 규칙 링크가 없습니다.", "Leveraged_ETF_Rules 링크를 추가하세요.")
 

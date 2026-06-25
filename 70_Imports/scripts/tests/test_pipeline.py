@@ -7888,6 +7888,34 @@ def test_appx_no_loss_line_and_continue_hold_is_not_sell_criteria(tmp_path: Path
     assert "INV-EX-08" in set(qa["exception_id"])
 
 
+def test_inv_ex_05_uses_company_note_index_for_leveraged_holding_rule_link(tmp_path: Path):
+    vault = tmp_path
+    processed = vault / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, holdings_rows=[{
+        "ticker": "LEV3X",
+        "security_name": "Synthetic Daily 3X ETF",
+        "market": "US",
+        "asset_type": "etf",
+        "pnl_pct": 0,
+    }])
+    company = vault / "20_Companies" / "DifferentFolder"
+    company.mkdir(parents=True)
+    (company / "Company.md").write_text(
+        "---\ntype: company\nticker: LEV3X\nmarket: US\nasset_type: etf\n"
+        "leveraged_etf_rule_link: \"[[05_Principles/Leveraged_ETF_Rules]]\"\n---\n"
+        "# Synthetic leveraged ETF\n"
+        "## Thesis\n"
+        "- Synthetic thesis text for rule-link coverage.\n"
+        "## sell criteria\n"
+        "- Synthetic sell criteria text for rule-link coverage.\n",
+        encoding="utf-8",
+    )
+
+    qa = run_qa(vault, processed)
+
+    assert "INV-EX-05" not in set(qa["exception_id"])
+
+
 def test_nvdl_switching_threshold_counts_as_sell_criteria_with_open_details():
     text = (
         "# NVDL\n"
