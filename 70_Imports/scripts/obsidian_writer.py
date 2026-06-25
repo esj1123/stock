@@ -652,6 +652,32 @@ def qa_fx_review_bridge_note(
     ])
 
 
+def sell_criteria_review_note(review: pd.DataFrame | None = None, qa: pd.DataFrame | None = None) -> str:
+    review = review if review is not None else pd.DataFrame()
+    qa = qa if qa is not None else pd.DataFrame()
+    review_count = 0
+    qa_count = 0
+    if not review.empty and "reason" in review.columns:
+        review_count = int(review["reason"].fillna("").astype(str).str.lower().eq("sell criteria missing").sum())
+    if not qa.empty and "exception_id" in qa.columns:
+        qa_count = int(qa["exception_id"].fillna("").astype(str).eq("INV-EX-08").sum())
+    count = max(review_count, qa_count)
+    if count <= 0:
+        return ""
+    count_parts = []
+    if qa_count > 0:
+        count_parts.append(f"QA findings `{qa_count}`")
+    if review_count > 0:
+        count_parts.append(f"Review Queue rows `{review_count}`")
+    count_text = "; ".join(count_parts) if count_parts else f"items `{count}`"
+    return "\n".join([
+        "> [!note] INV-EX-08 sell criteria review",
+        f"> Sell criteria review: {count_text}. These require user-written operating criteria, not automated thesis, sell criteria, or buy/sell recommendations.",
+        "> Fill each affected Company note with user decisions such as thesis-break conditions, reduce-position triggers, exit conditions, or next evidence to review.",
+        "> Until the user writes those criteria, keep INV-EX-08 review-gated.",
+    ])
+
+
 def portfolio_content(
     summary: pd.DataFrame,
     holdings: pd.DataFrame,
@@ -2445,12 +2471,15 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Risk_Watchlist.md":
         return "\n".join([warning, risk_watchlist_cards(risk)]).strip()
     if name == "Review_Queue.md":
-        return "\n\n".join([part for part in [warning, fx_review_note, review_queue_cards(review)] if part]).strip()
+        inv_ex_08_note = sell_criteria_review_note(review=review)
+        return "\n\n".join([part for part in [warning, fx_review_note, inv_ex_08_note, review_queue_cards(review)] if part]).strip()
     if name == "History_Queue.md":
         return history_queue_cards(history)
     if name == "QA_Exceptions.md":
         qa_fx_bridge_note = qa_fx_review_bridge_note(qa, fx_requirements, fx_unavailable_exceptions)
-        return "\n\n".join([part for part in [fx_review_note, qa_exception_cards(qa, qa_rollup, qa_fx_bridge_note)] if part]).strip()
+        inv_ex_08_note = sell_criteria_review_note(qa=qa)
+        qa_context_note = "\n\n".join(part for part in [qa_fx_bridge_note, inv_ex_08_note] if part)
+        return "\n\n".join([part for part in [fx_review_note, qa_exception_cards(qa, qa_rollup, qa_context_note)] if part]).strip()
     return "_Unsupported dashboard._"
 
 

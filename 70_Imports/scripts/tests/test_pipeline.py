@@ -6574,6 +6574,56 @@ def test_qa_and_review_dashboards_summarize_reviewed_fx_unavailable_exceptions(t
     assert "## Reason summary" in review_content
 
 
+def test_qa_and_review_dashboards_surface_inv_ex_08_user_decision_gate(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    qa = pd.DataFrame([
+        {
+            "exception_id": "INV-EX-08",
+            "severity": "blocking",
+            "file": "20_Companies/SYNTH/Company.md",
+            "issue": "sell criteria missing",
+            "suggested_fix": "User decision required.",
+        },
+        {
+            "exception_id": "INV-EX-08",
+            "severity": "blocking",
+            "file": "20_Companies/SYNTH2/Company.md",
+            "issue": "sell criteria missing",
+            "suggested_fix": "User decision required.",
+        },
+    ])
+    qa.to_csv(processed / "qa_exceptions.csv", index=False)
+    build_qa_exception_rollup(qa).to_csv(processed / "qa_exception_rollup.csv", index=False)
+    pd.DataFrame([
+        {
+            "ticker": "SYNTH",
+            "security_name": "Synthetic",
+            "reason": "sell criteria missing",
+            "severity": "blocking",
+            "suggested_action": "User-defined sell/reduce criteria required.",
+        },
+    ]).to_csv(processed / "review_queue.csv", index=False)
+
+    qa_content = dashboard_content("QA_Exceptions.md", processed)
+    review_content = dashboard_content("Review_Queue.md", processed)
+
+    assert "INV-EX-08 sell criteria review" in qa_content
+    assert "QA findings `2`" in qa_content
+    assert "Review Queue rows" not in qa_content
+    assert "INV-EX-08 sell criteria review" in review_content
+    assert "Review Queue rows `1`" in review_content
+    assert "QA findings" not in review_content
+    for content in [qa_content, review_content]:
+        assert "INV-EX-08 sell criteria review" in content
+        assert "user-written operating criteria" in content
+        assert "not automated thesis, sell criteria, or buy/sell recommendations" in content
+        assert "thesis-break conditions" in content
+        assert "keep INV-EX-08 review-gated" in content
+    assert qa_content.index("INV-EX-08 sell criteria review") < qa_content.index("## Exception Summary")
+    assert review_content.index("INV-EX-08 sell criteria review") < review_content.index("## Snapshot")
+
+
 
 def test_deduplicate_overlapping_transaction_rows(tmp_path: Path):
     vault = tmp_path
@@ -6977,6 +7027,42 @@ def test_run_qa_preserves_reviewed_fx_unavailable_note_when_rewriting_qa_dashboa
     assert "unreviewed FX requirement keys are `0`, not that row-level REC findings are closed" in content
     assert content.index("REC-EX-01 row-level context") < content.index("## Exception Summary")
     assert "## Rollup Summary" in content
+
+
+def test_run_qa_rewrites_dashboard_with_inv_ex_08_user_decision_gate(tmp_path: Path):
+    vault = tmp_path
+    company = vault / "20_Companies" / "SYNTH"
+    company.mkdir(parents=True)
+    (company / "Company.md").write_text(
+        "---\ntype: company\nticker: SYNTH\nmarket: KR\nasset_type: stock\n---\n"
+        "# SYNTH\n"
+        "## Thesis\n"
+        "- Durable synthetic thesis text for test coverage.\n"
+        "## sell criteria\n"
+        "- \n",
+        encoding="utf-8",
+    )
+    dashboard = vault / "10_Dashboard" / "QA_Exceptions.md"
+    dashboard.parent.mkdir(parents=True)
+    dashboard.write_text(
+        "# QA\n\nmanual before\n\n"
+        f"{AUTO_START}\nold\n{AUTO_END}\n\n"
+        "manual after\n",
+        encoding="utf-8",
+    )
+
+    run_qa(vault, dry_run=False)
+
+    content = dashboard.read_text(encoding="utf-8")
+    generated = content.split(AUTO_START, 1)[1].split(AUTO_END, 1)[0]
+    outside = content.split(AUTO_START, 1)[0] + content.split(AUTO_END, 1)[1]
+
+    assert "manual before" in outside
+    assert "manual after" in outside
+    assert "INV-EX-08 sell criteria review" in generated
+    assert "QA findings `1`" in generated
+    assert "not automated thesis, sell criteria, or buy/sell recommendations" in generated
+    assert "keep INV-EX-08 review-gated" in generated
 
 
 def test_run_qa_dry_run_does_not_write_qa_exception_rollup(tmp_path: Path):
