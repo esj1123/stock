@@ -326,6 +326,23 @@ def days_old(value: Any) -> int | None:
     return (date.today() - dt).days
 
 
+def holding_company_note_path(row: dict[str, Any] | pd.Series, company_root: Path, note_index: dict[str, Path]) -> Path:
+    ticker = text_value(row.get("ticker", ""))
+    identity = company_note_identity_key(row)
+    note = company_root / safe_component(ticker) / "Company.md"
+    if note.exists():
+        return note
+    return note_index.get(identity) or note_index.get(f"TICKER:{ticker.upper()}") or note
+
+
+def has_recent_company_review(note: Path, max_days: int = 30) -> bool:
+    if not note.exists():
+        return False
+    meta = parse_frontmatter(note.read_text(encoding="utf-8-sig"))
+    old = days_old(meta.get("last_review") or meta.get("last_update"))
+    return old is not None and old <= max_days
+
+
 def generated_blocks(text: str) -> list[str]:
     return re.findall(re.escape(AUTO_START) + r"(.*?)" + re.escape(AUTO_END), text, re.S)
 
@@ -903,13 +920,10 @@ def run_qa(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = 
             if asset_type == "cash":
                 continue
             pnl = pd.to_numeric(pd.Series([r.get("pnl_pct", 0)]), errors="coerce").fillna(0).iloc[0]
-            if pnl <= -10:
+            note = holding_company_note_path(r, company_root, note_index)
+            if pnl <= -10 and not has_recent_company_review(note):
                 add(rows, "INV-EX-04", "blocking", f"processed_holdings.csv:{ticker}", "pnl_pct <= -10이며 최근 리뷰 확인이 필요합니다.", "Risk Event 또는 Review Report를 작성하세요.")
             if is_leveraged_etf_name(r.get("security_name", ""), ticker):
-                identity = company_note_identity_key(r)
-                note = company_root / safe_component(ticker) / "Company.md"
-                if not note.exists():
-                    note = note_index.get(identity) or note_index.get(f"TICKER:{ticker.upper()}") or note
                 if not note.exists() or "leveraged_etf_rule_link" not in note.read_text(encoding="utf-8-sig"):
                     add(rows, "INV-EX-05", "blocking", f"processed_holdings.csv:{ticker}", "레버리지 ETF 규칙 링크가 없습니다.", "Leveraged_ETF_Rules 링크를 추가하세요.")
 

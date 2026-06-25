@@ -7916,6 +7916,50 @@ def test_inv_ex_05_uses_company_note_index_for_leveraged_holding_rule_link(tmp_p
     assert "INV-EX-05" not in set(qa["exception_id"])
 
 
+def test_inv_ex_04_uses_company_note_index_for_recent_loss_review(tmp_path: Path):
+    vault = tmp_path
+    processed = vault / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, holdings_rows=[{
+        "ticker": "LOSS",
+        "security_name": "Synthetic Loss Holding",
+        "market": "US",
+        "asset_type": "stock",
+        "pnl_pct": -12,
+    }])
+    company = vault / "20_Companies" / "ReviewedFolder"
+    company.mkdir(parents=True)
+    (company / "Company.md").write_text(
+        "---\ntype: company\nticker: LOSS\nmarket: US\nasset_type: stock\n"
+        f"last_review: {date.today().isoformat()}\n---\n"
+        "# Synthetic loss holding\n"
+        "## Thesis\n"
+        "- Synthetic thesis text for review coverage.\n"
+        "## sell criteria\n"
+        "- Synthetic sell criteria text for review coverage.\n",
+        encoding="utf-8",
+    )
+
+    qa = run_qa(vault, processed)
+
+    assert "INV-EX-04" not in set(qa["exception_id"])
+
+
+def test_inv_ex_04_flags_loss_holding_without_recent_review(tmp_path: Path):
+    vault = tmp_path
+    processed = vault / "70_Imports" / "processed"
+    write_reconciliation_qa_inputs(processed, holdings_rows=[{
+        "ticker": "LOSS",
+        "security_name": "Synthetic Loss Holding",
+        "market": "US",
+        "asset_type": "stock",
+        "pnl_pct": -12,
+    }])
+
+    qa = run_qa(vault, processed)
+
+    assert "INV-EX-04" in set(qa["exception_id"])
+
+
 def test_nvdl_switching_threshold_counts_as_sell_criteria_with_open_details():
     text = (
         "# NVDL\n"
