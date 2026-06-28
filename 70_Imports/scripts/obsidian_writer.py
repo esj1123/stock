@@ -347,6 +347,134 @@ def holdings_cash_krw(holdings: pd.DataFrame) -> Any:
     return "-"
 
 
+def account_display_label(value: Any) -> str:
+    text = row_text(pd.Series({"account_type": value}), "account_type")
+    lower = text.lower()
+    if not text or lower in {"nan", "none", "na", "n/a", "<na>"}:
+        return "미분류"
+    if lower == "isa":
+        return "ISA"
+    if lower in {"comprehensive", "종합", "overseas"}:
+        return "종합+해외"
+    return text
+
+
+def account_sort_key(label: str) -> tuple[int, str]:
+    order = {"ISA": 0, "종합+해외": 1, "미분류": 98}
+    return order.get(label, 50), label
+
+
+def holding_preferred_krw_amount(
+    row: pd.Series,
+    krw_field: str,
+    native_field: str,
+    krw_field_present: bool,
+) -> float:
+    krw_amount = optional_number_value(row.get(krw_field))
+    if krw_amount is not None:
+        return krw_amount
+    currency = (row_text(row, "currency_native") or row_text(row, "currency")).upper()
+    if krw_field_present and currency != "KRW":
+        return 0.0
+    native_amount = optional_number_value(row.get(native_field))
+    return native_amount if native_amount is not None else 0.0
+
+
+def account_principal_bridge_frame(cashflows: pd.DataFrame, holdings: pd.DataFrame) -> pd.DataFrame:
+    accounts: dict[str, dict[str, float]] = {}
+
+    def row_for(label: str) -> dict[str, float]:
+        if label not in accounts:
+            accounts[label] = {
+                "deposits": 0.0,
+                "withdrawals": 0.0,
+                "current_value_krw": 0.0,
+                "recognized_cash_krw": 0.0,
+                "non_cash_value_krw": 0.0,
+                "unrealized_pnl_krw": 0.0,
+            }
+        return accounts[label]
+
+    principal_view = cashflow_principal_view(cashflows)
+    if not principal_view.empty and "transaction_type" in principal_view.columns:
+        for _, row in principal_view.iterrows():
+            label = account_display_label(row.get("account_type"))
+            tx_type = row_text(row, "transaction_type").lower()
+            amount = abs(number_value(row.get("principal_amount_krw")))
+            target = row_for(label)
+            if tx_type == "deposit":
+                target["deposits"] += amount
+            elif tx_type == "withdrawal":
+                target["withdrawals"] += amount
+
+    if not holdings.empty:
+        value_krw_present = "evaluation_amount_krw" in holdings.columns
+        unrealized_krw_present = "unrealized_pnl_krw" in holdings.columns
+        for _, row in holdings.iterrows():
+            label = account_display_label(row.get("account_type"))
+            target = row_for(label)
+            current_value = holding_preferred_krw_amount(row, "evaluation_amount_krw", "evaluation_amount", value_krw_present)
+            target["current_value_krw"] += current_value
+            asset_type = row_text(row, "asset_type").lower()
+            if asset_type == "cash":
+                target["recognized_cash_krw"] += current_value
+                continue
+            unrealized = holding_preferred_krw_amount(row, "unrealized_pnl_krw", "unrealized_pnl", unrealized_krw_present)
+            target["non_cash_value_krw"] += current_value
+            target["unrealized_pnl_krw"] += unrealized
+
+    rows = []
+    for label in sorted(accounts, key=account_sort_key):
+        values = accounts[label]
+        net_principal = values["deposits"] - values["withdrawals"]
+        holdings_cost = values["non_cash_value_krw"] - values["unrealized_pnl_krw"]
+        gap = net_principal - holdings_cost - values["recognized_cash_krw"]
+        rows.append({
+            "account": label,
+            "net_external_principal_krw": round(net_principal, 2),
+            "current_value_krw": round(values["current_value_krw"], 2),
+            "recognized_cash_krw": round(values["recognized_cash_krw"], 2),
+            "holdings_cost_krw": round(holdings_cost, 2),
+            "unrealized_pnl_krw": round(values["unrealized_pnl_krw"], 2),
+            "principal_to_cost_gap_krw": round(gap, 2),
+        })
+
+    if rows:
+        total = {"account": "TOTAL"}
+        for column in [
+            "net_external_principal_krw",
+            "current_value_krw",
+            "recognized_cash_krw",
+            "holdings_cost_krw",
+            "unrealized_pnl_krw",
+            "principal_to_cost_gap_krw",
+        ]:
+            total[column] = round(sum(number_value(row[column]) for row in rows), 2)
+        rows.append(total)
+
+    return pd.DataFrame(rows, columns=[
+        "account",
+        "net_external_principal_krw",
+        "current_value_krw",
+        "recognized_cash_krw",
+        "holdings_cost_krw",
+        "unrealized_pnl_krw",
+        "principal_to_cost_gap_krw",
+    ])
+
+
+def account_principal_bridge_section(cashflows: pd.DataFrame, holdings: pd.DataFrame) -> str:
+    bridge = account_principal_bridge_frame(cashflows, holdings)
+    return "\n\n".join([
+        "## 계좌별 원금/평가 브릿지",
+        "> [!note] Account principal/value bridge\n"
+        "> 계좌별 순투입원금은 외부 입출금 기준입니다. 현재 평가금액은 current holdings/cash snapshot 기준이며, "
+        "계좌별 공식 TWR/MWR 수익률이 아닙니다. `종합+해외`는 종합 원금 흐름과 해외잔고 valuation snapshot을 함께 보여주는 display bucket이며, "
+        "source provenance는 내부적으로 분리되어 있습니다. 내부 이동, 환전, FX review gate 상태에 따라 해석 차이가 남을 수 있습니다.",
+        markdown_table(bridge),
+    ])
+
+
 def percent_bar(value: Any, width: int = 20) -> str:
     pct = max(0.0, min(100.0, number_value(value)))
     filled = int(round(pct / 100 * width))
@@ -688,6 +816,7 @@ def portfolio_content(
     performance_history: pd.DataFrame | None = None,
     fx_requirements: pd.DataFrame | None = None,
     fx_unavailable_exceptions: pd.DataFrame | None = None,
+    cashflows: pd.DataFrame | None = None,
 ) -> str:
     reconciliation = reconciliation if reconciliation is not None else pd.DataFrame()
     performance_summary = performance_summary if performance_summary is not None else pd.DataFrame()
@@ -695,6 +824,7 @@ def portfolio_content(
     performance_history = performance_history if performance_history is not None else pd.DataFrame()
     fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
     fx_unavailable_exceptions = fx_unavailable_exceptions if fx_unavailable_exceptions is not None else pd.DataFrame()
+    cashflows = cashflows if cashflows is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
@@ -854,6 +984,7 @@ def portfolio_content(
     parts.append(performance_history_section(performance_history))
     parts.append("\n".join(current_position_snapshot))
     parts.append("\n".join(principal_cost_bridge))
+    parts.append(account_principal_bridge_section(cashflows, holdings))
     parts.append("\n".join(review_status_snapshot))
     parts.append("\n".join(risk_shortcuts))
     if value_status.lower() == "unknown":
@@ -2457,6 +2588,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
             performance_history,
             fx_requirements,
             fx_unavailable_exceptions,
+            cash,
         )
     if name == "Reconciliation.md":
         return reconciliation_content(reconciliation, summary, realized, fx_requirements, fx_unavailable_exceptions)

@@ -6218,6 +6218,72 @@ def test_portfolio_dashboard_snapshot_shows_value_cost_and_return(tmp_path: Path
     assert "<strong>-135</strong>" in content
 
 
+def test_portfolio_dashboard_adds_account_principal_bridge_without_account_returns(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {"metric": "holding_count", "value": "4"},
+        {"metric": "total_cost", "value": "3070"},
+        {"metric": "total_portfolio_value", "value": "3150"},
+        {"metric": "total_unrealized_pnl", "value": "-70"},
+        {"metric": "pnl_pct", "value": "-2.23"},
+        {"metric": "total_portfolio_value_status", "value": "available"},
+        {"metric": "balance_data_available", "value": "True"},
+    ]).to_csv(processed / "portfolio_summary.csv", index=False)
+    pd.DataFrame(valid_reconciliation_summary_rows(
+        total_assets_krw="3150",
+        current_cash_krw="150",
+        current_holding_assets_krw="3000",
+        net_external_principal_krw="2800",
+        total_return_krw="350",
+        total_return_pct="12.5",
+        unrealized_pnl_krw="-70",
+    )).to_csv(processed / "reconciliation_summary.csv", index=False)
+    pd.DataFrame(valid_performance_summary_rows(
+        net_external_principal_krw="2800",
+        external_deposit_krw="3000",
+        external_withdrawal_krw="200",
+        current_total_assets_krw="3150",
+        current_cash_krw="150",
+        current_holding_assets_krw="3000",
+        cumulative_return_krw="350",
+        cumulative_return_pct="12.5",
+        unrealized_pnl_krw="-70",
+    )).to_csv(processed / "performance_summary.csv", index=False)
+    pd.DataFrame([
+        {"ticker": "ISA_STOCK", "security_name": "ISA Stock", "account_type": "ISA", "asset_type": "stock", "currency": "KRW", "evaluation_amount": 900, "evaluation_amount_krw": 900, "unrealized_pnl": 100, "unrealized_pnl_krw": 100},
+        {"ticker": "ISA_CASH", "security_name": "ISA Cash", "account_type": "ISA", "asset_type": "cash", "currency": "KRW", "evaluation_amount": 50, "evaluation_amount_krw": 50, "unrealized_pnl": 0, "unrealized_pnl_krw": 0},
+        {"ticker": "COMP_STOCK", "security_name": "Comprehensive Stock", "account_type": "comprehensive", "asset_type": "stock", "currency": "KRW", "evaluation_amount": 1800, "evaluation_amount_krw": 1800, "unrealized_pnl": -200, "unrealized_pnl_krw": -200},
+        {"ticker": "COMP_CASH", "security_name": "Comprehensive Cash", "account_type": "comprehensive", "asset_type": "cash", "currency": "KRW", "evaluation_amount": 100, "evaluation_amount_krw": 100, "unrealized_pnl": 0, "unrealized_pnl_krw": 0},
+        {"ticker": "OVERSEAS_STOCK", "security_name": "Overseas Stock", "account_type": "overseas", "asset_type": "stock", "currency": "USD", "evaluation_amount": 1, "evaluation_amount_krw": 300, "unrealized_pnl": 0.1, "unrealized_pnl_krw": 30},
+    ]).to_csv(processed / "processed_holdings.csv", index=False)
+    pd.DataFrame([
+        {"trade_date": "2026-01-01", "transaction_type": "deposit", "account_type": "ISA", "ticker": "", "security_name": "", "quantity": 0, "price": 0, "settlement_amount_krw": 1000, "amount_krw": 1000, "currency": "KRW", "cashflow_role": "external_principal", "affects_principal": True, "amount_review_status": "ok"},
+        {"trade_date": "2026-01-02", "transaction_type": "withdrawal", "account_type": "ISA", "ticker": "", "security_name": "", "quantity": 0, "price": 0, "settlement_amount_krw": 200, "amount_krw": 200, "currency": "KRW", "cashflow_role": "external_principal", "affects_principal": True, "amount_review_status": "ok"},
+        {"trade_date": "2026-01-03", "transaction_type": "deposit", "account_type": "comprehensive", "ticker": "", "security_name": "", "quantity": 0, "price": 0, "settlement_amount_krw": 2000, "amount_krw": 2000, "currency": "KRW", "cashflow_role": "external_principal", "affects_principal": True, "amount_review_status": "ok"},
+        {"trade_date": "2026-01-04", "transaction_type": "dividend", "account_type": "comprehensive", "ticker": "", "security_name": "", "quantity": 0, "price": 0, "settlement_amount_krw": 999, "amount_krw": 999, "currency": "KRW", "cashflow_role": "income_dividend", "affects_principal": False, "amount_review_status": "ok"},
+        {"trade_date": "2026-01-05", "transaction_type": "exchange", "account_type": "comprehensive", "ticker": "", "security_name": "", "quantity": 0, "price": 0, "settlement_amount_krw": 888, "amount_krw": 888, "currency": "KRW", "cashflow_role": "internal_fx_exchange", "affects_principal": False, "amount_review_status": "ok"},
+        {"trade_date": "2026-01-06", "transaction_type": "deposit", "account_type": "comprehensive", "ticker": "", "security_name": "", "quantity": 0, "price": 0, "settlement_amount_krw": 777, "amount_krw": 777, "currency": "KRW", "cashflow_role": "external_principal", "affects_principal": False, "amount_review_status": "ok"},
+    ]).to_csv(processed / "processed_cashflows.csv", index=False)
+
+    content = dashboard_content("Portfolio.md", processed)
+    section = content.split("## 계좌별 원금/평가 브릿지", 1)[1].split("## 검토/상태", 1)[0]
+
+    assert "계좌별 공식 TWR/MWR 수익률이 아닙니다" in section
+    assert "`종합+해외`는 종합 원금 흐름과 해외잔고 valuation snapshot을 함께 보여주는 display bucket" in section
+    assert "| account | net_external_principal_krw | current_value_krw | recognized_cash_krw | holdings_cost_krw | unrealized_pnl_krw | principal_to_cost_gap_krw |" in section
+    assert "| ISA | 800 | 950 | 50 | 800 | 100 | -50 |" in section
+    assert "| 종합+해외 | 2,000 | 2,200 | 100 | 2,270 | -170 | -370 |" in section
+    assert "| TOTAL | 2,800 | 3,150 | 150 | 3,070 | -70 | -420 |" in section
+    assert "| 종합 |" not in section
+    assert "| 해외/해외잔고 |" not in section
+    assert "999" not in section
+    assert "888" not in section
+    assert "777" not in section
+    assert "account-level return" not in content.lower()
+    assert "official TWR/MWR" not in content
+
+
 def test_portfolio_dashboard_formats_numbers_without_changing_processed_csv(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     processed.mkdir(parents=True)
