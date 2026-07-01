@@ -6663,8 +6663,8 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "### 보유 snapshot freshness" in content
     assert "Current holdings source freshness" in content
     assert '<span class="stock-kpi-label">보유/잔고 source</span><strong>present</strong>' in content
-    assert '<span class="stock-kpi-label">snapshot date</span><strong>missing</strong>' in content
-    assert "date missing" in content
+    assert '<span class="stock-kpi-label">snapshot 날짜</span><strong>날짜 없음</strong>' in content
+    assert "날짜 없음" in content
     assert "not transaction-history inference" in content
     assert "not promoted to current holdings" in content
     assert "PRIVATE_RAW_EXPORT.xlsx" not in content

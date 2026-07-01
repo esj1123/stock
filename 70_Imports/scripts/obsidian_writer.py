@@ -509,7 +509,7 @@ def source_type_count(sources: pd.DataFrame, accepted: set[str]) -> int:
 
 def holdings_snapshot_date_status(holdings: pd.DataFrame) -> tuple[str, str]:
     if holdings.empty:
-        return "none", "no current holdings rows"
+        return "none", "현재 보유 row 없음"
     dates: list[str] = []
     for column in HOLDINGS_SNAPSHOT_DATE_COLUMNS:
         if column not in holdings.columns:
@@ -517,18 +517,26 @@ def holdings_snapshot_date_status(holdings: pd.DataFrame) -> tuple[str, str]:
         values = holdings[column].fillna("").astype(str).str.strip().str.slice(0, 10)
         dates.extend(value for value in values if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value))
     if not dates:
-        return "missing", "date not carried in processed holdings"
-    return max(dates), "date carried by current holdings snapshot"
+        return "missing", "processed holdings에 snapshot 날짜 없음"
+    return max(dates), "현재 보유 snapshot 날짜"
 
 
 def holdings_snapshot_status_label(status: str) -> str:
     if status == "snapshot_date_available":
-        return "date available"
+        return "날짜 있음"
     if status == "snapshot_date_missing":
-        return "date missing"
+        return "날짜 없음"
     if status == "no_current_holdings_rows":
-        return "no holdings rows"
+        return "보유 row 없음"
     return status
+
+
+def holdings_snapshot_date_label(value: str) -> str:
+    if value == "missing":
+        return "날짜 없음"
+    if value == "none":
+        return "보유 row 없음"
+    return value
 
 
 def holdings_snapshot_freshness_section(holdings: pd.DataFrame, sources: pd.DataFrame) -> str:
@@ -545,9 +553,9 @@ def holdings_snapshot_freshness_section(holdings: pd.DataFrame, sources: pd.Data
         dashboard_kpi_grid([
             snapshot_card("보유/잔고 source", source_status, f"holdings/balance sources: {holding_source_count}"),
             snapshot_card("현재 보유 row", len(holdings), "current holdings rows"),
-            snapshot_card("snapshot date", snapshot_date, snapshot_date_hint),
+            snapshot_card("snapshot 날짜", holdings_snapshot_date_label(snapshot_date), snapshot_date_hint),
             snapshot_card("거래내역 source", transaction_source_count, "not promoted to current holdings"),
-            snapshot_card("freshness status", holdings_snapshot_status_label(freshness_status)),
+            snapshot_card("최신성 상태", holdings_snapshot_status_label(freshness_status)),
         ]),
         "> [!note] Current holdings source freshness\n"
         "> Current holdings use holdings/balance snapshots, not transaction-history inference. "
@@ -578,7 +586,7 @@ def portfolio_update_reflection_section(
             snapshot_card("수익 ledger row", len(income), "processed income rows"),
             snapshot_card("현재 보유 row", len(holdings), "current holdings rows"),
             snapshot_card("FX review gate", len(fx_requirements), "remaining FX requirement rows"),
-            snapshot_card("holdings snapshot", holdings_snapshot_status_label(snapshot_status), "current holdings snapshot date status"),
+            snapshot_card("보유 snapshot", holdings_snapshot_status_label(snapshot_status), "현재 보유 snapshot 날짜 상태"),
             snapshot_card("보유/잔고 source", "present" if holding_source_count else "missing", f"holdings/balance sources: {holding_source_count}"),
             snapshot_card("거래 source", transaction_source_count, "transaction sources; not current holdings"),
         ]),
