@@ -806,6 +806,110 @@ def sell_criteria_review_note(review: pd.DataFrame | None = None, qa: pd.DataFra
     ])
 
 
+def realized_pnl_review_gate_note(
+    realized: pd.DataFrame | None = None,
+    fx_requirements: pd.DataFrame | None = None,
+    fx_unavailable_exceptions: pd.DataFrame | None = None,
+    qa: pd.DataFrame | None = None,
+) -> str:
+    realized = realized if realized is not None else pd.DataFrame()
+    fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
+    qa = qa if qa is not None else pd.DataFrame()
+    if realized.empty:
+        return ""
+
+    amount_status = lower_column(realized, "amount_review_status").reindex(realized.index, fill_value="")
+    fx_status = lower_column(realized, "fx_status").reindex(realized.index, fill_value="")
+    reason = lower_column(realized, "amount_review_reason").reindex(realized.index, fill_value="")
+    review_mask = ((amount_status != "") & (amount_status != "ok")) | fx_status.eq("fx_missing")
+    review_rows = realized[review_mask]
+    if review_rows.empty:
+        return ""
+
+    fx_missing_count = int(((amount_status.eq("fx_missing") | fx_status.eq("fx_missing")) & review_mask).sum())
+    lot_mask = (
+        amount_status.eq("lot_missing")
+        | reason.str.contains("sell quantity exceeds", regex=False)
+        | reason.str.contains("matched buy lots", regex=False)
+        | reason.str.contains("lot", regex=False)
+    )
+    lot_gap_count = int((lot_mask & review_mask).sum())
+    unit_mask = (
+        amount_status.eq("unit_ambiguous")
+        | reason.str.contains("unit", regex=False)
+        | reason.str.contains("quantity", regex=False)
+        | reason.str.contains("price", regex=False)
+    )
+    unit_ambiguous_count = int((unit_mask & review_mask).sum())
+
+    current_keys = fx_requirement_key_set(fx_requirements)
+    reviewed_unavailable = reviewed_fx_unavailable_keys(fx_requirements, fx_unavailable_exceptions)
+    unreviewed_count = max(len(current_keys) - len(reviewed_unavailable), 0)
+    fx_bucket_name = (
+        "reviewed official-FX-unavailable carry-through"
+        if fx_missing_count and reviewed_unavailable and unreviewed_count == 0
+        else "same-date FX missing carry-through"
+    )
+
+    bucket_rows = []
+    if fx_missing_count:
+        bucket_rows.append({
+            "bucket": fx_bucket_name,
+            "count": fx_missing_count,
+            "meaning": "same-date FX remains review-gated; no previous-business-day, forward-fill, or today-rate substitution",
+        })
+    if lot_gap_count:
+        bucket_rows.append({
+            "bucket": "FIFO lot coverage gap",
+            "count": lot_gap_count,
+            "meaning": "sell rows need matching imported buy-lot coverage before official realized PnL",
+        })
+    if unit_ambiguous_count:
+        bucket_rows.append({
+            "bucket": "unit/amount ambiguous",
+            "count": unit_ambiguous_count,
+            "meaning": "amount, quantity, or unit-price interpretation needs review before official realized PnL",
+        })
+    if not bucket_rows:
+        bucket_rows.append({"bucket": "other realized ledger review", "count": len(review_rows), "meaning": "review status remains non-ok"})
+
+    rec_ex_12_count = 0
+    rec_ex_13_count = 0
+    rec_ex_10_count = 0
+    rec_ex_16_count = 0
+    if not qa.empty and "exception_id" in qa.columns:
+        exception_ids = qa["exception_id"].fillna("").astype(str)
+        rec_ex_12_count = int(exception_ids.eq("REC-EX-12").sum())
+        rec_ex_13_count = int(exception_ids.eq("REC-EX-13").sum())
+        rec_ex_10_count = int(exception_ids.eq("REC-EX-10").sum())
+        rec_ex_16_count = int(exception_ids.eq("REC-EX-16").sum())
+
+    summary_parts = [f"realized review rows `{len(review_rows)}`"]
+    if rec_ex_12_count:
+        summary_parts.append(f"REC-EX-12 QA findings `{rec_ex_12_count}`")
+    if rec_ex_13_count:
+        summary_parts.append(f"REC-EX-13 lot coverage findings `{rec_ex_13_count}`")
+    bucket_lines = [">"]
+    for row in bucket_rows:
+        bucket_lines.append(f"> - {row['bucket']}: `{row['count']}`")
+        bucket_lines.append(f">   {row['meaning']}")
+    lines = [
+        "> [!note] REC-EX-12 realized PnL review buckets",
+        f"> {'; '.join(summary_parts)}.",
+        "> Bucket counts can overlap when one realized ledger row has multiple review gates. These counts are review context, not REC closure or official performance approval.",
+        *bucket_lines,
+    ]
+    if fx_missing_count and reviewed_unavailable:
+        lines.append(
+            f"> Reviewed official-FX-unavailable keys `{len(reviewed_unavailable)}`; unreviewed FX requirement keys `{unreviewed_count}`. Keep these as review-gated exceptions unless a separate closure decision is made."
+        )
+    if rec_ex_10_count or rec_ex_16_count:
+        lines.append(
+            "> REC-EX-10/REC-EX-16 are downstream rollup statuses while realized-ledger review buckets remain."
+        )
+    return "\n".join(lines)
+
+
 def portfolio_content(
     summary: pd.DataFrame,
     holdings: pd.DataFrame,
@@ -2603,14 +2707,16 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     if name == "Risk_Watchlist.md":
         return "\n".join([warning, risk_watchlist_cards(risk)]).strip()
     if name == "Review_Queue.md":
+        rec_ex_12_note = realized_pnl_review_gate_note(realized, fx_requirements, fx_unavailable_exceptions, qa)
         inv_ex_08_note = sell_criteria_review_note(review=review)
-        return "\n\n".join([part for part in [warning, fx_review_note, inv_ex_08_note, review_queue_cards(review)] if part]).strip()
+        return "\n\n".join([part for part in [warning, fx_review_note, rec_ex_12_note, inv_ex_08_note, review_queue_cards(review)] if part]).strip()
     if name == "History_Queue.md":
         return history_queue_cards(history)
     if name == "QA_Exceptions.md":
         qa_fx_bridge_note = qa_fx_review_bridge_note(qa, fx_requirements, fx_unavailable_exceptions)
+        rec_ex_12_note = realized_pnl_review_gate_note(realized, fx_requirements, fx_unavailable_exceptions, qa)
         inv_ex_08_note = sell_criteria_review_note(qa=qa)
-        qa_context_note = "\n\n".join(part for part in [qa_fx_bridge_note, inv_ex_08_note] if part)
+        qa_context_note = "\n\n".join(part for part in [qa_fx_bridge_note, rec_ex_12_note, inv_ex_08_note] if part)
         return "\n\n".join([part for part in [fx_review_note, qa_exception_cards(qa, qa_rollup, qa_context_note)] if part]).strip()
     return "_Unsupported dashboard._"
 

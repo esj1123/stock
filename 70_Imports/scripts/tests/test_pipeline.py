@@ -6775,6 +6775,119 @@ def test_qa_and_review_dashboards_summarize_reviewed_fx_unavailable_exceptions(t
     assert "## Reason summary" in review_content
 
 
+def test_qa_and_review_dashboards_surface_realized_pnl_review_buckets(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    cache = tmp_path / "70_Imports" / "cache"
+    processed.mkdir(parents=True)
+    cache.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "event_date": "2026-01-02",
+            "currency": "USD",
+            "use_case": "realized_pnl_trade_settlement",
+            "row_count": "1",
+            "amount_native_sum": "",
+            "missing_reason": "same-date FX/KRW provenance required",
+            "source_file_type": "transaction_history",
+            "status": "fx_missing",
+        },
+    ], columns=FX_RATE_REQUIREMENT_COLUMNS).to_csv(processed / "fx_rate_requirements.csv", index=False)
+    pd.DataFrame([
+        {
+            "requirement_key": "2026-01-02|USD|realized_pnl_trade_settlement",
+            "decision": "still_review_gated",
+            "reason_code": "official_fx_unavailable_same_date",
+            "operator_review_label": "official_fx_unavailable_non_business_day",
+        },
+    ]).to_csv(cache / "fx_unavailable_exceptions.csv", index=False)
+    realized_rows = [
+        {
+            "position_status": "closed",
+            "cost_basis_method": "fifo",
+            "amount_review_status": "fx_missing",
+            "fx_status": "fx_missing",
+            "amount_review_reason": "same-date FX provenance required",
+        },
+        {
+            "position_status": "closed",
+            "cost_basis_method": "fifo",
+            "amount_review_status": "lot_missing",
+            "fx_status": "not_required",
+            "amount_review_reason": "sell quantity exceeds matched buy lots",
+        },
+        {
+            "position_status": "closed",
+            "cost_basis_method": "fifo",
+            "amount_review_status": "unit_ambiguous",
+            "fx_status": "not_required",
+            "amount_review_reason": "quantity/unit price interpretation requires review",
+        },
+        {
+            "position_status": "closed",
+            "cost_basis_method": "fifo",
+            "amount_review_status": "fx_missing",
+            "fx_status": "fx_missing",
+            "amount_review_reason": "sell quantity exceeds matched buy lots; same-date FX provenance required",
+        },
+    ]
+    pd.DataFrame(realized_rows, columns=REALIZED_PNL_OUTPUT_COLUMNS).to_csv(processed / "processed_realized_pnl.csv", index=False)
+    qa = pd.DataFrame([
+        {
+            "exception_id": "REC-EX-12",
+            "severity": "advisory",
+            "file": "70_Imports/processed/processed_realized_pnl.csv",
+            "issue": "Realized PnL ledger row requires review before official profit decomposition.",
+            "suggested_fix": "Review realized ledger status.",
+        },
+        {
+            "exception_id": "REC-EX-13",
+            "severity": "advisory",
+            "file": "70_Imports/processed/processed_realized_pnl.csv",
+            "issue": "Sell quantity exceeds matched FIFO buy lots.",
+            "suggested_fix": "Review lot coverage.",
+        },
+        {
+            "exception_id": "REC-EX-10",
+            "severity": "advisory",
+            "file": "70_Imports/processed/reconciliation_summary.csv",
+            "issue": "Realized PnL ledger is incomplete or unavailable.",
+            "suggested_fix": "Review realized ledger.",
+        },
+        {
+            "exception_id": "REC-EX-16",
+            "severity": "advisory",
+            "file": "70_Imports/processed/performance_summary.csv",
+            "issue": "Whole-investment performance summary is not fully available.",
+            "suggested_fix": "Review realized ledger.",
+        },
+    ])
+    qa.to_csv(processed / "qa_exceptions.csv", index=False)
+    build_qa_exception_rollup(qa).to_csv(processed / "qa_exception_rollup.csv", index=False)
+    pd.DataFrame([
+        {
+            "reason": "realized PnL review required",
+            "severity": "advisory",
+            "suggested_action": "Review realized ledger buckets.",
+        },
+    ]).to_csv(processed / "review_queue.csv", index=False)
+
+    qa_content = dashboard_content("QA_Exceptions.md", processed)
+    review_content = dashboard_content("Review_Queue.md", processed)
+
+    for content in [qa_content, review_content]:
+        assert "REC-EX-12 realized PnL review buckets" in content
+        assert "reviewed official-FX-unavailable carry-through" in content
+        assert "FIFO lot coverage gap" in content
+        assert "unit/amount ambiguous" in content
+        assert "Bucket counts can overlap" in content
+        assert "not REC closure or official performance approval" in content
+        assert "REC-EX-10/REC-EX-16 are downstream rollup statuses" in content
+        assert "unreviewed FX requirement keys `0`" in content
+        assert "| bucket | count | meaning |" not in content
+        assert "> - reviewed official-FX-unavailable carry-through: `2`" in content
+    assert qa_content.index("REC-EX-12 realized PnL review buckets") < qa_content.index("## Exception Summary")
+    assert review_content.index("REC-EX-12 realized PnL review buckets") < review_content.index("## Snapshot")
+
 def test_qa_and_review_dashboards_surface_inv_ex_08_user_decision_gate(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     processed.mkdir(parents=True)
