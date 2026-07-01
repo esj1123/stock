@@ -6610,9 +6610,20 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
         {"ticker": "AAPL", "security_name": "Apple", "account_type": "overseas", "asset_type": "stock", "currency": "USD", "currency_native": "USD", "evaluation_amount": 100, "evaluation_amount_krw": "", "amount_review_status": "fx_missing", "weight_pct": 44.44},
     ]).to_csv(processed / "processed_holdings.csv", index=False)
     pd.DataFrame([
+        {"source_file": "PRIVATE_RAW_EXPORT.xlsx", "source_file_type": "holdings_or_balance_source", "account_type": "ISA"},
+        {"source_file": "PRIVATE_TX_HISTORY.xlsx", "source_file_type": "transaction_history_source", "account_type": "comprehensive"},
+    ]).to_csv(processed / "source_file_index.csv", index=False)
+    pd.DataFrame([
+        {"trade_date": "2026-01-01", "transaction_type": "buy", "source_file_type": "transaction_history"},
+        {"trade_date": "2026-01-02", "transaction_type": "sell", "source_file_type": "transaction_history"},
+    ]).to_csv(processed / "processed_transactions.csv", index=False)
+    pd.DataFrame([
         {"realized_trade_pnl_gross_krw": "50", "realized_trade_pnl_net_krw": "45", "amount_review_status": "ok"},
         {"realized_trade_pnl_gross_krw": "", "realized_trade_pnl_net_krw": "", "amount_review_status": "fx_missing"},
     ], columns=REALIZED_PNL_OUTPUT_COLUMNS).to_csv(processed / "processed_realized_pnl.csv", index=False)
+    pd.DataFrame([
+        {"income_type": "dividend", "currency_native": "KRW", "amount_review_status": "ok"},
+    ]).to_csv(processed / "processed_income.csv", index=False)
 
     content = dashboard_content("Portfolio.md", processed)
 
@@ -6642,6 +6653,22 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "<strong>20%</strong>" in content
     assert "## Normalized Currency Exposure" in content
     assert "| USD | 1 |  | 1 | 44.44% |" in content
+    assert "## 이번 업데이트 반영 상태" in content
+    assert "Portfolio update reflection" in content
+    assert '<span class="stock-kpi-label">거래 ledger row</span><strong>2</strong>' in content
+    assert '<span class="stock-kpi-label">실현손익 ledger row</span><strong>2</strong>' in content
+    assert '<span class="stock-kpi-label">수익 ledger row</span><strong>1</strong>' in content
+    assert "not per-run deltas" in content
+    assert "Transaction-history rows are never promoted into current holdings" in content
+    assert "### 보유 snapshot freshness" in content
+    assert "Current holdings source freshness" in content
+    assert '<span class="stock-kpi-label">보유/잔고 source</span><strong>present</strong>' in content
+    assert '<span class="stock-kpi-label">snapshot date</span><strong>missing</strong>' in content
+    assert "date missing" in content
+    assert "not transaction-history inference" in content
+    assert "not promoted to current holdings" in content
+    assert "PRIVATE_RAW_EXPORT.xlsx" not in content
+    assert "PRIVATE_TX_HISTORY.xlsx" not in content
 
 
 def test_portfolio_dashboard_summarizes_reviewed_fx_unavailable_exceptions(tmp_path: Path):

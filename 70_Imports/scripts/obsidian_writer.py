@@ -475,6 +475,120 @@ def account_principal_bridge_section(cashflows: pd.DataFrame, holdings: pd.DataF
     ])
 
 
+HOLDINGS_BALANCE_SOURCE_TYPES = {
+    "balance",
+    "holding",
+    "holdings",
+    "holdings_or_balance_source",
+    "overseas_balance",
+}
+
+TRANSACTION_HISTORY_SOURCE_TYPES = {
+    "cashflow",
+    "transaction",
+    "transaction_history",
+    "transaction_history_source",
+    "transactions",
+}
+
+HOLDINGS_SNAPSHOT_DATE_COLUMNS = (
+    "snapshot_date",
+    "as_of_date",
+    "valuation_date",
+    "base_date",
+    "balance_date",
+)
+
+
+def source_type_count(sources: pd.DataFrame, accepted: set[str]) -> int:
+    if sources.empty or "source_file_type" not in sources.columns:
+        return 0
+    source_types = sources["source_file_type"].fillna("").astype(str).str.strip().str.lower()
+    return int(source_types.isin(accepted).sum())
+
+
+def holdings_snapshot_date_status(holdings: pd.DataFrame) -> tuple[str, str]:
+    if holdings.empty:
+        return "none", "no current holdings rows"
+    dates: list[str] = []
+    for column in HOLDINGS_SNAPSHOT_DATE_COLUMNS:
+        if column not in holdings.columns:
+            continue
+        values = holdings[column].fillna("").astype(str).str.strip().str.slice(0, 10)
+        dates.extend(value for value in values if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value))
+    if not dates:
+        return "missing", "date not carried in processed holdings"
+    return max(dates), "date carried by current holdings snapshot"
+
+
+def holdings_snapshot_status_label(status: str) -> str:
+    if status == "snapshot_date_available":
+        return "date available"
+    if status == "snapshot_date_missing":
+        return "date missing"
+    if status == "no_current_holdings_rows":
+        return "no holdings rows"
+    return status
+
+
+def holdings_snapshot_freshness_section(holdings: pd.DataFrame, sources: pd.DataFrame) -> str:
+    holding_source_count = source_type_count(sources, HOLDINGS_BALANCE_SOURCE_TYPES)
+    transaction_source_count = source_type_count(sources, TRANSACTION_HISTORY_SOURCE_TYPES)
+    source_status = "present" if holding_source_count else "missing"
+    snapshot_date, snapshot_date_hint = holdings_snapshot_date_status(holdings)
+    freshness_status = "snapshot_date_available" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", snapshot_date) else "snapshot_date_missing"
+    if holdings.empty:
+        freshness_status = "no_current_holdings_rows"
+
+    return "\n\n".join([
+        "### 보유 snapshot freshness",
+        dashboard_kpi_grid([
+            snapshot_card("보유/잔고 source", source_status, f"holdings/balance sources: {holding_source_count}"),
+            snapshot_card("현재 보유 row", len(holdings), "current holdings rows"),
+            snapshot_card("snapshot date", snapshot_date, snapshot_date_hint),
+            snapshot_card("거래내역 source", transaction_source_count, "not promoted to current holdings"),
+            snapshot_card("freshness status", holdings_snapshot_status_label(freshness_status)),
+        ]),
+        "> [!note] Current holdings source freshness\n"
+        "> Current holdings use holdings/balance snapshots, not transaction-history inference. "
+        "If recent trades are visible in transactions but not current holdings, add or verify a post-trade holdings/balance snapshot. "
+        "This section uses aggregate source categories only and does not print raw filenames or raw rows.",
+    ])
+
+def portfolio_update_reflection_section(
+    holdings: pd.DataFrame,
+    sources: pd.DataFrame,
+    transactions: pd.DataFrame,
+    realized: pd.DataFrame,
+    income: pd.DataFrame,
+    fx_requirements: pd.DataFrame,
+) -> str:
+    snapshot_date, _snapshot_hint = holdings_snapshot_date_status(holdings)
+    snapshot_status = "snapshot_date_available" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", snapshot_date) else "snapshot_date_missing"
+    if holdings.empty:
+        snapshot_status = "no_current_holdings_rows"
+    holding_source_count = source_type_count(sources, HOLDINGS_BALANCE_SOURCE_TYPES)
+    transaction_source_count = source_type_count(sources, TRANSACTION_HISTORY_SOURCE_TYPES)
+
+    return "\n\n".join([
+        "## 이번 업데이트 반영 상태",
+        dashboard_kpi_grid([
+            snapshot_card("거래 ledger row", len(transactions), "processed transaction rows"),
+            snapshot_card("실현손익 ledger row", len(realized), "processed realized PnL rows"),
+            snapshot_card("수익 ledger row", len(income), "processed income rows"),
+            snapshot_card("현재 보유 row", len(holdings), "current holdings rows"),
+            snapshot_card("FX review gate", len(fx_requirements), "remaining FX requirement rows"),
+            snapshot_card("holdings snapshot", holdings_snapshot_status_label(snapshot_status), "current holdings snapshot date status"),
+            snapshot_card("보유/잔고 source", "present" if holding_source_count else "missing", f"holdings/balance sources: {holding_source_count}"),
+            snapshot_card("거래 source", transaction_source_count, "transaction sources; not current holdings"),
+        ]),
+        "> [!note] Portfolio update reflection\n"
+        "> These cards show current processed-output row counts, not per-run deltas. "
+        "Transaction, realized PnL, and income ledgers can update from transaction history, while current holdings and current valuation require a holdings/balance snapshot. "
+        "Transaction-history rows are never promoted into current holdings.",
+    ])
+
+
 def percent_bar(value: Any, width: int = 20) -> str:
     pct = max(0.0, min(100.0, number_value(value)))
     filled = int(round(pct / 100 * width))
@@ -921,6 +1035,10 @@ def portfolio_content(
     fx_requirements: pd.DataFrame | None = None,
     fx_unavailable_exceptions: pd.DataFrame | None = None,
     cashflows: pd.DataFrame | None = None,
+    sources: pd.DataFrame | None = None,
+    transactions: pd.DataFrame | None = None,
+    realized: pd.DataFrame | None = None,
+    income: pd.DataFrame | None = None,
 ) -> str:
     reconciliation = reconciliation if reconciliation is not None else pd.DataFrame()
     performance_summary = performance_summary if performance_summary is not None else pd.DataFrame()
@@ -929,6 +1047,10 @@ def portfolio_content(
     fx_requirements = fx_requirements if fx_requirements is not None else pd.DataFrame()
     fx_unavailable_exceptions = fx_unavailable_exceptions if fx_unavailable_exceptions is not None else pd.DataFrame()
     cashflows = cashflows if cashflows is not None else pd.DataFrame()
+    sources = sources if sources is not None else pd.DataFrame()
+    transactions = transactions if transactions is not None else pd.DataFrame()
+    realized = realized if realized is not None else pd.DataFrame()
+    income = income if income is not None else pd.DataFrame()
     parts = []
     if warning:
         parts.append(warning)
@@ -1046,6 +1168,7 @@ def portfolio_content(
         snapshot_card("현재 보유분 미실현손익", holdings_unrealized_value, "current holdings only"),
         snapshot_card("현재 보유분 평가수익률", holdings_return_value, "current holdings pnl_pct"),
         "</div>",
+        holdings_snapshot_freshness_section(holdings, sources),
     ]
     principal_cost_bridge = [
         "## 원금/원가 브릿지",
@@ -1086,6 +1209,7 @@ def portfolio_content(
     ]
     parts.append("\n".join(performance))
     parts.append(performance_history_section(performance_history))
+    parts.append(portfolio_update_reflection_section(holdings, sources, transactions, realized, income, fx_requirements))
     parts.append("\n".join(current_position_snapshot))
     parts.append("\n".join(principal_cost_bridge))
     parts.append(account_principal_bridge_section(cashflows, holdings))
@@ -2658,6 +2782,7 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
     performance = read_csv(processed_dir / "performance_summary.csv")
     monthly_cashflow = read_csv(processed_dir / "monthly_cashflow_summary.csv")
     performance_history = read_csv(processed_dir / "performance_history.csv")
+    transactions = read_csv(processed_dir / "processed_transactions.csv")
     realized = read_csv(processed_dir / "processed_realized_pnl.csv")
     holdings = read_csv(processed_dir / "processed_holdings.csv")
     risk = read_csv(processed_dir / "risk_watchlist.csv")
@@ -2693,6 +2818,10 @@ def dashboard_content(name: str, processed_dir: Path) -> str:
             fx_requirements,
             fx_unavailable_exceptions,
             cash,
+            sources,
+            transactions,
+            realized,
+            income,
         )
     if name == "Reconciliation.md":
         return reconciliation_content(reconciliation, summary, realized, fx_requirements, fx_unavailable_exceptions)
