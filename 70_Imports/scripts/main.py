@@ -4,6 +4,9 @@ import argparse
 import hashlib
 import json
 import os
+import shutil
+import tempfile
+from contextlib import ExitStack
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -49,6 +52,14 @@ GOOGLE_DRIVE_PATH_MARKERS = (
     "shared drives",
     "내 드라이브",
     "공유 드라이브",
+)
+DRY_RUN_CACHE_CONTEXT_FILES = (
+    "fx_rates.csv",
+    "fx_rates_cached.csv",
+    "fx_unavailable_exceptions.csv",
+)
+DRY_RUN_PROCESSED_CONTEXT_FILES = (
+    "performance_history.csv",
 )
 
 
@@ -109,6 +120,37 @@ def default_evidence_dir() -> Path:
     if local_app_data:
         return Path(local_app_data) / "06_Stock" / "dry_run_evidence"
     return Path.home() / ".06_stock" / "dry_run_evidence"
+
+
+def command_needs_materialized_dry_run_processed(command: str) -> bool:
+    return command in {"import", "all"}
+
+
+def copy_dry_run_cache_context(vault_root: Path, dry_run_import_root: Path) -> None:
+    source_cache = vault_root / "70_Imports" / "cache"
+    if not source_cache.exists():
+        return
+
+    target_cache = dry_run_import_root / "cache"
+    for name in DRY_RUN_CACHE_CONTEXT_FILES:
+        source = source_cache / name
+        if not source.exists() or not source.is_file():
+            continue
+        target_cache.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, target_cache / name)
+
+
+def copy_dry_run_processed_context(vault_root: Path, dry_run_processed_dir: Path) -> None:
+    source_processed = vault_root / "70_Imports" / "processed"
+    if not source_processed.exists():
+        return
+
+    for name in DRY_RUN_PROCESSED_CONTEXT_FILES:
+        source = source_processed / name
+        if not source.exists() or not source.is_file():
+            continue
+        dry_run_processed_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, dry_run_processed_dir / name)
 
 
 def evidence_output_path_guidance() -> str:
@@ -413,7 +455,7 @@ def main() -> int:
     args = build_parser().parse_args()
     vault_root = Path(args.vault_root).resolve()
     raw_dir = Path(args.raw_dir).resolve() if args.raw_dir else vault_root / "70_Imports" / "raw"
-    processed_dir = vault_root / "70_Imports" / "processed"
+    live_processed_dir = vault_root / "70_Imports" / "processed"
 
     guard_findings = live_write_guard_findings(args, vault_root, raw_dir)
     if guard_findings:
@@ -443,48 +485,61 @@ def main() -> int:
     planned_categories: dict[str, Any] = {}
     warning_counts: dict[str, int] = {}
 
-    if args.command in {"import", "all"}:
-        summary = import_raw_dir(
-            vault_root,
-            raw_dir=raw_dir,
-            processed_dir=processed_dir,
-            force_reindex=args.force_reindex,
-            dry_run=args.dry_run,
-            verbose=args.verbose,
-        )
-        print(
-            f"[import] raw_files={summary.raw_files}, parsed_rows={summary.parsed_rows}, "
-            f"duplicate_removed={summary.duplicate_rows_removed}, unclassified={summary.unclassified_rows}"
-        )
-        planned_categories["import"] = {
-            "raw_file_count": int(summary.raw_files),
-            "parsed_row_count": int(summary.parsed_rows),
-            "duplicate_rows_removed_count": int(summary.duplicate_rows_removed),
-            "unclassified_row_count": int(summary.unclassified_rows),
-            "unknown_column_count": int(summary.unknown_columns),
-        }
+    with ExitStack() as stack:
+        processed_dir = live_processed_dir
+        dry_run_materialized_processed = False
+        if args.dry_run and command_needs_materialized_dry_run_processed(args.command):
+            temp_root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="stock_dry_run_processed_")))
+            dry_run_import_root = temp_root / "70_Imports"
+            copy_dry_run_cache_context(vault_root, dry_run_import_root)
+            processed_dir = dry_run_import_root / "processed"
+            copy_dry_run_processed_context(vault_root, processed_dir)
+            dry_run_materialized_processed = True
 
-    if args.command in {"report", "all"}:
-        report_summary = generate_reports(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
-        print(f"[report] {report_summary}")
-        planned_categories["report"] = {str(key): int(value) for key, value in report_summary.items()}
-        if not args.no_note_write:
-            warnings = write_dashboards(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
-            warnings += write_company_notes(vault_root, processed_dir=processed_dir, create_companies=args.create_companies, dry_run=args.dry_run)
-            planned_categories["notes"] = {"note_update_category_count": 2}
-            warning_counts["note_warning_count"] = len(warnings)
-            for warning in warnings:
-                print(f"[warning] {warning}")
+        if args.command in {"import", "all"}:
+            import_dry_run = args.dry_run and not dry_run_materialized_processed
+            summary = import_raw_dir(
+                vault_root,
+                raw_dir=raw_dir,
+                processed_dir=processed_dir,
+                force_reindex=args.force_reindex,
+                dry_run=import_dry_run,
+                verbose=args.verbose,
+            )
+            print(
+                f"[import] raw_files={summary.raw_files}, parsed_rows={summary.parsed_rows}, "
+                f"duplicate_removed={summary.duplicate_rows_removed}, unclassified={summary.unclassified_rows}"
+            )
+            planned_categories["import"] = {
+                "raw_file_count": int(summary.raw_files),
+                "parsed_row_count": int(summary.parsed_rows),
+                "duplicate_rows_removed_count": int(summary.duplicate_rows_removed),
+                "unclassified_row_count": int(summary.unclassified_rows),
+                "unknown_column_count": int(summary.unknown_columns),
+            }
 
-    if args.command in {"qa", "all"}:
-        qa = run_qa(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
-        print(f"[qa] exceptions={len(qa)}")
-        planned_categories["qa"] = qa_rollup_evidence_counts(qa)
-        warning_counts["qa_exception_count"] = int(len(qa))
+        if args.command in {"report", "all"}:
+            report_dry_run = args.dry_run and not dry_run_materialized_processed
+            report_summary = generate_reports(vault_root, processed_dir=processed_dir, dry_run=report_dry_run)
+            print(f"[report] {report_summary}")
+            planned_categories["report"] = {str(key): int(value) for key, value in report_summary.items()}
+            if not args.no_note_write:
+                warnings = write_dashboards(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
+                warnings += write_company_notes(vault_root, processed_dir=processed_dir, create_companies=args.create_companies, dry_run=args.dry_run)
+                planned_categories["notes"] = {"note_update_category_count": 2}
+                warning_counts["note_warning_count"] = len(warnings)
+                for warning in warnings:
+                    print(f"[warning] {warning}")
 
-    if args.dry_run and evidence_output_path:
-        write_dry_run_evidence(evidence_output_path, args, vault_root, raw_dir, planned_categories, warning_counts)
-        print(f"[dry-run-evidence] wrote {evidence_output_path}")
+        if args.command in {"qa", "all"}:
+            qa = run_qa(vault_root, processed_dir=processed_dir, dry_run=args.dry_run)
+            print(f"[qa] exceptions={len(qa)}")
+            planned_categories["qa"] = qa_rollup_evidence_counts(qa)
+            warning_counts["qa_exception_count"] = int(len(qa))
+
+        if args.dry_run and evidence_output_path:
+            write_dry_run_evidence(evidence_output_path, args, vault_root, raw_dir, planned_categories, warning_counts)
+            print(f"[dry-run-evidence] wrote {evidence_output_path}")
 
     print("[done] no automated buy/sell orders were executed.")
     return 0

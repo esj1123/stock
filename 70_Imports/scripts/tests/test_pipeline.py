@@ -627,6 +627,127 @@ def test_live_vault_entrypoint_allows_write_only_with_matching_evidence(tmp_path
     assert calls == ["import", "report", "dashboards", "company_notes", "qa"]
 
 
+def test_main_all_dry_run_materializes_import_report_and_qa_against_temp_processed(tmp_path: Path, monkeypatch):
+    live_vault = tmp_path / "live_vault"
+    raw_dir = live_vault / "70_Imports" / "raw"
+    live_cache = live_vault / "70_Imports" / "cache"
+    live_processed = live_vault / "70_Imports" / "processed"
+    evidence_path = tmp_path / "evidence" / "materialized-dry-run.json"
+    raw_dir.mkdir(parents=True)
+    live_cache.mkdir(parents=True)
+    live_processed.mkdir(parents=True)
+    (live_cache / "fx_rates.csv").write_text("synthetic cache context", encoding="utf-8")
+    (live_processed / "performance_history.csv").write_text("synthetic existing history", encoding="utf-8")
+    calls: list[str] = []
+    observed_processed: dict[str, Path] = {}
+    monkeypatch.setattr(pipeline_main, "dry_run_evidence_output_path_findings", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(sys, "argv", [
+        "main.py",
+        "all",
+        "--vault-root",
+        str(live_vault),
+        "--raw-dir",
+        str(raw_dir),
+        "--dry-run",
+        "--dry-run-evidence-out",
+        str(evidence_path),
+    ])
+
+    def fake_import(_vault_root, **kwargs):
+        calls.append("import")
+        processed_dir = Path(kwargs["processed_dir"])
+        observed_processed["path"] = processed_dir
+        assert kwargs["dry_run"] is False
+        assert not pipeline_main.path_is_within(processed_dir, live_vault)
+        processed_dir.mkdir(parents=True, exist_ok=True)
+        (processed_dir / "processed_holdings.csv").write_text("synthetic", encoding="utf-8")
+        return SimpleNamespace(raw_files=1, parsed_rows=2, duplicate_rows_removed=0, unclassified_rows=0, unknown_columns=0)
+
+    def fake_report(_vault_root, **kwargs):
+        calls.append("report")
+        processed_dir = Path(kwargs["processed_dir"])
+        assert processed_dir == observed_processed["path"]
+        assert kwargs["dry_run"] is False
+        assert (processed_dir.parent / "cache" / "fx_rates.csv").read_text(encoding="utf-8") == "synthetic cache context"
+        assert (processed_dir / "performance_history.csv").read_text(encoding="utf-8") == "synthetic existing history"
+        return {"summary_rows": 1}
+
+    def fake_dashboards(_vault_root, **kwargs):
+        calls.append("dashboards")
+        assert Path(kwargs["processed_dir"]) == observed_processed["path"]
+        assert kwargs["dry_run"] is True
+        return []
+
+    def fake_company_notes(_vault_root, **kwargs):
+        calls.append("company_notes")
+        assert Path(kwargs["processed_dir"]) == observed_processed["path"]
+        assert kwargs["dry_run"] is True
+        return []
+
+    def fake_qa(_vault_root, processed_dir=None, **kwargs):
+        calls.append("qa")
+        assert Path(processed_dir) == observed_processed["path"]
+        assert kwargs["dry_run"] is True
+        return pd.DataFrame([{
+            "exception_id": "REC-EX-01",
+            "severity": "blocking",
+            "file": "70_Imports/processed/fx_rate_requirements.csv",
+            "issue": "synthetic same-date FX review gate",
+            "suggested_fix": "operator review",
+        }])
+
+    monkeypatch.setattr(pipeline_main, "import_raw_dir", fake_import)
+    monkeypatch.setattr(pipeline_main, "generate_reports", fake_report)
+    monkeypatch.setattr(pipeline_main, "write_dashboards", fake_dashboards)
+    monkeypatch.setattr(pipeline_main, "write_company_notes", fake_company_notes)
+    monkeypatch.setattr(pipeline_main, "run_qa", fake_qa)
+
+    assert pipeline_main.main() == 0
+    payload = json.loads(evidence_path.read_text(encoding="utf-8"))
+    assert calls == ["import", "report", "dashboards", "company_notes", "qa"]
+    assert payload["planned_categories"]["import"]["parsed_row_count"] == 2
+    assert payload["planned_categories"]["report"] == {"summary_rows": 1}
+    assert payload["planned_categories"]["qa"]["exception_count"] == 1
+    assert not (live_processed / "processed_holdings.csv").exists()
+    assert (live_processed / "performance_history.csv").read_text(encoding="utf-8") == "synthetic existing history"
+
+
+def test_main_qa_dry_run_keeps_existing_processed_without_temp_materialization(tmp_path: Path, monkeypatch):
+    vault = tmp_path / "vault"
+    raw_dir = vault / "70_Imports" / "raw"
+    live_processed = vault / "70_Imports" / "processed"
+    raw_dir.mkdir(parents=True)
+    live_processed.mkdir(parents=True)
+    calls: list[str] = []
+    monkeypatch.setattr(sys, "argv", [
+        "main.py",
+        "qa",
+        "--vault-root",
+        str(vault),
+        "--raw-dir",
+        str(raw_dir),
+        "--dry-run",
+    ])
+
+    def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("qa-only dry-run should not run import/report/note steps")
+
+    def fake_qa(_vault_root, processed_dir=None, **kwargs):
+        calls.append("qa")
+        assert Path(processed_dir) == live_processed
+        assert kwargs["dry_run"] is True
+        return pd.DataFrame()
+
+    monkeypatch.setattr(pipeline_main, "import_raw_dir", fail_if_called)
+    monkeypatch.setattr(pipeline_main, "generate_reports", fail_if_called)
+    monkeypatch.setattr(pipeline_main, "write_dashboards", fail_if_called)
+    monkeypatch.setattr(pipeline_main, "write_company_notes", fail_if_called)
+    monkeypatch.setattr(pipeline_main, "run_qa", fake_qa)
+
+    assert pipeline_main.main() == 0
+    assert calls == ["qa"]
+
+
 def test_dry_run_evidence_artifact_contains_only_sanitized_metadata(tmp_path: Path):
     live_vault = tmp_path / "live_vault_ACCOUNT-999999"
     raw_dir = live_vault / "70_Imports" / "raw"
