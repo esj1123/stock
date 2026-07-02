@@ -6573,8 +6573,8 @@ def test_portfolio_dashboard_performance_history_two_points_renders_graph_and_fa
 
     assert "<svg" in section
     assert "Monthly Principal and Cumulative Return Trend" in section
-    assert "historical total assets are not inferred from raw transactions" in section
-    assert "### Fallback table" in section
+    assert "historical total assets는 raw transactions로 추정하지 않습니다" in section
+    assert "### 대체 표시 표" in section
     assert not re.search(r'<text class="label" x="8" y="[^"]+">-?[\d,]+\.\d+</text>', section)
     assert "| 2026-05 | 2026-05-24 | 120,000 | 125,000 | 5,000 | 4.17% | available |" in section
 
@@ -6651,22 +6651,22 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "<strong>1,500</strong>" in content
     assert "<strong>300</strong>" in content
     assert "<strong>20%</strong>" in content
-    assert "## Normalized Currency Exposure" in content
+    assert "## 정규화 통화 노출" in content
     assert "| USD | 1 |  | 1 | 44.44% |" in content
     assert "## 이번 업데이트 반영 상태" in content
-    assert "Portfolio update reflection" in content
+    assert "이번 업데이트 반영 설명" in content
     assert '<span class="stock-kpi-label">거래 ledger row</span><strong>2</strong>' in content
     assert '<span class="stock-kpi-label">실현손익 ledger row</span><strong>2</strong>' in content
     assert '<span class="stock-kpi-label">수익 ledger row</span><strong>1</strong>' in content
-    assert "not per-run deltas" in content
-    assert "Transaction-history rows are never promoted into current holdings" in content
-    assert "### 보유 snapshot freshness" in content
-    assert "Current holdings source freshness" in content
-    assert '<span class="stock-kpi-label">보유/잔고 source</span><strong>present</strong>' in content
+    assert "실행별 delta가 아니라" in content
+    assert "current holdings로 승격하지 않습니다" in content
+    assert "### 보유 snapshot 최신성" in content
+    assert "현재 보유 source 최신성" in content
+    assert '<span class="stock-kpi-label">보유/잔고 source</span><strong>있음</strong>' in content
     assert '<span class="stock-kpi-label">snapshot 날짜</span><strong>날짜 없음</strong>' in content
     assert "날짜 없음" in content
-    assert "not transaction-history inference" in content
-    assert "not promoted to current holdings" in content
+    assert "거래내역 추정이 아니라" in content
+    assert "현재 보유로 승격하지 않음" in content
     assert "PRIVATE_RAW_EXPORT.xlsx" not in content
     assert "PRIVATE_TX_HISTORY.xlsx" not in content
 

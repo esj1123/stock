@@ -467,7 +467,7 @@ def account_principal_bridge_section(cashflows: pd.DataFrame, holdings: pd.DataF
     bridge = account_principal_bridge_frame(cashflows, holdings)
     return "\n\n".join([
         "## 계좌별 원금/평가 브릿지",
-        "> [!note] Account principal/value bridge\n"
+        "> [!note] 계좌별 원금/평가 브릿지\n"
         "> 계좌별 순투입원금은 외부 입출금 기준입니다. 현재 평가금액은 current holdings/cash snapshot 기준이며, "
         "계좌별 공식 TWR/MWR 수익률이 아닙니다. `종합+해외`는 종합 원금 흐름과 해외잔고 valuation snapshot을 함께 보여주는 display bucket이며, "
         "source provenance는 내부적으로 분리되어 있습니다. 내부 이동, 환전, FX review gate 상태에 따라 해석 차이가 남을 수 있습니다.",
@@ -542,25 +542,25 @@ def holdings_snapshot_date_label(value: str) -> str:
 def holdings_snapshot_freshness_section(holdings: pd.DataFrame, sources: pd.DataFrame) -> str:
     holding_source_count = source_type_count(sources, HOLDINGS_BALANCE_SOURCE_TYPES)
     transaction_source_count = source_type_count(sources, TRANSACTION_HISTORY_SOURCE_TYPES)
-    source_status = "present" if holding_source_count else "missing"
+    source_status = "있음" if holding_source_count else "없음"
     snapshot_date, snapshot_date_hint = holdings_snapshot_date_status(holdings)
     freshness_status = "snapshot_date_available" if re.fullmatch(r"\d{4}-\d{2}-\d{2}", snapshot_date) else "snapshot_date_missing"
     if holdings.empty:
         freshness_status = "no_current_holdings_rows"
 
     return "\n\n".join([
-        "### 보유 snapshot freshness",
+        "### 보유 snapshot 최신성",
         dashboard_kpi_grid([
-            snapshot_card("보유/잔고 source", source_status, f"holdings/balance sources: {holding_source_count}"),
-            snapshot_card("현재 보유 row", len(holdings), "current holdings rows"),
+            snapshot_card("보유/잔고 source", source_status, f"보유/잔고 source: {holding_source_count}"),
+            snapshot_card("현재 보유 row", len(holdings), "현재 보유 row"),
             snapshot_card("snapshot 날짜", holdings_snapshot_date_label(snapshot_date), snapshot_date_hint),
-            snapshot_card("거래내역 source", transaction_source_count, "not promoted to current holdings"),
+            snapshot_card("거래내역 source", transaction_source_count, "현재 보유로 승격하지 않음"),
             snapshot_card("최신성 상태", holdings_snapshot_status_label(freshness_status)),
         ]),
-        "> [!note] Current holdings source freshness\n"
-        "> Current holdings use holdings/balance snapshots, not transaction-history inference. "
-        "If recent trades are visible in transactions but not current holdings, add or verify a post-trade holdings/balance snapshot. "
-        "This section uses aggregate source categories only and does not print raw filenames or raw rows.",
+        "> [!note] 현재 보유 source 최신성\n"
+        "> 현재 보유는 거래내역 추정이 아니라 보유/잔고 snapshot을 사용합니다. "
+        "최근 거래가 거래 ledger에는 보이지만 현재 보유에 반영되지 않았다면 post-trade 보유/잔고 snapshot을 추가하거나 확인하세요. "
+        "이 섹션은 aggregate source category만 사용하며 raw filename이나 raw row를 출력하지 않습니다.",
     ])
 
 def portfolio_update_reflection_section(
@@ -581,19 +581,19 @@ def portfolio_update_reflection_section(
     return "\n\n".join([
         "## 이번 업데이트 반영 상태",
         dashboard_kpi_grid([
-            snapshot_card("거래 ledger row", len(transactions), "processed transaction rows"),
-            snapshot_card("실현손익 ledger row", len(realized), "processed realized PnL rows"),
-            snapshot_card("수익 ledger row", len(income), "processed income rows"),
-            snapshot_card("현재 보유 row", len(holdings), "current holdings rows"),
-            snapshot_card("FX review gate", len(fx_requirements), "remaining FX requirement rows"),
+            snapshot_card("거래 ledger row", len(transactions), "processed 거래 row"),
+            snapshot_card("실현손익 ledger row", len(realized), "processed 실현손익 row"),
+            snapshot_card("수익 ledger row", len(income), "processed 수익 row"),
+            snapshot_card("현재 보유 row", len(holdings), "현재 보유 row"),
+            snapshot_card("FX review gate", len(fx_requirements), "잔여 FX requirement row"),
             snapshot_card("보유 snapshot", holdings_snapshot_status_label(snapshot_status), "현재 보유 snapshot 날짜 상태"),
-            snapshot_card("보유/잔고 source", "present" if holding_source_count else "missing", f"holdings/balance sources: {holding_source_count}"),
-            snapshot_card("거래 source", transaction_source_count, "transaction sources; not current holdings"),
+            snapshot_card("보유/잔고 source", "있음" if holding_source_count else "없음", f"보유/잔고 source: {holding_source_count}"),
+            snapshot_card("거래 source", transaction_source_count, "거래 source; 현재 보유 아님"),
         ]),
-        "> [!note] Portfolio update reflection\n"
-        "> These cards show current processed-output row counts, not per-run deltas. "
-        "Transaction, realized PnL, and income ledgers can update from transaction history, while current holdings and current valuation require a holdings/balance snapshot. "
-        "Transaction-history rows are never promoted into current holdings.",
+        "> [!note] 이번 업데이트 반영 설명\n"
+        "> 이 카드는 실행별 delta가 아니라 현재 processed output row count입니다. "
+        "거래, 실현손익, 수익 ledger는 transaction history로 갱신될 수 있지만 현재 보유와 현재 평가는 보유/잔고 snapshot이 필요합니다. "
+        "transaction-history row는 current holdings로 승격하지 않습니다.",
     ])
 
 
@@ -1235,32 +1235,32 @@ def portfolio_content(
     if data_warning:
         parts.append(f"> [!warning] Data quality\n> {markdown_cell(data_warning)}")
     parts.extend([
-        "## Allocation Overview",
-        "### Account allocation",
+        "## 배분 현황",
+        "### 계좌 배분",
         weight_summary_table(holdings, "account_type"),
-        "### Asset type allocation",
+        "### 자산 유형 배분",
         weight_summary_table(holdings, "asset_type"),
-        "### Currency allocation",
+        "### 통화 배분",
         weight_summary_table(holdings, "currency"),
-        "## Normalized Currency Exposure",
+        "## 정규화 통화 노출",
         normalized_currency_exposure_table(holdings),
-        "## Concentration",
-        "### Top positions by weight",
+        "## 집중도",
+        "### 비중 상위 보유",
         top_weight_table(holdings),
-        "## Risk Review",
-        "### Lowest PnL candidates",
+        "## 리스크 검토",
+        "### 손익 하위 후보",
         worst_pnl_table(holdings),
-        "### Leveraged ETF candidates",
+        "### 레버리지 ETF 후보",
         filtered_position_table(holdings, "leveraged"),
-        "### Loss review candidates",
+        "### 손실 검토 후보",
         filtered_position_table(holdings, "loss_review"),
     ])
-    parts.append("## Holdings Detail")
+    parts.append("## 보유 상세")
     if holdings.empty:
         parts.append("_표시할 데이터가 없습니다._")
     else:
         detail = markdown_table(holdings, ["ticker", "security_name", "account_type", "market", "asset_type", "currency", "evaluation_amount", "unrealized_pnl", "pnl_pct", "weight_pct"], 50)
-        parts.append(f"<details>\n<summary>Show all holdings ({len(holdings)})</summary>\n\n{detail}\n\n</details>")
+        parts.append(f"<details>\n<summary>전체 보유 표시 ({len(holdings)})</summary>\n\n{detail}\n\n</details>")
     return "\n\n".join(parts).strip()
 
 
@@ -1421,17 +1421,17 @@ def cashflow_trend_section(monthly_cashflow: pd.DataFrame) -> str:
 def performance_history_section(performance_history: pd.DataFrame) -> str:
     heading = "## 월별 원금/누적수익 추이"
     scope_note = (
-        "> [!note] Scope\n"
-        "> cumulative_principal_krw is based on monthly external principal flows. "
-        "current_total_assets_krw and cumulative_return_* require imported balance snapshots; "
-        "historical total assets are not inferred from raw transactions."
+        "> [!note] 범위\n"
+        "> cumulative_principal_krw는 월별 외부 원금 흐름 기준입니다. "
+        "current_total_assets_krw와 cumulative_return_*은 가져온 balance snapshot이 필요하며, "
+        "historical total assets는 raw transactions로 추정하지 않습니다."
     )
     if performance_history.empty:
         return "\n\n".join([
             heading,
             scope_note,
             "> [!note] 추후 import 누적 후 표시\n> snapshot history point가 2개 미만이라 그래프를 표시하지 않습니다.",
-            "### Fallback table",
+            "### 대체 표시 표",
             EMPTY_DATA,
         ])
 
@@ -1454,7 +1454,7 @@ def performance_history_section(performance_history: pd.DataFrame) -> str:
             ],
             title="Monthly Principal and Cumulative Return Trend",
         ))
-    parts.extend(["### Fallback table", markdown_table(view)])
+    parts.extend(["### 대체 표시 표", markdown_table(view)])
     return "\n\n".join(parts)
 
 
