@@ -14,7 +14,7 @@ import pandas as pd
 
 NORMALIZED_COLUMNS = [
     "import_id", "source_file", "source_file_type", "account_type", "market", "asset_type",
-    "ticker", "security_name", "trade_date", "trade_time", "transaction_type",
+    "ticker", "security_name", "trade_date", "snapshot_date", "trade_time", "transaction_type",
     "quantity", "price", "trade_amount", "settlement_amount", "fee", "tax", "currency", "fx_rate",
     "balance_quantity", "evaluation_amount", "unrealized_pnl", "pnl_pct", "raw_memo",
     "quantity_unit", "price_unit", "price_kind", "money_unit_native", "money_unit_krw",
@@ -233,6 +233,12 @@ KNOWN_OVERSEAS_ISIN_SYMBOL_ALIASES = {
 
 COLUMN_ALIASES = {
     "trade_date": ["실거래일자", "거래일자", "거래일", "일자", "매매일", "체결일", "정산일"],
+    "snapshot_date": [
+        "조회일", "조회일자", "기준일", "기준일자", "평가일", "평가일자",
+        "잔고기준일", "잔고기준일자", "as of date", "as_of_date",
+        "snapshot date", "snapshot_date", "valuation date", "valuation_date",
+        "base date", "base_date", "balance date", "balance_date",
+    ],
     "trade_time": ["거래시간", "시간", "체결시간"],
     "transaction_raw": ["거래유형", "거래구분", "매매구분", "상세내용", "내용", "적요", "구분", "거래내용", "입출금구분"],
     "security_name": ["종목명", "종목명칭", "상품명", "명칭", "종목"],
@@ -1822,6 +1828,9 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             raw_row_number = int(idx) + 1
         raw_json = json.dumps({str(k): redact_sensitive(v) for k, v in raw.to_dict().items()}, ensure_ascii=False, default=str)
         date = normalize_date(raw.get(cols["trade_date"])) if cols.get("trade_date") is not None else ""
+        snapshot_date = ""
+        if row_source_type in BALANCE_SOURCE_TYPES and cols.get("snapshot_date") is not None:
+            snapshot_date = normalize_date(raw.get(cols["snapshot_date"]))
         name = str(raw.get(cols["security_name"]) if cols.get("security_name") is not None else "").strip()
         ticker = str(raw.get(cols["ticker"]) if cols.get("ticker") is not None else "").strip()
         if (not ticker or ticker.lower() == "nan") and name:
@@ -1996,7 +2005,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
 
         stable = {
             "source_file_type": row_source_type, "account_type": account_type, "ticker": ticker,
-            "security_name": name, "trade_date": date, "trade_time": normalize_time(raw.get(cols["trade_time"])) if cols.get("trade_time") is not None else "",
+            "security_name": name, "trade_date": date, "snapshot_date": snapshot_date, "trade_time": normalize_time(raw.get(cols["trade_time"])) if cols.get("trade_time") is not None else "",
             "transaction_type": tx_type, "quantity": quantity, "price": price,
             "trade_amount": trade_amount, "settlement_amount": settlement_amount,
             "fee": fee, "tax": tax,
@@ -2019,6 +2028,7 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "ticker": ticker,
             "security_name": redact_sensitive(name),
             "trade_date": date,
+            "snapshot_date": snapshot_date,
             "trade_time": stable["trade_time"],
             "transaction_type": tx_type,
             "quantity": quantity,
@@ -2099,7 +2109,7 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
         "history_queue.csv": pd.DataFrame(columns=HISTORY_COLUMNS),
         "post_mortem_candidates.csv": pd.DataFrame(columns=HISTORY_COLUMNS),
         "qa_exceptions.csv": pd.DataFrame(columns=["exception_id", "severity", "file", "issue", "suggested_fix"]),
-        "source_file_index.csv": pd.DataFrame(columns=["source_file", "source_file_type", "account_type", "raw_path_hash", "size_bytes", "modified_at", "imported_at", "sensitive_data_found"]),
+        "source_file_index.csv": pd.DataFrame(columns=["source_file", "source_file_type", "account_type", "snapshot_date", "raw_path_hash", "size_bytes", "modified_at", "imported_at", "sensitive_data_found"]),
         "unclassified_rows.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "skipped_rows.csv": pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS),
         "raw_rows_audit.csv": pd.DataFrame(columns=["import_id", "source_file", "sheet", "row_number", "raw_json"]),
@@ -2904,11 +2914,17 @@ def collapse_holding_rows(df: pd.DataFrame) -> pd.DataFrame:
     if work.empty:
         return pd.DataFrame(columns=NORMALIZED_COLUMNS + HOLDING_DEDUPE_COLUMNS)
     work = remove_overlapping_overseas_holdings(work)
+    sort_cols: list[str] = []
+    if "snapshot_date" in work:
+        work["_snapshot_date_sort"] = pd.to_datetime(work["snapshot_date"], errors="coerce")
+        sort_cols.append("_snapshot_date_sort")
     if "trade_date" in work:
         work["_sort_date"] = pd.to_datetime(work["trade_date"], errors="coerce")
-        work = work.sort_values(["account_type", "ticker", "_sort_date"], na_position="first")
+        sort_cols.append("_sort_date")
+    if sort_cols:
+        work = work.sort_values(["account_type", "ticker", *sort_cols], na_position="first")
     group_cols = [c for c in ["account_type", "ticker"] if c in work.columns]
-    collapsed = work.groupby(group_cols, dropna=False, as_index=False).tail(1).drop(columns=["_sort_date"], errors="ignore")
+    collapsed = work.groupby(group_cols, dropna=False, as_index=False).tail(1).drop(columns=["_snapshot_date_sort", "_sort_date"], errors="ignore")
     return collapsed.reset_index(drop=True)
 
 
@@ -2969,18 +2985,44 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
         try:
             tables = load_workbook_tables(path)
         except Exception as exc:
-            source_rows.append({"source_file": source_name, "source_file_type": "read_error", "account_type": infer_account_type(path.name), "raw_path_hash": raw_hash, "size_bytes": path.stat().st_size, "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"), "imported_at": datetime.now().isoformat(timespec="seconds"), "sensitive_data_found": sensitive, "error": str(exc)})
+            source_rows.append({
+                "source_file": source_name,
+                "source_file_type": "read_error",
+                "account_type": infer_account_type(path.name),
+                "snapshot_date": "",
+                "raw_path_hash": raw_hash,
+                "size_bytes": path.stat().st_size,
+                "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+                "imported_at": datetime.now().isoformat(timespec="seconds"),
+                "sensitive_data_found": sensitive,
+                "error": str(exc),
+            })
             continue
         file_type_seen = "unknown"
+        snapshot_dates_seen: list[str] = []
         for sheet, df in tables.items():
             normalized, raw_audit, unknown = normalize_dataframe(df, path, str(sheet))
             if not normalized.empty:
                 file_type_seen = normalized["source_file_type"].dropna().iloc[0]
+                if "snapshot_date" in normalized.columns:
+                    source_types = normalized.get("source_file_type", pd.Series("", index=normalized.index)).fillna("").astype(str).str.lower()
+                    snapshot_values = normalized.loc[source_types.isin(BALANCE_SOURCE_TYPES), "snapshot_date"].fillna("").astype(str).str.strip()
+                    snapshot_dates_seen.extend(value for value in snapshot_values if is_valid_normalized_date(value))
             all_rows.append(normalized)
             audit.append(raw_audit)
             for col in unknown:
                 unknown_columns.append({"source_file": source_name, "sheet": sheet, "unknown_column": col})
-        source_rows.append({"source_file": source_name, "source_file_type": file_type_seen, "account_type": infer_account_type(path.name), "raw_path_hash": raw_hash, "size_bytes": path.stat().st_size, "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"), "imported_at": datetime.now().isoformat(timespec="seconds"), "sensitive_data_found": sensitive})
+        source_rows.append({
+            "source_file": source_name,
+            "source_file_type": file_type_seen,
+            "account_type": infer_account_type(path.name),
+            "snapshot_date": max(snapshot_dates_seen) if snapshot_dates_seen else "",
+            "raw_path_hash": raw_hash,
+            "size_bytes": path.stat().st_size,
+            "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
+            "imported_at": datetime.now().isoformat(timespec="seconds"),
+            "sensitive_data_found": sensitive,
+        })
 
     combined = pd.concat(all_rows, ignore_index=True) if all_rows else pd.DataFrame(columns=NORMALIZED_COLUMNS)
     summary.parsed_rows = len(combined)

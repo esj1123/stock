@@ -3311,6 +3311,7 @@ def test_cashflow_named_position_snapshot_becomes_holdings_view(tmp_path: Path):
     pd.DataFrame([
         {
             "No": 1,
+            "조회일": "2026-06-28",
             "잔고유형": "stock",
             "상품명": "Samsung",
             "상품코드": "005930",
@@ -3332,11 +3333,51 @@ def test_cashflow_named_position_snapshot_becomes_holdings_view(tmp_path: Path):
     holdings = pd.read_csv(processed / "processed_holdings.csv")
 
     assert set(idx["source_file_type"]) == {"holdings"}
+    assert idx["snapshot_date"].iloc[0] == "2026-06-28"
     assert transactions.empty
     assert cashflows.empty
     assert len(holdings) == 1
     assert holdings["source_file_type"].iloc[0] == "holdings"
+    assert holdings["snapshot_date"].iloc[0] == "2026-06-28"
     assert str(holdings["ticker"].iloc[0]).zfill(6) == "005930"
+    assert holdings["balance_quantity"].iloc[0] == 2
+    assert holdings["evaluation_amount"].iloc[0] == 140000
+
+
+def test_holding_collapse_prefers_latest_explicit_snapshot_date(tmp_path: Path):
+    vault = tmp_path
+    raw = vault / "70_Imports" / "raw"
+    raw.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "No": 1,
+            "조회일": "2026-06-27",
+            "잔고유형": "stock",
+            "상품명": "Samsung",
+            "상품코드": "005930",
+            "구분": "domestic",
+            "수량": "1",
+            "현재가": "60000",
+            "평가금액": "60000",
+        },
+        {
+            "No": 2,
+            "조회일": "2026-06-29",
+            "잔고유형": "stock",
+            "상품명": "Samsung",
+            "상품코드": "005930",
+            "구분": "domestic",
+            "수량": "2",
+            "현재가": "70000",
+            "평가금액": "140000",
+        },
+    ]).to_excel(raw / "입출금_잔고.xlsx", index=False)
+
+    import_raw_dir(vault)
+    holdings = pd.read_csv(vault / "70_Imports" / "processed" / "processed_holdings.csv")
+
+    assert len(holdings) == 1
+    assert holdings["snapshot_date"].iloc[0] == "2026-06-29"
     assert holdings["balance_quantity"].iloc[0] == 2
     assert holdings["evaluation_amount"].iloc[0] == 140000
 
@@ -3347,6 +3388,7 @@ def test_overseas_cashflow_named_position_snapshot_becomes_overseas_balance(tmp_
     raw.mkdir(parents=True)
     pd.DataFrame([
         {
+            "기준일": "2026-06-29",
             "구분 구분": "stock",
             "종목명 (코드) 종목명 (코드)": "Apple (AAPL)",
             "시장명 시장명": "NASDAQ",
@@ -3368,10 +3410,12 @@ def test_overseas_cashflow_named_position_snapshot_becomes_overseas_balance(tmp_
     holdings = pd.read_csv(processed / "processed_holdings.csv")
 
     assert set(idx["source_file_type"]) == {"overseas_balance"}
+    assert idx["snapshot_date"].iloc[0] == "2026-06-29"
     assert transactions.empty
     assert cashflows.empty
     assert len(holdings) == 1
     assert holdings["source_file_type"].iloc[0] == "overseas_balance"
+    assert holdings["snapshot_date"].iloc[0] == "2026-06-29"
     assert holdings["account_type"].iloc[0] == "overseas"
     assert holdings["balance_quantity"].iloc[0] == 3
     assert holdings["evaluation_amount"].iloc[0] == 450
@@ -6671,6 +6715,53 @@ def test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposur
     assert "PRIVATE_TX_HISTORY.xlsx" not in content
 
 
+def test_portfolio_dashboard_uses_explicit_holdings_snapshot_date(tmp_path: Path):
+    processed = tmp_path / "70_Imports" / "processed"
+    processed.mkdir(parents=True)
+    pd.DataFrame([
+        {"metric": "holding_count", "value": "1"},
+        {"metric": "total_cost", "value": "1000"},
+        {"metric": "total_portfolio_value", "value": "1200"},
+        {"metric": "total_unrealized_pnl", "value": "200"},
+        {"metric": "pnl_pct", "value": "20"},
+        {"metric": "total_portfolio_value_status", "value": "available"},
+        {"metric": "balance_data_available", "value": "True"},
+    ]).to_csv(processed / "portfolio_summary.csv", index=False)
+    pd.DataFrame(valid_reconciliation_summary_rows(
+        total_assets_krw="1200",
+        total_assets_status="available",
+        current_cash_krw="0",
+        net_external_principal_krw="1000",
+        total_return_krw="200",
+        total_return_status="available",
+    )).to_csv(processed / "reconciliation_summary.csv", index=False)
+    pd.DataFrame([
+        {
+            "ticker": "AAA",
+            "security_name": "AAA",
+            "account_type": "ISA",
+            "asset_type": "stock",
+            "currency": "KRW",
+            "snapshot_date": "2026-06-28",
+            "evaluation_amount": 1200,
+            "evaluation_amount_krw": 1200,
+            "unrealized_pnl": 200,
+            "pnl_pct": 20,
+            "weight_pct": 100,
+        },
+    ]).to_csv(processed / "processed_holdings.csv", index=False)
+    pd.DataFrame([
+        {"source_file": "source_holdings.xlsx", "source_file_type": "holdings", "account_type": "ISA", "snapshot_date": "2026-06-28"},
+    ]).to_csv(processed / "source_file_index.csv", index=False)
+    pd.DataFrame(columns=["trade_date", "transaction_type", "source_file_type"]).to_csv(processed / "processed_transactions.csv", index=False)
+
+    content = dashboard_content("Portfolio.md", processed)
+    snapshot_section = content.split("### 보유 snapshot 최신성", 1)[1].split("### 현재 보유 source 최신성", 1)[0]
+
+    assert '<span class="stock-kpi-label">snapshot 날짜</span><strong>2026-06-28</strong>' in snapshot_section
+    assert "날짜 없음" not in snapshot_section
+
+
 def test_portfolio_dashboard_summarizes_reviewed_fx_unavailable_exceptions(tmp_path: Path):
     processed = tmp_path / "70_Imports" / "processed"
     cache = tmp_path / "70_Imports" / "cache"
@@ -6991,6 +7082,8 @@ def test_generate_source_file_index(tmp_path: Path):
     idx = pd.read_csv(vault / "70_Imports" / "processed" / "source_file_index.csv")
     assert len(idx) == 1
     assert idx["source_file"].iloc[0].startswith("source_")
+    assert "snapshot_date" in idx.columns
+    assert str(idx["snapshot_date"].fillna("").iloc[0]) == ""
 
 
 def test_preserve_user_written_markdown_sections(tmp_path: Path):

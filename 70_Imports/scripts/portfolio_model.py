@@ -2298,10 +2298,16 @@ def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.D
     group_cols = [c for c in ["account_type", "ticker"] if c in holdings.columns]
     if not group_cols:
         group_cols = ["ticker"]
+    sort_cols: list[str] = []
+    if "snapshot_date" in holdings:
+        holdings["_snapshot_date_sort"] = pd.to_datetime(holdings["snapshot_date"], errors="coerce")
+        sort_cols.append("_snapshot_date_sort")
     if "trade_date" in holdings:
         holdings["_sort_date"] = pd.to_datetime(holdings["trade_date"], errors="coerce")
-        holdings = holdings.sort_values(group_cols + ["_sort_date"], na_position="first")
-    holdings = holdings.groupby(group_cols, dropna=False, as_index=False).tail(1).drop(columns=["_sort_date"], errors="ignore").reset_index(drop=True)
+        sort_cols.append("_sort_date")
+    if sort_cols:
+        holdings = holdings.sort_values(group_cols + sort_cols, na_position="first")
+    holdings = holdings.groupby(group_cols, dropna=False, as_index=False).tail(1).drop(columns=["_snapshot_date_sort", "_sort_date"], errors="ignore").reset_index(drop=True)
 
     for col in ["evaluation_amount", "unrealized_pnl", "balance_quantity"]:
         if col in holdings.columns:
