@@ -25,16 +25,19 @@ separate approval.
 
 ## Current Baseline
 
-- Validated code baseline: `d13acd2` on `main`.
-- 2026-07-11 rebaseline: 4 focused holdings snapshot as-of tests passed, full
-  pytest passed with 344 tests, and all 19 quality-gate checks passed.
-- The optional private `holdings_snapshot_asof.csv` register may fill only
-  missing holdings/balance snapshot dates. Broker dates win, transaction-history
-  dates are never promoted, and applied dates are labeled as user-confirmed
+- Validated implementation: source-index fallback patch tested on `main` parent
+  `a684ec4`.
+- 2026-07-11 validation: 7 focused holdings snapshot as-of tests passed, full
+  pytest passed with 347 tests, and all 19 quality-gate checks passed.
+- The private `holdings_snapshot_asof.csv` register fills only missing
+  holdings/balance snapshot dates. Broker dates win, transaction-history dates
+  are never promoted, and applied dates are labeled as user-confirmed
   display/review context.
-- The optional private register was not present for this rebaseline. A Portfolio
-  `date missing` state is therefore expected until separately approved operator
-  input exists.
+- The approved private register contains three scopes for `2026-06-30`. Fresh
+  dry-run evidence confirms holdings 15/15 and marketless source index 3/3, with
+  zero unexpected applications and zero conflicts.
+- Actual processed/generated live-vault output remains unwritten and requires
+  separate explicit approval.
 - FX candidates and reviewed official-FX-unavailable context do not close
   REC-EX-01 or REC-EX-12 and do not authorize date substitution.
 
@@ -92,12 +95,13 @@ unless the owner explicitly asks.
   explicitly out of scope.
 - Mark skipped checks as `NOT RUN` with reasons.
 - For live writes, require dry-run evidence and explicit live-write intent.
-- The 2026-07-11 rebaseline found no repo-root `.venv`, no quality-gate warning,
-  and no GitHub Actions run; local pytest and quality-gate results are the current
-  evidence.
-- Do not repeat a live dry-run solely for the absent optional as-of register.
-  First obtain explicit approval for private register input, then generate fresh
-  matching dry-run evidence before any actual live write.
+- The 2026-07-11 fallback validation found no repo-root `.venv`, no quality-gate
+  warning, and no GitHub Actions run; local pytest and quality-gate results are
+  the current repository evidence.
+- The private register exists, and fresh OS-local dry-run evidence confirms the
+  expected holdings/source-index application without live output mutation.
+- Repeat the dry-run if code, register, or raw input changes. Actual live write
+  still requires the matching evidence review and separate explicit approval.
 
 ## Closeout Format
 

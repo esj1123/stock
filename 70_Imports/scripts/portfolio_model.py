@@ -233,7 +233,12 @@ def load_holdings_snapshot_asof_register(processed_dir: Path) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True).drop_duplicates().reset_index(drop=True)
 
 
-def _asof_register_matches(row: pd.Series, register: pd.DataFrame) -> pd.DataFrame:
+def _asof_register_matches(
+    row: pd.Series,
+    register: pd.DataFrame,
+    *,
+    allow_missing_market: bool = False,
+) -> pd.DataFrame:
     if register.empty:
         return register
     row_source_type = text_value(row.get("source_file_type")).lower()
@@ -248,13 +253,22 @@ def _asof_register_matches(row: pd.Series, register: pd.DataFrame) -> pd.DataFra
         matches = matches[matches["account_type"].isin(["", "*"])]
     if row_market:
         matches = matches[matches["market"].isin(["", "*", row_market])]
-    else:
+    elif not allow_missing_market:
         matches = matches[matches["market"].isin(["", "*"])]
     return matches
 
 
-def _selected_asof_register_date(row: pd.Series, register: pd.DataFrame) -> tuple[str, str]:
-    matches = _asof_register_matches(row, register)
+def _selected_asof_register_date(
+    row: pd.Series,
+    register: pd.DataFrame,
+    *,
+    allow_missing_market: bool = False,
+) -> tuple[str, str]:
+    matches = _asof_register_matches(
+        row,
+        register,
+        allow_missing_market=allow_missing_market,
+    )
     if matches.empty:
         return "", ""
     dates = sorted(set(matches["snapshot_date"].fillna("").astype(str).str.strip()))
@@ -317,7 +331,11 @@ def apply_holdings_snapshot_asof_register_to_source_index(source_index: pd.DataF
             if not text_value(row.get("snapshot_date_status")):
                 output.at[idx, "snapshot_date_status"] = "available"
             continue
-        selected_date, selected_status = _selected_asof_register_date(row, register)
+        selected_date, selected_status = _selected_asof_register_date(
+            row,
+            register,
+            allow_missing_market=True,
+        )
         if selected_date:
             output.at[idx, "snapshot_date"] = selected_date
             output.at[idx, "snapshot_date_source"] = USER_CONFIRMED_SNAPSHOT_DATE_SOURCE
