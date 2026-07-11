@@ -511,15 +511,27 @@ def holdings_snapshot_date_status(holdings: pd.DataFrame) -> tuple[str, str]:
     if holdings.empty:
         return "none", "현재 보유 row 없음"
     dates: list[str] = []
+    latest_source = ""
     for column in HOLDINGS_SNAPSHOT_DATE_COLUMNS:
         if column not in holdings.columns:
             continue
         values = holdings[column].fillna("").astype(str).str.strip().str.slice(0, 10)
         dates.extend(value for value in values if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value))
     if not dates:
+        statuses = holdings.get("snapshot_date_status", pd.Series(dtype=str)).fillna("").astype(str).str.strip().str.lower()
+        if statuses.isin(["asof_register_conflict"]).any():
+            return "missing", "user-confirmed as-of register conflict; 날짜 확인 필요"
         return "missing", "processed holdings에 snapshot 날짜 없음"
-    return max(dates), "현재 보유 snapshot 날짜"
-
+    latest = max(dates)
+    if "snapshot_date" in holdings.columns and "snapshot_date_source" in holdings.columns:
+        snapshot_dates = holdings["snapshot_date"].fillna("").astype(str).str.strip().str.slice(0, 10)
+        latest_sources = holdings.loc[snapshot_dates == latest, "snapshot_date_source"].fillna("").astype(str).str.strip().str.lower()
+        latest_source = ";".join(sorted(set(value for value in latest_sources if value)))
+    if "user_confirmed_asof_register" in latest_source:
+        return latest, "사용자 확인 기준일; broker export 날짜 아님"
+    if "broker_export" in latest_source:
+        return latest, "broker export snapshot 날짜"
+    return latest, "현재 보유 snapshot 날짜"
 
 def holdings_snapshot_status_label(status: str) -> str:
     if status == "snapshot_date_available":

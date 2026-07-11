@@ -202,6 +202,17 @@ Known normalization rules:
 
 Adding a blank `.xlsx` template to the repository should be a separate reviewed change with an explicit `.gitignore` exception.
 
+## Holdings Snapshot As-Of Register
+
+`70_Imports/cache/holdings_snapshot_asof.csv` is an optional private cache register for holdings/balance exports that do not carry a broker-provided snapshot/as-of date. Keep filled register files out of Git.
+
+Required columns:
+
+```text
+source_file_type,account_type,market,snapshot_date,source_type,status,source_note,created_at_utc,rule_version
+```
+
+Usable register rows apply only to `holdings` or `overseas_balance` processed rows with missing `snapshot_date`. Existing broker-provided snapshot dates are preserved. Register dates are labeled as `user_confirmed_asof_register`, which is display/review context only; it is not broker-provided provenance, not an account-level TWR/MWR calculation, not REC closure, and not a substitute for current holdings source data. Transaction-history dates must never be inferred into current holdings snapshot dates.
 ## FX Rates Template
 
 Use `70_Imports/templates/fx_rates_template.csv` as the schema reference for a private local `fx_rates.csv`.

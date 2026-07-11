@@ -57,6 +57,7 @@ DRY_RUN_CACHE_CONTEXT_FILES = (
     "fx_rates.csv",
     "fx_rates_cached.csv",
     "fx_unavailable_exceptions.csv",
+    "holdings_snapshot_asof.csv",
 )
 DRY_RUN_PROCESSED_CONTEXT_FILES = (
     "performance_history.csv",

@@ -14,7 +14,7 @@ import pandas as pd
 
 NORMALIZED_COLUMNS = [
     "import_id", "source_file", "source_file_type", "account_type", "market", "asset_type",
-    "ticker", "security_name", "trade_date", "snapshot_date", "trade_time", "transaction_type",
+    "ticker", "security_name", "trade_date", "snapshot_date", "snapshot_date_source", "snapshot_date_status", "trade_time", "transaction_type",
     "quantity", "price", "trade_amount", "settlement_amount", "fee", "tax", "currency", "fx_rate",
     "balance_quantity", "evaluation_amount", "unrealized_pnl", "pnl_pct", "raw_memo",
     "quantity_unit", "price_unit", "price_kind", "money_unit_native", "money_unit_krw",
@@ -1831,6 +1831,8 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
         snapshot_date = ""
         if row_source_type in BALANCE_SOURCE_TYPES and cols.get("snapshot_date") is not None:
             snapshot_date = normalize_date(raw.get(cols["snapshot_date"]))
+        snapshot_date_source = "broker_export" if snapshot_date else ""
+        snapshot_date_status = "available" if snapshot_date else ""
         name = str(raw.get(cols["security_name"]) if cols.get("security_name") is not None else "").strip()
         ticker = str(raw.get(cols["ticker"]) if cols.get("ticker") is not None else "").strip()
         if (not ticker or ticker.lower() == "nan") and name:
@@ -2005,7 +2007,9 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
 
         stable = {
             "source_file_type": row_source_type, "account_type": account_type, "ticker": ticker,
-            "security_name": name, "trade_date": date, "snapshot_date": snapshot_date, "trade_time": normalize_time(raw.get(cols["trade_time"])) if cols.get("trade_time") is not None else "",
+            "security_name": name, "trade_date": date, "snapshot_date": snapshot_date,
+            "snapshot_date_source": snapshot_date_source, "snapshot_date_status": snapshot_date_status,
+            "trade_time": normalize_time(raw.get(cols["trade_time"])) if cols.get("trade_time") is not None else "",
             "transaction_type": tx_type, "quantity": quantity, "price": price,
             "trade_amount": trade_amount, "settlement_amount": settlement_amount,
             "fee": fee, "tax": tax,
@@ -2029,6 +2033,8 @@ def normalize_dataframe(df: pd.DataFrame, source_path: Path, sheet_name: str) ->
             "security_name": redact_sensitive(name),
             "trade_date": date,
             "snapshot_date": snapshot_date,
+            "snapshot_date_source": snapshot_date_source,
+            "snapshot_date_status": snapshot_date_status,
             "trade_time": stable["trade_time"],
             "transaction_type": tx_type,
             "quantity": quantity,
@@ -2109,7 +2115,7 @@ def empty_outputs(processed_dir: Path) -> dict[str, pd.DataFrame]:
         "history_queue.csv": pd.DataFrame(columns=HISTORY_COLUMNS),
         "post_mortem_candidates.csv": pd.DataFrame(columns=HISTORY_COLUMNS),
         "qa_exceptions.csv": pd.DataFrame(columns=["exception_id", "severity", "file", "issue", "suggested_fix"]),
-        "source_file_index.csv": pd.DataFrame(columns=["source_file", "source_file_type", "account_type", "snapshot_date", "raw_path_hash", "size_bytes", "modified_at", "imported_at", "sensitive_data_found"]),
+        "source_file_index.csv": pd.DataFrame(columns=["source_file", "source_file_type", "account_type", "snapshot_date", "snapshot_date_source", "snapshot_date_status", "raw_path_hash", "size_bytes", "modified_at", "imported_at", "sensitive_data_found"]),
         "unclassified_rows.csv": pd.DataFrame(columns=NORMALIZED_COLUMNS),
         "skipped_rows.csv": pd.DataFrame(columns=SKIPPED_ROWS_COLUMNS),
         "raw_rows_audit.csv": pd.DataFrame(columns=["import_id", "source_file", "sheet", "row_number", "raw_json"]),
@@ -2990,6 +2996,8 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
                 "source_file_type": "read_error",
                 "account_type": infer_account_type(path.name),
                 "snapshot_date": "",
+                "snapshot_date_source": "",
+                "snapshot_date_status": "",
                 "raw_path_hash": raw_hash,
                 "size_bytes": path.stat().st_size,
                 "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),
@@ -3017,6 +3025,8 @@ def import_raw_dir(vault_root: Path, raw_dir: Path | None = None, processed_dir:
             "source_file_type": file_type_seen,
             "account_type": infer_account_type(path.name),
             "snapshot_date": max(snapshot_dates_seen) if snapshot_dates_seen else "",
+            "snapshot_date_source": "broker_export" if snapshot_dates_seen else "",
+            "snapshot_date_status": "available" if snapshot_dates_seen else "",
             "raw_path_hash": raw_hash,
             "size_bytes": path.stat().st_size,
             "modified_at": datetime.fromtimestamp(path.stat().st_mtime).isoformat(timespec="seconds"),

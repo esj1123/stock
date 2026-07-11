@@ -137,6 +137,21 @@ REALIZED_PNL_COLUMNS = [
     "source_file",
 ]
 BALANCE_SOURCE_TYPES = {"holdings", "overseas_balance"}
+HOLDINGS_SNAPSHOT_ASOF_FILENAME = "holdings_snapshot_asof.csv"
+HOLDINGS_SNAPSHOT_ASOF_COLUMNS = [
+    "source_file_type",
+    "account_type",
+    "market",
+    "snapshot_date",
+    "source_type",
+    "status",
+    "source_note",
+    "created_at_utc",
+    "rule_version",
+]
+HOLDINGS_SNAPSHOT_ASOF_USABLE_STATUSES = {"active", "approved", "available", "cached", "ok", "verified", "user_confirmed"}
+HOLDINGS_SNAPSHOT_ASOF_SOURCE_TYPES = {"manual", "user_confirmed", "user_provided", "asof_register"}
+USER_CONFIRMED_SNAPSHOT_DATE_SOURCE = "user_confirmed_asof_register"
 REVIEW_NEEDED_STATUSES = {"fx_missing", "partial", "needs_review", "currency_ambiguous", "unit_ambiguous", "unclassified", "lot_missing"}
 BROKER_KRW_SOURCES = {"broker_krw", "broker_provided_krw", "broker_krw_amount"}
 RAW_FX_SOURCES = {"", "raw", "broker_raw", "broker_raw_fx", "fx_rate_to_krw"}
@@ -176,6 +191,140 @@ def normalized_date_text(value: Any) -> str:
         return text
     return parsed.date().isoformat()
 
+
+def holdings_snapshot_asof_candidate_paths(processed_dir: Path) -> list[Path]:
+    import_root = processed_dir.parent if processed_dir.name.lower() == "processed" else processed_dir
+    candidates = [
+        import_root / "cache" / HOLDINGS_SNAPSHOT_ASOF_FILENAME,
+        import_root / HOLDINGS_SNAPSHOT_ASOF_FILENAME,
+        processed_dir / HOLDINGS_SNAPSHOT_ASOF_FILENAME,
+    ]
+    return list(dict.fromkeys(candidates))
+
+
+def normalize_holdings_snapshot_asof_register(register: pd.DataFrame) -> pd.DataFrame:
+    if register.empty:
+        return pd.DataFrame(columns=HOLDINGS_SNAPSHOT_ASOF_COLUMNS)
+    frame = register.reindex(columns=HOLDINGS_SNAPSHOT_ASOF_COLUMNS).copy()
+    frame["source_file_type"] = frame["source_file_type"].fillna("").astype(str).str.strip().str.lower()
+    frame["account_type"] = frame["account_type"].fillna("").astype(str).str.strip().str.lower()
+    frame["market"] = frame["market"].fillna("").astype(str).str.strip().str.upper()
+    frame["snapshot_date"] = frame["snapshot_date"].apply(normalized_date_text)
+    frame["source_type"] = frame["source_type"].fillna("").astype(str).str.strip().str.lower()
+    frame["status"] = frame["status"].fillna("").astype(str).str.strip().str.lower()
+    valid = (
+        frame["source_file_type"].isin(BALANCE_SOURCE_TYPES)
+        & frame["snapshot_date"].astype(str).str.fullmatch(r"\d{4}-\d{2}-\d{2}", na=False)
+        & frame["source_type"].isin(HOLDINGS_SNAPSHOT_ASOF_SOURCE_TYPES)
+        & frame["status"].isin(HOLDINGS_SNAPSHOT_ASOF_USABLE_STATUSES)
+    )
+    return frame.loc[valid].copy().reset_index(drop=True)
+
+
+def load_holdings_snapshot_asof_register(processed_dir: Path) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+    for path in holdings_snapshot_asof_candidate_paths(processed_dir):
+        frame = normalize_holdings_snapshot_asof_register(load_csv(path))
+        if frame.empty:
+            continue
+        frames.append(frame)
+    if not frames:
+        return pd.DataFrame(columns=HOLDINGS_SNAPSHOT_ASOF_COLUMNS)
+    return pd.concat(frames, ignore_index=True).drop_duplicates().reset_index(drop=True)
+
+
+def _asof_register_matches(row: pd.Series, register: pd.DataFrame) -> pd.DataFrame:
+    if register.empty:
+        return register
+    row_source_type = text_value(row.get("source_file_type")).lower()
+    if row_source_type not in BALANCE_SOURCE_TYPES:
+        return register.iloc[0:0]
+    row_account_type = text_value(row.get("account_type")).lower()
+    row_market = text_value(row.get("market")).upper()
+    matches = register[register["source_file_type"] == row_source_type]
+    if row_account_type:
+        matches = matches[matches["account_type"].isin(["", "*", row_account_type])]
+    else:
+        matches = matches[matches["account_type"].isin(["", "*"])]
+    if row_market:
+        matches = matches[matches["market"].isin(["", "*", row_market])]
+    else:
+        matches = matches[matches["market"].isin(["", "*"])]
+    return matches
+
+
+def _selected_asof_register_date(row: pd.Series, register: pd.DataFrame) -> tuple[str, str]:
+    matches = _asof_register_matches(row, register)
+    if matches.empty:
+        return "", ""
+    dates = sorted(set(matches["snapshot_date"].fillna("").astype(str).str.strip()))
+    dates = [value for value in dates if re.fullmatch(r"\d{4}-\d{2}-\d{2}", value)]
+    if len(dates) == 1:
+        return dates[0], "user_confirmed"
+    if len(dates) > 1:
+        return "", "asof_register_conflict"
+    return "", ""
+
+
+def apply_holdings_snapshot_asof_register(holdings: pd.DataFrame, register: pd.DataFrame) -> pd.DataFrame:
+    register = normalize_holdings_snapshot_asof_register(register)
+    if holdings.empty:
+        return holdings.reindex(columns=holdings.columns)
+    output = holdings.copy().astype(object)
+    for column in ["snapshot_date", "snapshot_date_source", "snapshot_date_status"]:
+        if column not in output.columns:
+            output[column] = ""
+    if register.empty:
+        broker_mask = output["snapshot_date"].fillna("").astype(str).str.fullmatch(r"\d{4}-\d{2}-\d{2}", na=False)
+        output.loc[broker_mask & (output["snapshot_date_source"].fillna("").astype(str).str.strip() == ""), "snapshot_date_source"] = "broker_export"
+        output.loc[broker_mask & (output["snapshot_date_status"].fillna("").astype(str).str.strip() == ""), "snapshot_date_status"] = "available"
+        return output
+    for idx, row in output.iterrows():
+        existing_date = normalized_date_text(row.get("snapshot_date"))
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", existing_date):
+            output.at[idx, "snapshot_date"] = existing_date
+            if not text_value(row.get("snapshot_date_source")):
+                output.at[idx, "snapshot_date_source"] = "broker_export"
+            if not text_value(row.get("snapshot_date_status")):
+                output.at[idx, "snapshot_date_status"] = "available"
+            continue
+        selected_date, selected_status = _selected_asof_register_date(row, register)
+        if selected_date:
+            output.at[idx, "snapshot_date"] = selected_date
+            output.at[idx, "snapshot_date_source"] = USER_CONFIRMED_SNAPSHOT_DATE_SOURCE
+            output.at[idx, "snapshot_date_status"] = selected_status
+        elif selected_status:
+            output.at[idx, "snapshot_date_status"] = selected_status
+    return output
+
+
+def apply_holdings_snapshot_asof_register_to_source_index(source_index: pd.DataFrame, register: pd.DataFrame) -> pd.DataFrame:
+    register = normalize_holdings_snapshot_asof_register(register)
+    if source_index.empty:
+        return source_index.reindex(columns=source_index.columns)
+    output = source_index.copy().astype(object)
+    for column in ["snapshot_date", "snapshot_date_source", "snapshot_date_status"]:
+        if column not in output.columns:
+            output[column] = ""
+    if register.empty:
+        return output
+    for idx, row in output.iterrows():
+        existing_date = normalized_date_text(row.get("snapshot_date"))
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", existing_date):
+            output.at[idx, "snapshot_date"] = existing_date
+            if not text_value(row.get("snapshot_date_source")):
+                output.at[idx, "snapshot_date_source"] = "broker_export"
+            if not text_value(row.get("snapshot_date_status")):
+                output.at[idx, "snapshot_date_status"] = "available"
+            continue
+        selected_date, selected_status = _selected_asof_register_date(row, register)
+        if selected_date:
+            output.at[idx, "snapshot_date"] = selected_date
+            output.at[idx, "snapshot_date_source"] = USER_CONFIRMED_SNAPSHOT_DATE_SOURCE
+            output.at[idx, "snapshot_date_status"] = selected_status
+        elif selected_status:
+            output.at[idx, "snapshot_date_status"] = selected_status
+    return output
 
 def fx_rate_candidate_paths(processed_dir: Path) -> list[Path]:
     import_root = processed_dir.parent if processed_dir.name.lower() == "processed" else processed_dir
@@ -2254,6 +2403,8 @@ def portfolio_summary_rows(
 
 def build_portfolio_outputs(processed_dir: Path, vault_root: Path) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     holdings = load_csv(processed_dir / "processed_holdings.csv")
+    holdings_snapshot_asof_register = load_holdings_snapshot_asof_register(processed_dir)
+    holdings = apply_holdings_snapshot_asof_register(holdings, holdings_snapshot_asof_register)
     transactions = load_csv(processed_dir / "processed_transactions.csv")
     raw_file_count, transaction_file_count, holdings_file_count = source_type_counts(processed_dir)
     balance_data_available = holdings_file_count > 0 or not holdings.empty
@@ -2404,6 +2555,8 @@ def build_portfolio(processed_dir: Path, vault_root: Path) -> tuple[pd.DataFrame
 
 def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_run: bool = False) -> dict[str, int]:
     processed_dir = processed_dir or vault_root / "70_Imports" / "processed"
+    holdings_snapshot_asof_register = load_holdings_snapshot_asof_register(processed_dir)
+    source_index = apply_holdings_snapshot_asof_register_to_source_index(load_csv(processed_dir / "source_file_index.csv"), holdings_snapshot_asof_register)
     summary, holdings, risk, review, history = build_portfolio_outputs(processed_dir, vault_root)
     transactions = load_csv(processed_dir / "processed_transactions.csv")
     cashflows = load_csv(processed_dir / "processed_cashflows.csv")
@@ -2452,6 +2605,8 @@ def generate_reports(vault_root: Path, processed_dir: Path | None = None, dry_ru
     fx_requirements.to_csv(processed_dir / "fx_rate_requirements.csv", index=False, encoding="utf-8-sig")
     realized.to_csv(processed_dir / "processed_realized_pnl.csv", index=False, encoding="utf-8-sig")
     holdings.to_csv(processed_dir / "processed_holdings.csv", index=False, encoding="utf-8-sig")
+    if not source_index.empty:
+        source_index.to_csv(processed_dir / "source_file_index.csv", index=False, encoding="utf-8-sig")
     risk.to_csv(processed_dir / "risk_watchlist.csv", index=False, encoding="utf-8-sig")
     review.to_csv(processed_dir / "review_queue.csv", index=False, encoding="utf-8-sig")
     history.to_csv(processed_dir / "history_queue.csv", index=False, encoding="utf-8-sig")
