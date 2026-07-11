@@ -18,8 +18,25 @@ Follow the read order in `AGENTS.md`. The important sequence is:
 
 ## Current Approved Work Type
 
-Repository baseline work only, unless the user explicitly approves a broader
-task. The 2026-06-09 harness seed approved root documentation writes only.
+P1/P2/P3 repository baseline, data-contract, and report-only provenance-review
+work when explicitly requested and scoped. P4/P5 live-vault work, provider
+network access, push/release work, and other external side effects still require
+separate approval.
+
+## Current Baseline
+
+- Validated code baseline: `d13acd2` on `main`.
+- 2026-07-11 rebaseline: 4 focused holdings snapshot as-of tests passed, full
+  pytest passed with 344 tests, and all 19 quality-gate checks passed.
+- The optional private `holdings_snapshot_asof.csv` register may fill only
+  missing holdings/balance snapshot dates. Broker dates win, transaction-history
+  dates are never promoted, and applied dates are labeled as user-confirmed
+  display/review context.
+- The optional private register was not present for this rebaseline. A Portfolio
+  `date missing` state is therefore expected until separately approved operator
+  input exists.
+- FX candidates and reviewed official-FX-unavailable context do not close
+  REC-EX-01 or REC-EX-12 and do not authorize date substitution.
 
 ## Work Allowed By Default
 
@@ -75,6 +92,12 @@ unless the owner explicitly asks.
   explicitly out of scope.
 - Mark skipped checks as `NOT RUN` with reasons.
 - For live writes, require dry-run evidence and explicit live-write intent.
+- The 2026-07-11 rebaseline found no repo-root `.venv`, no quality-gate warning,
+  and no GitHub Actions run; local pytest and quality-gate results are the current
+  evidence.
+- Do not repeat a live dry-run solely for the absent optional as-of register.
+  First obtain explicit approval for private register input, then generate fresh
+  matching dry-run evidence before any actual live write.
 
 ## Closeout Format
 

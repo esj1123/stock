@@ -27,15 +27,19 @@ Define phase-gated work for 06_Stock baseline automation.
 
 ## Current Phase
 
-P0/P1 governed baseline maintenance.
+P1/P2/P3 governed baseline maintenance, data-contract evolution, and FX
+provenance review support.
 
-The 2026-06-09 harness seed is documentation-only. It does not authorize live
-vault writes, raw data ingestion, generated-output commits, trading behavior,
-network provider calls, release activity, or downstream publication.
+The current baseline includes verified import/QA/dashboard contracts and
+report-only FX provenance support. P4 live-vault dry-run and P5 actual live-vault
+write are not active by default and still require their own evidence and owner
+approval. This phase state does not authorize raw mutation, generated-output
+commits, trading behavior, provider network calls, release activity, or
+downstream publication.
 
 ## Next Phase Gate
 
-Before any non-docs behavior change, identify:
+Before any new behavior change or P4/P5 transition, identify:
 
 - target data contract or safety contract;
 - allowed files;
