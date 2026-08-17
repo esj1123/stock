@@ -27,5 +27,11 @@
 - `70_Imports/logs/Import_Run_YYYY-MM-DD_HHMM.md`
 - 실패 시: `70_Imports/logs/ERROR_YYYY-MM-DD_HHMMSS.md`
 
+새 실행 리포트는 `schema_version: 2`이며 현재 pipeline stdout의 import
+카운터(`raw_file_count`, `parsed_row_count`,
+`duplicate_rows_removed_count`, `unclassified_row_count`)와
+`qa_exception_count`를 기록합니다. 실행되지 않은 action의 값은 `null`이고,
+성공 상태는 process exit code 0과 `[done]` 완료 마커를 모두 요구합니다.
+
 > 이 기능은 PC(데스크탑)에서 외부 명령(Python/PowerShell/bash)을 실행하기 때문에,
 > 모바일 환경에서는 Import 실행이 제한될 수 있습니다.

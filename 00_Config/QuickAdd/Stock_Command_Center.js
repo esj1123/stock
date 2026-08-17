@@ -96,17 +96,19 @@ function spawnCapture(cmd, args, options = {}) {
 }
 
 function parseCounts(text) {
-  // 파서가 실패해도 리포트는 남기기
+  // 일부 action이 실행되지 않거나 파싱이 실패해도 null로 리포트를 남긴다.
   const get = (re) => {
     const m = text.match(re);
     return m ? Number(m[1]) : null;
   };
 
   return {
-    newLedgerRows: get(/신규\s*ledger\s*행\s*:\s*(\d+)/i),
-    tradeNotes: get(/생성된\s*거래\s*노트\s*:\s*(\d+)/i),
-    cashNotes: get(/생성된\s*입출금\s*노트\s*:\s*(\d+)/i),
-    reviewNotes: get(/생성된\s*review\s*노트\s*:\s*(\d+)/i),
+    rawFileCount: get(/\[import\][^\r\n]*\braw_files=(\d+)/i),
+    parsedRowCount: get(/\[import\][^\r\n]*\bparsed_rows=(\d+)/i),
+    duplicateRowsRemovedCount: get(/\[import\][^\r\n]*\bduplicate_removed=(\d+)/i),
+    unclassifiedRowCount: get(/\[import\][^\r\n]*\bunclassified=(\d+)/i),
+    qaExceptionCount: get(/\[qa\][^\r\n]*\bexceptions=(\d+)/i),
+    doneMarkerPresent: /^\[done\]\s+/im.test(text),
   };
 }
 
@@ -149,8 +151,8 @@ async function createImportReport(app, { mode, start, end, result }) {
   const stamp = nowStamp();
   await ensureFolder(app, '70_Imports/logs');
 
-  const ok = result.code === 0;
   const parsed = parseCounts(result.stdout + '\n' + result.stderr);
+  const ok = result.code === 0 && parsed.doneMarkerPresent;
 
   const fileName = `Import_Run_${stamp.yyyymmdd_hhmm}.md`;
   const filePath = `70_Imports/logs/${fileName}`;
@@ -160,13 +162,15 @@ async function createImportReport(app, { mode, start, end, result }) {
   const frontmatter = [
     '---',
     'doc_type: import_run',
+    'schema_version: 2',
     `run_at: "${stamp.date} ${stamp.time}"`,
     `mode: "${mode}"`,
     `status: "${ok ? 'success' : 'failed'}"`,
-    parsed.newLedgerRows !== null ? `new_ledger_rows: ${parsed.newLedgerRows}` : 'new_ledger_rows: null',
-    parsed.tradeNotes !== null ? `trade_notes_created: ${parsed.tradeNotes}` : 'trade_notes_created: null',
-    parsed.cashNotes !== null ? `cash_notes_created: ${parsed.cashNotes}` : 'cash_notes_created: null',
-    parsed.reviewNotes !== null ? `review_notes_created: ${parsed.reviewNotes}` : 'review_notes_created: null',
+    parsed.rawFileCount !== null ? `raw_file_count: ${parsed.rawFileCount}` : 'raw_file_count: null',
+    parsed.parsedRowCount !== null ? `parsed_row_count: ${parsed.parsedRowCount}` : 'parsed_row_count: null',
+    parsed.duplicateRowsRemovedCount !== null ? `duplicate_rows_removed_count: ${parsed.duplicateRowsRemovedCount}` : 'duplicate_rows_removed_count: null',
+    parsed.unclassifiedRowCount !== null ? `unclassified_row_count: ${parsed.unclassifiedRowCount}` : 'unclassified_row_count: null',
+    parsed.qaExceptionCount !== null ? `qa_exception_count: ${parsed.qaExceptionCount}` : 'qa_exception_count: null',
     `exit_code: ${result.code}`,
     '---',
   ].join('\n');
@@ -178,10 +182,13 @@ async function createImportReport(app, { mode, start, end, result }) {
     `- 실행 모드: ${mode}`,
     `- 결과: ${ok ? '성공' : '실패'}`,
     `- 소요 시간: ${durationSec}초`,
-    parsed.newLedgerRows !== null ? `- 신규 ledger 행: ${parsed.newLedgerRows}` : '- 신규 ledger 행: (파싱 실패)',
-    parsed.tradeNotes !== null ? `- 생성된 거래 노트: ${parsed.tradeNotes}` : '- 생성된 거래 노트: (파싱 실패)',
-    parsed.cashNotes !== null ? `- 생성된 입출금 노트: ${parsed.cashNotes}` : '- 생성된 입출금 노트: (파싱 실패)',
-    parsed.reviewNotes !== null ? `- 생성된 review 노트: ${parsed.reviewNotes}` : '- 생성된 review 노트: (파싱 실패)',
+    `- process exit code: ${result.code}`,
+    `- [done] 완료 마커: ${parsed.doneMarkerPresent ? '확인' : '없음'}`,
+    parsed.rawFileCount !== null ? `- raw 파일: ${parsed.rawFileCount}` : '- raw 파일: (해당 action 미실행/파싱 실패)',
+    parsed.parsedRowCount !== null ? `- 파싱 행: ${parsed.parsedRowCount}` : '- 파싱 행: (해당 action 미실행/파싱 실패)',
+    parsed.duplicateRowsRemovedCount !== null ? `- 중복 제거 행: ${parsed.duplicateRowsRemovedCount}` : '- 중복 제거 행: (해당 action 미실행/파싱 실패)',
+    parsed.unclassifiedRowCount !== null ? `- 미분류 행: ${parsed.unclassifiedRowCount}` : '- 미분류 행: (해당 action 미실행/파싱 실패)',
+    parsed.qaExceptionCount !== null ? `- QA 예외: ${parsed.qaExceptionCount}` : '- QA 예외: (해당 action 미실행/파싱 실패)',
     '',
     '## 다음 액션(클릭)',
     '- [[10_Dashboard/Import_Review|Import 점검(UNCLASSIFIED/누락 확인)]]',
@@ -283,7 +290,7 @@ async function openStartHere(app) {
   new Notice('E 열기 완료: Start_Here');
 }
 
-module.exports = async (params) => {
+async function stockCommandCenter(params) {
   const app = getApp(params);
   const qa = getQA(params);
 
@@ -330,11 +337,11 @@ module.exports = async (params) => {
         await openPath(app, '10_Dashboard/Import_Review.md', true);
       }
 
-      const t = report.parsed.tradeNotes ?? '?';
-      const c = report.parsed.cashNotes ?? '?';
-      const r = report.parsed.reviewNotes ?? '?';
+      const rows = report.parsed.parsedRowCount ?? '?';
+      const qaExceptions = report.parsed.qaExceptionCount ?? '?';
+      const completion = report.ok ? '완료' : '실패/불완전';
 
-      new Notice(`✅ ${(isDry ? 'B' : 'A')} 생성 완료: 거래 ${t}, 입출금 ${c}, review ${r}`);
+      new Notice(`${report.ok ? '✅' : '⚠️'} ${(isDry ? 'B' : 'A')} ${completion}: 파싱 ${rows}, QA 예외 ${qaExceptions}`);
       return;
     }
 
@@ -392,4 +399,11 @@ module.exports = async (params) => {
       // ignore
     }
   }
-};
+}
+
+stockCommandCenter.__test = Object.freeze({
+  parseCounts,
+  createImportReport,
+});
+
+module.exports = stockCommandCenter;
