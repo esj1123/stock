@@ -37,6 +37,14 @@ pushes, tags, releases, or CI changes.
 - `99_Templates/`: Obsidian note templates
 - `scripts/`: root-level helper entrypoints
 
+### Company Template Roles
+
+- `99_Templates/Company.md` is the authoritative Company note template used by
+  QuickAdd.
+- `99_Templates/Company_Folder_Template/Company.md` is the folder-scaffold copy.
+- Keep the two Company template files byte-identical. Update both files together
+  whenever the Company template changes.
+
 ## What Is Not Included
 
 The repository intentionally excludes personal investment data and generated outputs:
