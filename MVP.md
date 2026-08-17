@@ -39,8 +39,8 @@ while keeping all private stock data and live-vault writes approval-gated.
 - Root contracts exist and point future Codex work to repository-local rules.
 - Private and generated data paths remain ignored and no-touch by default.
 - Code changes include focused synthetic tests when behavior changes.
-- `python -m pytest` from `70_Imports/scripts` and `python scripts/quality_gate.py`
-  pass or are reported as `NOT RUN` with a reason.
+- Focused tests and the canonical OS-local full verification sequence in
+  `VERIFICATION.md` pass or are reported as `NOT RUN` with a reason.
 - Live-vault actual writes are blocked unless all confirmation flags and matching
   dry-run evidence are present.
 - Closeout reports changed files, commands run, commands not run, safety checks,

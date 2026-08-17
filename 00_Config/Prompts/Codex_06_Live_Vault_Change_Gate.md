@@ -11,8 +11,7 @@ Goal:
 - Do not modify the live vault unless the required gate has been completed and the user explicitly asks for the actual write.
 
 Important paths:
-- GitHub baseline repo:
-  C:\Users\KSLV-II\Desktop\Codex\stock
+- GitHub baseline repo: current Git worktree root (`git rev-parse --show-toplevel`)
 - Live/final Obsidian vault:
   C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock
 

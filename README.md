@@ -37,13 +37,8 @@ pushes, tags, releases, or CI changes.
 - `99_Templates/`: Obsidian note templates
 - `scripts/`: root-level helper entrypoints
 
-### Company Template Roles
-
-- `99_Templates/Company.md` is the authoritative Company note template used by
-  QuickAdd.
-- `99_Templates/Company_Folder_Template/Company.md` is the folder-scaffold copy.
-- Keep the two Company template files byte-identical. Update both files together
-  whenever the Company template changes.
+For code-change routing, start with `70_Imports/scripts/README.md`. For template
+status and ownership, start with `99_Templates/README.md`.
 
 ## What Is Not Included
 
@@ -63,29 +58,21 @@ The repository intentionally excludes personal investment data and generated out
 
 These paths are for local vault operation only. They may contain broker exports, normalized ledgers, database files, attachments, generated reports, company notes, trades, cashflows, or other private data.
 
-## Clean Setup Check
+## Clean Setup
 
 From a clean clone, keep the Python virtual environment outside the repository and outside any Google Drive synced vault:
 
 ```powershell
 $VenvDir = Join-Path $env:LOCALAPPDATA "06_Stock\.venv"
-$PytestTmp = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_cases"
-$PytestBaseTmp = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_pytest"
 python -m venv $VenvDir
 & "$VenvDir\Scripts\python.exe" -m pip install -r 70_Imports\scripts\requirements.txt
-$env:STOCK_PYTEST_TMPDIR = $PytestTmp
-cd 70_Imports\scripts
-& "$VenvDir\Scripts\python.exe" main.py --help
-& "$VenvDir\Scripts\python.exe" -m pytest -p no:cacheprovider --basetemp $PytestBaseTmp
 ```
 
 On Windows, if `python` resolves to the Microsoft Store alias, use `py -m venv $VenvDir` instead.
 
-Expected result:
-
-- `main.py --help` prints the CLI usage.
-- `pytest` passes without requiring raw broker files.
-- No repository-local `.venv`, `.pytest_cache`, or `.tmp_pytest_cases` is required or created by the check.
+Use `VERIFICATION.md` for the authoritative OS-local pytest temp roots, full
+pytest command, quality gate, cache check, and closeout sequence. Do not copy or
+redefine that command in other documents.
 
 ## Standard Import Entrypoint
 
@@ -150,8 +137,8 @@ Required sequence before any actual live Vault write:
 
 1. Modify and validate the GitHub baseline.
 2. Add/update tests.
-3. Run pytest with the OS-local venv/temp pattern in `Clean Setup Check`; do not run bare `pytest` from the repo root.
-4. Run `scripts/quality_gate.py` using the same OS-local Python environment.
+3. Run the full baseline verification sequence in `VERIFICATION.md`; do not run bare `pytest` from the repo root.
+4. Confirm the pytest and quality-gate results recorded by that sequence.
 5. Run live vault dry-run with `--dry-run-evidence-out`.
 6. Review the expected live vault changes and the generated evidence.
 7. Apply actual live vault write only after explicit user intent for the actual write.

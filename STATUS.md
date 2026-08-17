@@ -1,5 +1,8 @@
 # STATUS.md
 
+이 문서는 현재 확인된 저장소·운영 사실만 기록한다. 다음 작업과 잔여
+위험은 `AI_HANDOFF.md`, 계약과 검증 증거는 `ACCEPTANCE_TRACE.md`가 담당한다.
+
 ## Current Phase
 
 P1/P2/P3 governed baseline maintenance, data-contract evolution, and FX
@@ -12,11 +15,10 @@ The repository is a clean baseline for 06_Stock automation, prompts, templates,
 and review docs. It is not the live stock vault and must not contain private
 broker exports or generated personal investment records.
 
-As of 2026-08-17, the runtime-validated and post-push repository basis is
-`main` commit `bdfb1e4`. It includes the source-index-safe holdings snapshot
-as-of fallback, the July Portfolio update/freshness displays, broker
-snapshot-date preservation, REC-EX-12 realized PnL review-bucket
-disambiguation, and the documented Company template roles.
+As of 2026-07-12, the validated implementation at `main` commit `0d7a2c6`
+includes the source-index-safe holdings snapshot as-of fallback in addition to
+the July Portfolio update/freshness displays and broker snapshot-date
+preservation.
 
 The as-of register applies only to holdings/balance rows that lack a
 broker-provided snapshot date. It preserves broker dates, never promotes a
@@ -54,26 +56,22 @@ backfill, or automatic closure.
 Use `VERIFICATION.md` for the command contract and `ACCEPTANCE_TRACE.md` for the
 durable evidence record.
 
-The 2026-08-17 post-push clean-clone verification of runtime commit `bdfb1e4`
-recorded:
+The 2026-08-18 current worktree validation recorded:
 
-- actual remote `main`: `bdfb1e4`, with no additional remote branches or tags;
-- full OS-local pytest: 347 passed;
-- quality gate: 19 checks passed with no warning;
+- split-module pytest: 349 passed;
+- quality gate: 19 checks passed;
+- pre/post split pytest node IDs: 291/291 equivalent;
+- original test/helper functions: 327 AST-equivalent with no mismatch;
+- original schema constants: 11 AST-equivalent with no mismatch;
+- QuickAdd JavaScript syntax check: passed;
+- repository Python cache artifacts: 0;
 - `git diff --check`: passed;
-- tracked restricted/private files: 0;
-- repo-local `.venv`, `.pytest_cache`, `70_Imports/raw`, and
-  `70_Imports/processed` in the clean clone: absent;
-- Company authority and folder-scaffold template blob hashes: identical;
-- clean-clone `git fsck`: no errors or fatal findings.
+- the verification snapshot applies to the reviewed change set; use live
+  `git status` and `git log` output for current commit, ahead/behind, and
+  publication state rather than treating this dated snapshot as authority;
+- live vault, provider network, push, tag, release, and Git GC: not run.
 
-This documentation-only rebaseline does not alter runtime behavior or the live
-vault. Pytest and the quality gate were **NOT RUN** again for the documentation
-edit because the immediately preceding clean-clone verification above is the
-runtime evidence for `bdfb1e4`; `git diff --check` and documentation scope checks
-remain required for this edit.
-
-The historical 2026-07-11 implementation and live-apply validation recorded:
+The 2026-07-11 implementation and live-apply validation recorded:
 
 - holdings snapshot as-of focused tests: 7 passed;
 - full pytest: 347 passed;

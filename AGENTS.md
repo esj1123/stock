@@ -21,7 +21,7 @@ Before changing files, read these repository-level contracts in order:
 ## Project Scope
 - This repository is the clean GitHub baseline for `06_Stock` automation code, templates, prompts, and documentation.
 - It is not the live investment vault and it is not the actual Obsidian folder.
-- The Codex workspace `C:\Users\KSLV-II\Desktop\Codex\stock` is a baseline/review repository only.
+- The current Git worktree root is the baseline/review repository; its absolute path is environment-specific.
 - The actual live/final Obsidian vault is [C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock](C:/Users/KSLV-II/Desktop/Obsidian/ESJ/06_Stock/).
 - The live Google Drive `06_Stock` vault must remain local/private.
 - The standard entrypoint is `70_Imports/scripts/main.py`.
@@ -32,7 +32,7 @@ Before changing files, read these repository-level contracts in order:
 - Never begin by editing the live Google Drive vault.
 - First modify and validate this GitHub baseline, then run tests, the quality gate, and a live-vault dry-run.
 - All live-vault work and final Obsidian output must be applied under `C:\Users\KSLV-II\Desktop\Obsidian\ESJ\06_Stock`.
-- Do not treat `C:\Users\KSLV-II\Desktop\Codex\stock` as the final Obsidian vault or final note destination.
+- Do not treat the current Git worktree root as the final Obsidian vault or final note destination.
 - Actual live-vault writes require an expected dry-run result and explicit user intent for the live write.
 - Do not copy live vault files into this repository.
 
@@ -57,22 +57,13 @@ Before changing files, read these repository-level contracts in order:
 ## Required Checks Before Closeout
 - Review the diff for duplicate symbols, unnecessary new files, shared utility pollution, scope creep, and accidental private-data exposure.
 - Do not run bare `python -m pytest` or `pytest` from this repository.
-- Use the OS-local venv and pytest temp roots:
-
-  ```powershell
-  $VenvPython = Join-Path $env:LOCALAPPDATA "06_Stock\.venv\Scripts\python.exe"
-  $env:STOCK_PYTEST_TMPDIR = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_cases"
-  cd 70_Imports/scripts
-  & $VenvPython -m pytest -p no:cacheprovider --basetemp (Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_pytest")
-  cd ../..
-  & $VenvPython scripts/quality_gate.py
-  ```
+- `VERIFICATION.md` is the single authority for the OS-local venv, pytest temp roots, full pytest, quality gate, and closeout command sequence.
 
 - Before any live vault write, run the import against the live vault with `--dry-run` and inspect the expected file changes.
 - Report changed files, commands run, safety checks, and any unresolved risks.
 
 ## Files Allowed To Edit
-- Root policy/docs: `AGENTS.md`, `README.md`, `ACCEPTANCE_TRACE.md`.
+- Root policy/docs listed in the read order may be edited only when the task explicitly requests the corresponding contract, status, verification, or handoff change.
 - Automation docs and prompt/template baselines under `00_Config/`, `05_Principles/`, `10_Dashboard/`, `40_Knowledge/`, and `99_Templates/` when the task asks for baseline documentation/template changes.
 - Pipeline code under `70_Imports/scripts/`.
 - Import templates under `70_Imports/templates/`.

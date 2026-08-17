@@ -9,7 +9,7 @@ Define phase-gated work for 06_Stock baseline automation.
 | phase | goal | allowed work | verification | exit criteria | status |
 |---|---|---|---|---|---|
 | P0 | Governance baseline | Root contracts, scope, safety, verification, and handoff docs | Changed-file review and diff hygiene | Future Codex work has clear read order and no-touch zones | active |
-| P1 | Baseline maintenance | Docs, prompts, templates, import code, synthetic tests | `python -m pytest`, `python scripts/quality_gate.py` | Tests and quality gate pass or honest NOT RUN reason recorded | active |
+| P1 | Baseline maintenance | Docs, prompts, templates, import code, synthetic tests | Canonical local sequence in `VERIFICATION.md` | Tests and quality gate pass or honest NOT RUN reason recorded | active |
 | P2 | Data-contract evolution | Changes to import classification, accounting, QA, dashboards, or FX requirements | Focused tests plus full local verification | ACCEPTANCE_TRACE rows updated | active |
 | P3 | FX provenance review support | Report-only candidate fetching/validation and sanitized runbooks | Focused FX tests and quality gate | Review-gated decisions remain explicit | active |
 | P4 | Live-vault dry-run | Dry-run against live vault with evidence output outside repo/vault | Dry-run evidence review | Expected changes reviewed and recorded | approval required |

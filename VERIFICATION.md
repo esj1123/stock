@@ -6,15 +6,48 @@ Define verification expectations for 06_Stock baseline automation.
 
 ## Standard Local Verification
 
-For behavior changes, run from the repository root unless noted otherwise:
+For behavior changes, use the OS-local virtual environment and temp roots. This
+is the canonical local verification command sequence; other documents should
+link here instead of defining a different pytest invocation.
 
 ```powershell
-cd 70_Imports\scripts
-python -m pytest
-cd ..\..
-python scripts\quality_gate.py
+$ErrorActionPreference = "Stop"
+$RepoRoot = (git rev-parse --show-toplevel).Trim()
+if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($RepoRoot)) {
+    throw "could not resolve the Git worktree root"
+}
+$VenvPython = Join-Path $env:LOCALAPPDATA "06_Stock\.venv\Scripts\python.exe"
+$env:STOCK_PYTEST_TMPDIR = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_cases"
+$PytestBaseTmp = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_pytest"
+
+if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
+    throw "OS-local venv Python not found: $VenvPython"
+}
+
+Set-Location (Join-Path $RepoRoot "70_Imports\scripts")
+& $VenvPython -B -m pytest -p no:cacheprovider --basetemp $PytestBaseTmp
+if ($LASTEXITCODE -ne 0) { throw "pytest failed with exit $LASTEXITCODE" }
+
+Set-Location $RepoRoot
+& $VenvPython -B scripts\quality_gate.py
+if ($LASTEXITCODE -ne 0) { throw "quality gate failed with exit $LASTEXITCODE" }
+
+$RepoCaches = @(
+    Get-ChildItem -LiteralPath $RepoRoot -Recurse -Force -ErrorAction Stop |
+        Where-Object {
+            $_.Name -eq "__pycache__" -or
+            $_.Name -eq ".pytest_cache" -or
+            (-not $_.PSIsContainer -and $_.Extension -eq ".pyc")
+        }
+)
+if ($RepoCaches.Count -ne 0) {
+    throw "repository Python cache artifacts found: $($RepoCaches.Count)"
+}
+
 git diff --check
+if ($LASTEXITCODE -ne 0) { throw "git diff --check failed with exit $LASTEXITCODE" }
 git status --short --branch
+if ($LASTEXITCODE -ne 0) { throw "git status failed with exit $LASTEXITCODE" }
 ```
 
 The quality gate runs the import pipeline against the repository baseline,
@@ -27,8 +60,11 @@ AUTO-GENERATED blocks for sensitive-pattern candidates.
 For a scoped docs-only contract change, the minimum acceptable verification is:
 
 ```powershell
+$ErrorActionPreference = "Stop"
 git status --short --branch
+if ($LASTEXITCODE -ne 0) { throw "git status failed with exit $LASTEXITCODE" }
 git diff --check
+if ($LASTEXITCODE -ne 0) { throw "git diff --check failed with exit $LASTEXITCODE" }
 ```
 
 Then review changed files against:
