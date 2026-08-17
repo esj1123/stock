@@ -83,7 +83,8 @@
 | STK-AT-63 | data_contract | Optional private holdings snapshot as-of register may populate current holdings snapshot dates only for holdings/balance rows missing broker snapshot dates. | `70_Imports/scripts/portfolio_model.py::load_holdings_snapshot_asof_register`, `apply_holdings_snapshot_asof_register`, `apply_holdings_snapshot_asof_register_to_source_index`, `70_Imports/scripts/obsidian_writer.py::holdings_snapshot_date_status`, `70_Imports/scripts/tests/test_pipeline.py::test_generate_reports_applies_user_confirmed_holdings_snapshot_asof_register`, `test_source_index_missing_market_accepts_one_date_across_market_scopes`, `test_source_index_missing_market_blocks_multiple_register_dates`, `test_holdings_missing_market_does_not_use_market_specific_register`, `test_holdings_snapshot_asof_register_preserves_broker_snapshot_date`, `test_holdings_snapshot_asof_register_ignores_transaction_history_source`, `test_portfolio_dashboard_labels_user_confirmed_snapshot_date` | PASS | 2026-07-11 | The private register is display/review context. Marketless source-index rows may use source/account candidates only when they resolve to one valid date; multiple dates remain `asof_register_conflict`. Holdings keep strict market matching, broker dates remain authoritative, transaction history is not promoted, and REC-EX-01/REC-EX-12 remain unchanged. |
 
 ## Latest Validation Note
-- 2026-07-11 working-tree validation ran on `main` parent `a684ec4`.
+- 2026-07-11 validation covered the source-index fallback that is now committed
+  at `main` commit `0d7a2c6`.
 - Holdings snapshot as-of focused tests: 7 passed. Full OS-local pytest: 347 passed. `scripts/quality_gate.py`: exit 0 with all 19 checks passed and no warning.
 - The approved private register contains three user-confirmed scopes for `2026-06-30`.
 - Fresh live-vault dry-run exited 0; evidence: `holdings_snapshot_source_index_fallback_dry_run_20260711_221647.json`.
@@ -92,7 +93,8 @@
 - Portfolio preview includes `2026-06-30`, the user-confirmed date label, and the broker-export disclaimer.
 - One unrelated missing Company note warning remained; no note was created.
 - `git diff --check`: PASS. No GitHub Actions run was available, so local pytest, quality gate, and dry-run evidence are the operating verification record.
-- No actual processed/generated live write, provider network access, or REC closure was performed. REC-EX-01 and REC-EX-12 remain review-gated.
+- The explicitly approved 2026-07-11 actual live write exited 0. Post-write aggregate checks confirmed holdings 15/15, marketless source-index rows 3/3, transaction-history applications 0, conflicts 0, and an unchanged raw metadata fingerprint.
+- The 2026-07-12 Portfolio screen check confirmed the user-confirmed `2026-06-30` label and broker-export disclaimer. No provider network access or REC closure was performed; REC-EX-01 and REC-EX-12 remain review-gated.
 
 ## New File Rationale
 | File | Why Existing Files Were Insufficient | Status |

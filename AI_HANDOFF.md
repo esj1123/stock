@@ -25,8 +25,8 @@ separate approval.
 
 ## Current Baseline
 
-- Validated implementation: source-index fallback patch tested on `main` parent
-  `a684ec4`.
+- Validated implementation: source-index fallback patch committed at `main`
+  commit `0d7a2c6`.
 - 2026-07-11 validation: 7 focused holdings snapshot as-of tests passed, full
   pytest passed with 347 tests, and all 19 quality-gate checks passed.
 - The private `holdings_snapshot_asof.csv` register fills only missing
@@ -36,8 +36,11 @@ separate approval.
 - The approved private register contains three scopes for `2026-06-30`. Fresh
   dry-run evidence confirms holdings 15/15 and marketless source index 3/3, with
   zero unexpected applications and zero conflicts.
-- Actual processed/generated live-vault output remains unwritten and requires
-  separate explicit approval.
+- An explicitly approved actual live write completed on 2026-07-11 with exit 0.
+  Post-write checks confirmed holdings 15/15, marketless source index 3/3, zero
+  transaction-history promotion, zero conflicts, and an unchanged raw metadata
+  fingerprint. The 2026-07-12 Portfolio screen check confirmed the
+  user-confirmed date label and broker-export disclaimer.
 - FX candidates and reviewed official-FX-unavailable context do not close
   REC-EX-01 or REC-EX-12 and do not authorize date substitution.
 
@@ -98,10 +101,12 @@ unless the owner explicitly asks.
 - The 2026-07-11 fallback validation found no repo-root `.venv`, no quality-gate
   warning, and no GitHub Actions run; local pytest and quality-gate results are
   the current repository evidence.
-- The private register exists, and fresh OS-local dry-run evidence confirms the
-  expected holdings/source-index application without live output mutation.
-- Repeat the dry-run if code, register, or raw input changes. Actual live write
-  still requires the matching evidence review and separate explicit approval.
+- The private register exists, fresh OS-local dry-run evidence confirmed the
+  expected holdings/source-index application, and the separately approved
+  actual live write completed with matching post-write aggregates.
+- Repeat the dry-run if code, register, or raw input changes. Any future actual
+  live write still requires matching evidence review and separate explicit
+  approval.
 
 ## Closeout Format
 
