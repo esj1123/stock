@@ -25,10 +25,15 @@ separate approval.
 
 ## Current Baseline
 
-- Validated implementation: source-index fallback patch committed at `main`
-  commit `0d7a2c6`.
-- 2026-07-11 validation: 7 focused holdings snapshot as-of tests passed, full
-  pytest passed with 347 tests, and all 19 quality-gate checks passed.
+- Runtime-validated and post-push repository basis: `main` commit `bdfb1e4`.
+  It includes the source-index fallback, REC-EX-12 realized PnL review-bucket
+  disambiguation, and the documented Company template roles.
+- 2026-08-17 clean-clone validation of `bdfb1e4`: full pytest passed with 347
+  tests, all 19 quality-gate checks passed without warning, `git diff --check`
+  passed, and `git fsck` reported no errors or fatal findings.
+- The clean clone contained no tracked restricted/private files and no
+  repo-local `.venv`, `.pytest_cache`, `70_Imports/raw`, or
+  `70_Imports/processed`. The two Company template blob hashes were identical.
 - The private `holdings_snapshot_asof.csv` register fills only missing
   holdings/balance snapshot dates. Broker dates win, transaction-history dates
   are never promoted, and applied dates are labeled as user-confirmed
@@ -98,9 +103,16 @@ unless the owner explicitly asks.
   explicitly out of scope.
 - Mark skipped checks as `NOT RUN` with reasons.
 - For live writes, require dry-run evidence and explicit live-write intent.
-- The 2026-07-11 fallback validation found no repo-root `.venv`, no quality-gate
-  warning, and no GitHub Actions run; local pytest and quality-gate results are
-  the current repository evidence.
+- The 2026-08-17 post-push clean-clone verification of runtime commit `bdfb1e4`
+  passed full pytest (347), all 19 quality-gate checks without warning,
+  `git diff --check`, and `git fsck`. Actual remote `main` matched `bdfb1e4` and
+  had no additional branches or tags at verification time.
+- For the documentation-only post-push rebaseline, pytest and the quality gate
+  are `NOT RUN`: no runtime files changed, and the immediately preceding clean-
+  clone results above remain the runtime evidence. Run `git diff --check` and
+  documentation scope checks before closing the documentation edit.
+- No GitHub Actions run was available; the clean-clone pytest and quality-gate
+  results are the current repository evidence.
 - The private register exists, fresh OS-local dry-run evidence confirmed the
   expected holdings/source-index application, and the separately approved
   actual live write completed with matching post-write aggregates.

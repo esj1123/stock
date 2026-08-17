@@ -12,10 +12,11 @@ The repository is a clean baseline for 06_Stock automation, prompts, templates,
 and review docs. It is not the live stock vault and must not contain private
 broker exports or generated personal investment records.
 
-As of 2026-07-12, the validated implementation at `main` commit `0d7a2c6`
-includes the source-index-safe holdings snapshot as-of fallback in addition to
-the July Portfolio update/freshness displays and broker snapshot-date
-preservation.
+As of 2026-08-17, the runtime-validated and post-push repository basis is
+`main` commit `bdfb1e4`. It includes the source-index-safe holdings snapshot
+as-of fallback, the July Portfolio update/freshness displays, broker
+snapshot-date preservation, REC-EX-12 realized PnL review-bucket
+disambiguation, and the documented Company template roles.
 
 The as-of register applies only to holdings/balance rows that lack a
 broker-provided snapshot date. It preserves broker dates, never promotes a
@@ -53,7 +54,26 @@ backfill, or automatic closure.
 Use `VERIFICATION.md` for the command contract and `ACCEPTANCE_TRACE.md` for the
 durable evidence record.
 
-The 2026-07-11 implementation and live-apply validation recorded:
+The 2026-08-17 post-push clean-clone verification of runtime commit `bdfb1e4`
+recorded:
+
+- actual remote `main`: `bdfb1e4`, with no additional remote branches or tags;
+- full OS-local pytest: 347 passed;
+- quality gate: 19 checks passed with no warning;
+- `git diff --check`: passed;
+- tracked restricted/private files: 0;
+- repo-local `.venv`, `.pytest_cache`, `70_Imports/raw`, and
+  `70_Imports/processed` in the clean clone: absent;
+- Company authority and folder-scaffold template blob hashes: identical;
+- clean-clone `git fsck`: no errors or fatal findings.
+
+This documentation-only rebaseline does not alter runtime behavior or the live
+vault. Pytest and the quality gate were **NOT RUN** again for the documentation
+edit because the immediately preceding clean-clone verification above is the
+runtime evidence for `bdfb1e4`; `git diff --check` and documentation scope checks
+remain required for this edit.
+
+The historical 2026-07-11 implementation and live-apply validation recorded:
 
 - holdings snapshot as-of focused tests: 7 passed;
 - full pytest: 347 passed;

@@ -81,10 +81,25 @@
 | STK-AT-61 | dashboard_visualization | Portfolio dashboard must explain current-holdings snapshot freshness without promoting transaction history into holdings. | `70_Imports/scripts/obsidian_writer.py`, `70_Imports/scripts/tests/test_pipeline.py::test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposure` | PASS | 2026-07-01 | Portfolio renders aggregate holdings/balance source presence, current holdings row count, snapshot-date availability, and transaction-history source count near the current holdings section. This is display context only: transaction-history rows are not inferred into current holdings, raw filenames and raw rows are not printed, no new processed CSV is created, and REC-EX-01/REC-EX-12 closure remains unchanged. |
 | STK-AT-62 | dashboard_visualization | Portfolio dashboard may show processed-output update reflection counts without creating portfolio-change inference. | `70_Imports/scripts/obsidian_writer.py`, `70_Imports/scripts/tests/test_pipeline.py::test_portfolio_dashboard_surfaces_reconciliation_status_and_currency_exposure` | PASS | 2026-07-01 | Portfolio renders aggregate transaction, realized PnL, income, current holdings, FX requirement, holdings-source, and transaction-source counts as current processed-output state, not per-run deltas. The section explains that transaction-history ledgers may update while current holdings/current valuation still require a holdings/balance snapshot. No raw filenames, raw rows, account identifiers, holdings details, trade details, amounts, new processed CSV, REC closure, or investment advice are created. |
 | STK-AT-63 | data_contract | Optional private holdings snapshot as-of register may populate current holdings snapshot dates only for holdings/balance rows missing broker snapshot dates. | `70_Imports/scripts/portfolio_model.py::load_holdings_snapshot_asof_register`, `apply_holdings_snapshot_asof_register`, `apply_holdings_snapshot_asof_register_to_source_index`, `70_Imports/scripts/obsidian_writer.py::holdings_snapshot_date_status`, `70_Imports/scripts/tests/test_pipeline.py::test_generate_reports_applies_user_confirmed_holdings_snapshot_asof_register`, `test_source_index_missing_market_accepts_one_date_across_market_scopes`, `test_source_index_missing_market_blocks_multiple_register_dates`, `test_holdings_missing_market_does_not_use_market_specific_register`, `test_holdings_snapshot_asof_register_preserves_broker_snapshot_date`, `test_holdings_snapshot_asof_register_ignores_transaction_history_source`, `test_portfolio_dashboard_labels_user_confirmed_snapshot_date` | PASS | 2026-07-11 | The private register is display/review context. Marketless source-index rows may use source/account candidates only when they resolve to one valid date; multiple dates remain `asof_register_conflict`. Holdings keep strict market matching, broker dates remain authoritative, transaction history is not promoted, and REC-EX-01/REC-EX-12 remain unchanged. |
+| STK-AT-64 | dashboard_visualization | REC-EX-12 realized PnL review-bucket aggregation must not classify FIFO lot-coverage wording containing a quantity as intrinsic unit/amount ambiguity unless an independent unit/amount ambiguity signal is present. | `70_Imports/scripts/obsidian_writer.py::realized_pnl_review_gate_note`, `70_Imports/scripts/tests/test_pipeline.py::test_qa_and_review_dashboards_surface_realized_pnl_review_buckets`, commit `a53b8ec`, post-push clean-clone verification of `bdfb1e4` | PASS | 2026-08-17 | The synthetic regression reports lot-coverage count 3 and intrinsic unit/amount ambiguity count 2; the prior wording-only overlap is excluded. Independent overlapping review context remains visible and non-closing. This is display/review disambiguation only; REC-EX-01/REC-EX-12 closure and investment decisions remain unchanged. |
 
 ## Latest Validation Note
-- 2026-07-11 validation covered the source-index fallback that is now committed
-  at `main` commit `0d7a2c6`.
+- 2026-08-17 post-push clean-clone verification covered runtime commit
+  `bdfb1e4`: full OS-local pytest 347 passed, `scripts/quality_gate.py` passed all
+  19 checks without warning, `git diff --check` passed, and `git fsck` reported
+  no errors or fatal findings.
+- Actual remote `main` matched `bdfb1e4` with no additional remote branches or
+  tags. The clean clone had 0 tracked restricted/private files, no repo-local
+  `.venv`, `.pytest_cache`, `70_Imports/raw`, or `70_Imports/processed`, and
+  identical Company template blob hashes.
+- For this documentation-only rebaseline, pytest and the quality gate are
+  **NOT RUN** because no runtime files changed and the immediately preceding
+  clean-clone receipt above remains the runtime evidence. `git diff --check` and
+  documentation scope checks are still required.
+- The documentation rebaseline does not perform a live-vault write, provider
+  network access, or REC closure. REC-EX-01 and REC-EX-12 remain review-gated.
+- Historical 2026-07-11 validation covered the source-index fallback later
+  included in the `bdfb1e4` runtime basis.
 - Holdings snapshot as-of focused tests: 7 passed. Full OS-local pytest: 347 passed. `scripts/quality_gate.py`: exit 0 with all 19 checks passed and no warning.
 - The approved private register contains three user-confirmed scopes for `2026-06-30`.
 - Fresh live-vault dry-run exited 0; evidence: `holdings_snapshot_source_index_fallback_dry_run_20260711_221647.json`.
