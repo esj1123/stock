@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import csv
 import hashlib
+import os
 import re
 import subprocess
 import sys
@@ -437,7 +438,16 @@ def changed_entries(before: dict[str, object], after: dict[str, object]) -> list
 
 
 def run_command(args: list[str], cwd: Path) -> tuple[int, str]:
-    proc = subprocess.run(args, cwd=cwd, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    child_env = os.environ.copy()
+    child_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    proc = subprocess.run(
+        args,
+        cwd=cwd,
+        env=child_env,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+    )
     return proc.returncode, proc.stdout
 
 
