@@ -968,11 +968,13 @@ def realized_pnl_review_gate_note(
         | reason.str.contains("lot", regex=False)
     )
     lot_gap_count = int((lot_mask & review_mask).sum())
+    quantity_signal = reason.str.contains("quantity", regex=False)
+    quantity_missing_signal = reason.str.contains("quantity missing", regex=False)
     unit_mask = (
         amount_status.eq("unit_ambiguous")
         | reason.str.contains("unit", regex=False)
-        | reason.str.contains("quantity", regex=False)
         | reason.str.contains("price", regex=False)
+        | (quantity_signal & (~lot_mask | quantity_missing_signal))
     )
     unit_ambiguous_count = int((unit_mask & review_mask).sum())
 

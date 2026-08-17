@@ -7119,6 +7119,13 @@ def test_qa_and_review_dashboards_surface_realized_pnl_review_buckets(tmp_path: 
             "fx_status": "fx_missing",
             "amount_review_reason": "sell quantity exceeds matched buy lots; same-date FX provenance required",
         },
+        {
+            "position_status": "closed",
+            "cost_basis_method": "fifo",
+            "amount_review_status": "unit_ambiguous",
+            "fx_status": "not_required",
+            "amount_review_reason": "sell quantity missing; sell quantity exceeds matched buy lots",
+        },
     ]
     pd.DataFrame(realized_rows, columns=REALIZED_PNL_OUTPUT_COLUMNS).to_csv(processed / "processed_realized_pnl.csv", index=False)
     qa = pd.DataFrame([
@@ -7175,6 +7182,8 @@ def test_qa_and_review_dashboards_surface_realized_pnl_review_buckets(tmp_path: 
         assert "unreviewed FX requirement keys `0`" in content
         assert "| bucket | count | meaning |" not in content
         assert "> - reviewed official-FX-unavailable carry-through: `2`" in content
+        assert "> - FIFO lot coverage gap: `3`" in content
+        assert "> - unit/amount ambiguous: `2`" in content
     assert qa_content.index("REC-EX-12 realized PnL review buckets") < qa_content.index("## Exception Summary")
     assert review_content.index("REC-EX-12 realized PnL review buckets") < review_content.index("## Snapshot")
 
