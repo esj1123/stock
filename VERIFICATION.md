@@ -19,10 +19,17 @@ if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($RepoRoot)) {
 $VenvPython = Join-Path $env:LOCALAPPDATA "06_Stock\.venv\Scripts\python.exe"
 $env:STOCK_PYTEST_TMPDIR = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_cases"
 $PytestBaseTmp = Join-Path $env:LOCALAPPDATA "06_Stock\pytest_tmp_pytest"
+$NodeCommand = Get-Command node -CommandType Application -ErrorAction SilentlyContinue
 
 if (-not (Test-Path -LiteralPath $VenvPython -PathType Leaf)) {
     throw "OS-local venv Python not found: $VenvPython"
 }
+if ($null -eq $NodeCommand) {
+    throw "Node.js is required for the QuickAdd contract verification"
+}
+
+& $NodeCommand.Source --check (Join-Path $RepoRoot "00_Config\QuickAdd\Stock_Command_Center.js")
+if ($LASTEXITCODE -ne 0) { throw "QuickAdd JavaScript syntax check failed with exit $LASTEXITCODE" }
 
 Set-Location (Join-Path $RepoRoot "70_Imports\scripts")
 & $VenvPython -B -m pytest -p no:cacheprovider --basetemp $PytestBaseTmp
@@ -54,6 +61,10 @@ The quality gate runs the import pipeline against the repository baseline,
 executes pytest, checks raw immutability, checks generated Markdown outside-block
 preservation, validates processed output contracts, and scans generated Markdown
 AUTO-GENERATED blocks for sensitive-pattern candidates.
+
+Node.js is a required verification dependency because pytest executes the
+QuickAdd JavaScript report contract. Missing Node.js is a verification failure,
+not a skipped or passing QuickAdd check.
 
 ## Docs-Only Verification
 

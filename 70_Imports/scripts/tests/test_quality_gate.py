@@ -775,7 +775,11 @@ def test_generated_markdown_sensitive_scan_detects_candidate(tmp_path: Path):
 def test_quickadd_report_schema_v2_uses_current_cli_markers():
     node = shutil.which("node") or shutil.which("node.exe")
     if node is None:
-        pytest.skip("Node.js is required to execute the QuickAdd contract test")
+        pytest.fail(
+            "Node.js is required to execute the QuickAdd contract test; "
+            "the canonical verification must not pass without running it",
+            pytrace=False,
+        )
 
     script_path = Path(__file__).resolve().parents[3] / "00_Config" / "QuickAdd" / "Stock_Command_Center.js"
     harness = r"""
