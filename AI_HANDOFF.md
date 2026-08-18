@@ -108,9 +108,10 @@ unless the owner explicitly asks.
   before closing behavior changes unless explicitly out of scope.
 - Mark skipped checks as `NOT RUN` with reasons.
 - For live writes, require dry-run evidence and explicit live-write intent.
-- The 2026-07-11 fallback validation found no repo-root `.venv`, no quality-gate
-  warning, and no GitHub Actions run; local pytest and quality-gate results are
-  the current repository evidence.
+- The 2026-08-18 canonical validation passed 349 tests and all 19 quality-gate
+  checks with the required Node preflight and zero repository Python caches.
+  No GitHub Actions run is available, so this local result is the current
+  repository verification evidence.
 - The private register exists, fresh OS-local dry-run evidence confirmed the
   expected holdings/source-index application, and the separately approved
   actual live write completed with matching post-write aggregates.
@@ -120,12 +121,14 @@ unless the owner explicitly asks.
 
 ## Next Work And Residual Risk
 
-- Before a local commit decision, confirm that review findings are resolved and
-  rerun the canonical verification sequence. Commit, push, tag, release, PR,
-  and publication remain separate owner decisions under the current scope.
-- If commit authorization is given, preserve the planned documentation,
-  QuickAdd, quality-gate, and test-split boundaries rather than combining
-  unrelated changes.
+- The planned nine-commit local structure series is complete through `a8292ca`;
+  review follow-up `5fc3e03` closes the fail-open Node verification finding,
+  and this handoff update closes the stale next-step finding.
+- Use live `git status` and `git log` for the current HEAD and ahead/behind
+  state. Push, tag, release, PR, and publication remain separate owner
+  decisions and have not been performed.
+- Rerun the canonical verification sequence after any later behavior or test
+  change; do not reuse this dated result for a changed tree.
 - The quality gate executes against the baseline repository and may refresh
   ignored, private-free processed verification artifacts. Do not add or commit
   those generated files.
