@@ -69,7 +69,9 @@ The 2026-08-18 current worktree validation recorded:
 - the verification snapshot applies to the reviewed change set; use live
   `git status` and `git log` output for current commit, ahead/behind, and
   publication state rather than treating this dated snapshot as authority;
-- live vault, provider network, push, tag, release, and Git GC: not run.
+- published origin history through `682da50` is integrated into the reviewed
+  change set;
+- live vault, provider network, tag, release, and Git GC: not run.
 
 The 2026-07-11 implementation and live-apply validation recorded:
 

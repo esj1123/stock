@@ -31,6 +31,9 @@ separate approval.
   quality-gate cache hygiene, and test-module splitting. Use live `git status`
   and `git log` output for current commit, ahead/behind, and publication state;
   this handoff does not freeze those transient Git facts.
+- Published origin history through `682da50` is integrated. Published commits
+  `a53b8ec` and `560cfe1` replace tree-equivalent local duplicates; the nine
+  unique structure and verification commits were replayed above that history.
 - The 2026-08-18 worktree verification passed 349 pytest tests and all 19
   quality-gate checks; pre/post split node IDs and original test/helper ASTs are
   equivalent, and repository Python cache artifacts are absent.
@@ -121,12 +124,13 @@ unless the owner explicitly asks.
 
 ## Next Work And Residual Risk
 
-- The planned nine-commit local structure series is complete through `a8292ca`;
-  review follow-up `5fc3e03` closes the fail-open Node verification finding,
-  and this handoff update closes the stale next-step finding.
+- The published baseline and the nine unique structure/verification commits are
+  reconciled. Acceptance IDs preserve published `STK-AT-64` and use
+  `STK-AT-65` through `STK-AT-67` for the new contracts.
 - Use live `git status` and `git log` for the current HEAD and ahead/behind
   state. Push, tag, release, PR, and publication remain separate owner
-  decisions and have not been performed.
+  decisions; live refs are the authority for whether an approved action was
+  performed.
 - Rerun the canonical verification sequence after any later behavior or test
   change; do not reuse this dated result for a changed tree.
 - The quality gate executes against the baseline repository and may refresh
